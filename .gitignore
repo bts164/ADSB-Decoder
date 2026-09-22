@@ -1,0 +1,8 @@
+**/build*
+**.venv
+**.envrc
+**/CMakeUserPresets.json
+**/*.bin
+**/*.meta
+**/*.sigmf-*
+**/.claude
