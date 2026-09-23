@@ -35,6 +35,9 @@ class AdsbRecipe(ConanFile):
         # only -- fftw_options below drops the double/long-double builds
         # nothing here uses.
         self.requires("fftw/3.3.10")
+        # Aircraft position-history persistence (see aircraft_history.h) --
+        # a single-file on-disk store, updated live as frames decode.
+        self.requires("sqlite3/3.53.4")
 
     def configure(self):
         # Only the single-precision (float) library is used -- see

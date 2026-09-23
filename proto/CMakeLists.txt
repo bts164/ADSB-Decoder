@@ -22,6 +22,7 @@ find_package(librtlsdr REQUIRED)
 find_package(argparse REQUIRED)
 find_package(nlohmann_json REQUIRED)
 find_package(FFTW3 REQUIRED)
+find_package(SQLite3 REQUIRED)
 
 # ISPC_ROOT (e.g. via a project-local .envrc/direnv) points this at a
 # manually-extracted ispc release instead of a system package -- the ispc
@@ -61,6 +62,15 @@ add_executable(adsb
     src/main.cpp
     src/demod.cpp
     src/filter_bank.cpp
+    src/sigmf_meta.cpp
+    src/frame_decode.cpp
+    src/aircraft.cpp
+    src/pipeline.cpp
+    src/ws_publisher.cpp
+    src/aircraft_history.cpp
+    src/spectrum.cpp
+    src/rtlsdr_stream.cpp
+    src/file_stream.cpp
     src/tasksys.cpp
     ${ISPC_OBJ}
 )
@@ -74,6 +84,6 @@ target_compile_definitions(adsb PRIVATE ADSB_SAMPLES_PER_SYMBOL=${ADSB_SAMPLES_P
 
 find_package(Threads REQUIRED)
 target_link_libraries(adsb PRIVATE Threads::Threads coro::coro librtlsdr::librtlsdr argparse::argparse
-                                    nlohmann_json::nlohmann_json fftw::fftw)
+                                    nlohmann_json::nlohmann_json fftw::fftw SQLite::SQLite3)
 
 install(TARGETS adsb RUNTIME DESTINATION bin)

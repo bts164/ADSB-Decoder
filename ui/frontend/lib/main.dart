@@ -176,6 +176,17 @@ class _FrameTablePageState extends State<FrameTablePage> with SingleTickerProvid
 
   final Map<String, AircraftRecord> _aircraft = {};
   final Map<String, AircraftRecord> _pendingAircraft = {};
+
+  // Accumulated in-memory position history per aircraft, oldest first, for
+  // drawing a route trail on the map -- purely a running log of what's
+  // arrived since this client connected (see AircraftRecord's doc comment:
+  // each update is the aircraft's full current state, not a delta, so the
+  // trail has to be built up here rather than read off any single message).
+  // Capped per-aircraft so a long-running session doesn't grow this map
+  // unboundedly; the oldest points are dropped first, same trim policy as
+  // _frames.
+  static const int _maxTrailPoints = 1000;
+  final Map<String, List<LatLng>> _aircraftTrails = {};
   int _aircraftSortColumnIndex = 0;
   bool _aircraftSortAscending = true;
   Timer? _uiUpdateTimer;
@@ -246,6 +257,7 @@ class _FrameTablePageState extends State<FrameTablePage> with SingleTickerProvid
       _pendingFrames.clear();
       _aircraft.clear();
       _pendingAircraft.clear();
+      _aircraftTrails.clear();
       _mapAutoCentered = false;
       _latestStreamTimeS = 0;
       _aircraftLastSeenWallClock.clear();
@@ -282,6 +294,25 @@ class _FrameTablePageState extends State<FrameTablePage> with SingleTickerProvid
             case 'aircraft':
               final ac = AircraftRecord.fromJson(json);
               _pendingAircraft[ac.icao] = ac;
+            case 'history':
+              // Backend-persisted track for one aircraft, sent once right
+              // after connect (see proto/src/ws_publisher.cpp:handle_client)
+              // -- applied straight to _aircraftTrails rather than routed
+              // through _pendingAircraft, since it's a one-shot backfill of
+              // past points, not a live per-frame update.
+              final icao = json['icao'] as String;
+              final points = json['track'] as List;
+              final track = points
+                  .map((p) => p as Map<String, dynamic>)
+                  .where((p) => p['lat'] != null && p['lon'] != null)
+                  .map((p) => LatLng((p['lat'] as num).toDouble(), (p['lon'] as num).toDouble()))
+                  .toList();
+              if (track.length > _maxTrailPoints) {
+                track.removeRange(0, track.length - _maxTrailPoints);
+              }
+              setState(() {
+                _aircraftTrails[icao] = track;
+              });
             case 'spectrum':
               final rows = [..._spectrumHistory.value, SpectrumFrame.fromJson(json)];
               if (rows.length > _maxSpectrumRows) {
@@ -341,6 +372,13 @@ class _FrameTablePageState extends State<FrameTablePage> with SingleTickerProvid
       for (final ac in _pendingAircraft.values) {
         if (ac.lastSeenS > _latestStreamTimeS) _latestStreamTimeS = ac.lastSeenS;
         _aircraftLastSeenWallClock[ac.icao] = now;
+        if (ac.lat != null && ac.lon != null) {
+          final trail = _aircraftTrails.putIfAbsent(ac.icao, () => []);
+          trail.add(LatLng(ac.lat!, ac.lon!));
+          if (trail.length > _maxTrailPoints) {
+            trail.removeRange(0, trail.length - _maxTrailPoints);
+          }
+        }
       }
       _pendingAircraft.clear();
 
@@ -729,6 +767,18 @@ class _FrameTablePageState extends State<FrameTablePage> with SingleTickerProvid
             TileLayer(
               urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
               userAgentPackageName: 'com.example.adsb_ui',
+            ),
+            PolylineLayer(
+              polylines: [
+                for (final a in positioned)
+                  if ((_aircraftTrails[a.icao]?.length ?? 0) > 1)
+                    Polyline(
+                      points: _aircraftTrails[a.icao]!,
+                      strokeWidth: a.icao == _selectedIcao ? 3 : 2,
+                      color: (_isStale(a) ? Colors.grey : Theme.of(context).colorScheme.primary)
+                          .withValues(alpha: a.icao == _selectedIcao ? 0.9 : 0.5),
+                    ),
+              ],
             ),
             MarkerLayer(
               markers: [

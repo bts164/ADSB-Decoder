@@ -6,3 +6,6 @@
 **/*.meta
 **/*.sigmf-*
 **/.claude
+**/*.sqlite
+**/*.sqlite-shm
+**/*.sqlite-wal
