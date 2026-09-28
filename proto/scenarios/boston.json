@@ -1,0 +1,9 @@
+{
+  "aircraft": [
+    {"icao": "A1B2C3", "callsign": "SIM0001", "lat_deg": 42.3601, "lon_deg": -71.0589, "alt_ft": 35000, "ground_speed_kt": 450, "track_deg": 90,  "vrate_fpm": 0,     "amplitude": 1.0},
+    {"icao": "A4D5E6", "callsign": "SIM0002", "lat_deg": 42.8000, "lon_deg": -70.5000, "alt_ft": 20000, "ground_speed_kt": 250, "track_deg": 200, "vrate_fpm": -1500, "amplitude": 0.7},
+    {"icao": "A7F801", "callsign": "SIM0003", "lat_deg": 41.9000, "lon_deg": -72.0000, "alt_ft": 28000, "ground_speed_kt": 480, "track_deg": 45,  "vrate_fpm": 1200,  "amplitude": 0.5},
+    {"icao": "AA1234", "callsign": "SIM0004", "lat_deg": 43.1000, "lon_deg": -71.9000, "alt_ft": 8000,  "ground_speed_kt": 180, "track_deg": 315, "vrate_fpm": 0,     "amplitude": 0.35},
+    {"icao": "ACBEEF", "callsign": "SIM0005", "lat_deg": 42.0000, "lon_deg": -70.2000, "alt_ft": 41000, "ground_speed_kt": 520, "track_deg": 270, "vrate_fpm": 0,     "amplitude": 0.25}
+  ]
+}

@@ -6,7 +6,7 @@ class AdsbRecipe(ConanFile):
     name = "adsb"
     package_type = "application"
     settings = "os", "compiler", "build_type", "arch"
-    exports_sources = "CMakeLists.txt", "include/*", "src/*", "ispc/*"
+    exports_sources = "CMakeLists.txt", "src/*", "tests/CMakeLists.txt", "tests/*.cpp", "scenarios/*"
 
     # No version attribute: this is developed and re-exported/rebuilt as
     # often as coro is (see requirements() below), so pass --version
@@ -31,13 +31,20 @@ class AdsbRecipe(ConanFile):
         self.requires("argparse/3.2")
         self.requires("nlohmann_json/3.11.3")
         # Waterfall/spectrum view: FFT over raw pre-resample IQ blocks in
-        # --rtlsdr mode (see main.cpp's run_rtlsdr_stream). float precision
+        # rtlsdr mode (see main.cpp's run_rtlsdr_stream). float precision
         # only -- fftw_options below drops the double/long-double builds
         # nothing here uses.
         self.requires("fftw/3.3.10")
         # Aircraft position-history persistence (see aircraft_history.h) --
         # a single-file on-disk store, updated live as frames decode.
         self.requires("sqlite3/3.53.4")
+        # vita49_send's packet storage (uninitialized xt::xtensor buffers);
+        # also intended for the planned ADS-B message simulator there.
+        self.requires("xtensor/0.25.0")
+        # adsb --debug-h5: per-frame IQ + demod state for offline debugging
+        # (see frame_recorder.h). HighFive is a header-only C++ wrapper over
+        # the HDF5 C library.
+        self.requires("highfive/2.10.0")
 
     def configure(self):
         # Only the single-precision (float) library is used -- see
@@ -45,6 +52,10 @@ class AdsbRecipe(ConanFile):
         # variants entirely.
         self.options["fftw"].precision_double = False
         self.options["fftw"].precision_longdouble = False
+        # Only HighFive's core API is used; skip its optional integrations
+        # (boost in particular would be a large extra build).
+        for opt in ("with_boost", "with_eigen", "with_xtensor", "with_opencv"):
+            setattr(self.options["highfive"], opt, False)
 
     def layout(self):
         cmake_layout(self)

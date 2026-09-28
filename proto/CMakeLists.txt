@@ -23,6 +23,8 @@ find_package(argparse REQUIRED)
 find_package(nlohmann_json REQUIRED)
 find_package(FFTW3 REQUIRED)
 find_package(SQLite3 REQUIRED)
+find_package(xtensor REQUIRED)
+find_package(HighFive REQUIRED)
 
 # ISPC_ROOT (e.g. via a project-local .envrc/direnv) points this at a
 # manually-extracted ispc release instead of a system package -- the ispc
@@ -41,49 +43,37 @@ find_program(ISPC_EXECUTABLE ispc HINTS "$ENV{ISPC_ROOT}/bin" REQUIRED)
 # so this is here to let that be measured rather than assumed.
 set(ADSB_ISPC_TARGET "" CACHE STRING "ispc --target override (empty = autodetect host ISA)")
 
-set(ISPC_SRC ${CMAKE_CURRENT_SOURCE_DIR}/ispc/kernels.ispc)
-set(ISPC_OBJ ${CMAKE_CURRENT_BINARY_DIR}/kernels_ispc.o)
-set(ISPC_HEADER ${CMAKE_CURRENT_BINARY_DIR}/kernels_ispc.h)
-
 set(ISPC_TARGET_FLAG "")
 if(ADSB_ISPC_TARGET)
     set(ISPC_TARGET_FLAG "--target=${ADSB_ISPC_TARGET}")
 endif()
 
-add_custom_command(
-    OUTPUT ${ISPC_OBJ} ${ISPC_HEADER}
-    COMMAND ${ISPC_EXECUTABLE} ${ISPC_SRC} -O2 --pic ${ISPC_TARGET_FLAG} -o ${ISPC_OBJ} -h ${ISPC_HEADER}
-    DEPENDS ${ISPC_SRC}
-    COMMENT "ispc: compiling kernels.ispc"
-)
-add_custom_target(ispc_kernels DEPENDS ${ISPC_OBJ} ${ISPC_HEADER})
+# Compiles one .ispc file into an object + generated header in the calling
+# directory's binary dir; `target` gets both (the header dir PRIVATE, since
+# only that library's own .cpp includes it).
+function(adsb_add_ispc target src)
+    get_filename_component(name ${src} NAME_WE)
+    set(obj ${CMAKE_CURRENT_BINARY_DIR}/${name}_ispc.o)
+    set(hdr ${CMAKE_CURRENT_BINARY_DIR}/${name}_ispc.h)
+    add_custom_command(
+        OUTPUT ${obj} ${hdr}
+        COMMAND ${ISPC_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/${src} -O2 --pic ${ISPC_TARGET_FLAG} -o ${obj} -h ${hdr}
+        DEPENDS ${src}
+        COMMENT "ispc: compiling ${src}"
+    )
+    target_sources(${target} PRIVATE ${obj} ${hdr})
+    target_include_directories(${target} PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+endfunction()
 
-add_executable(adsb
-    src/main.cpp
-    src/demod.cpp
-    src/filter_bank.cpp
-    src/sigmf_meta.cpp
-    src/frame_decode.cpp
-    src/aircraft.cpp
-    src/pipeline.cpp
-    src/ws_publisher.cpp
-    src/aircraft_history.cpp
-    src/spectrum.cpp
-    src/rtlsdr_stream.cpp
-    src/file_stream.cpp
-    src/tasksys.cpp
-    ${ISPC_OBJ}
-)
-add_dependencies(adsb ispc_kernels)
-
-target_include_directories(adsb PRIVATE
-    include
-    ${CMAKE_CURRENT_BINARY_DIR}
-)
-target_compile_definitions(adsb PRIVATE ADSB_SAMPLES_PER_SYMBOL=${ADSB_SAMPLES_PER_SYMBOL})
-
+find_package(OpenMP REQUIRED)
 find_package(Threads REQUIRED)
-target_link_libraries(adsb PRIVATE Threads::Threads coro::coro librtlsdr::librtlsdr argparse::argparse
-                                    nlohmann_json::nlohmann_json fftw::fftw SQLite::SQLite3)
 
-install(TARGETS adsb RUNTIME DESTINATION bin)
+# One static library per src/ subdirectory (adsb_common, adsb_dsp, ...);
+# headers sit next to their .cpp and are included as "dir/name.h" with src/
+# as the include root. See src/CMakeLists.txt for the dependency order.
+# Executables (apps + tests) all land at the build root, e.g. build/Release/adsb.
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR})
+add_subdirectory(src)
+
+enable_testing()
+add_subdirectory(tests)

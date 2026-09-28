@@ -1,811 +1,602 @@
 # adsb-demod
 
-A high-performance ADS-B (1090 MHz Mode S) demodulator, ported from a working
-Julia prototype ([adsb_detect.jl](adsb_detect.jl), [polyphase.jl](polyphase.jl))
-to C++ with an [ispc](https://ispc.github.io/)-vectorized core, exposed as a
-shared library with a thin CLI on top for now, and other front ends (Flutter,
-WebSocket) later.
+An ADS-B (1090 MHz Mode S) receiver: a C++ demodulator with an
+[ispc](https://ispc.github.io/)-vectorized, multithreaded DSP core. It reads IQ
+from a SigMF recording, a VITA-49 (VRT) UDP stream or a live RTL-SDR, and
+decodes Mode S frames and aircraft state. Results go to stdout, a WebSocket
+(for the Flutter UI in [ui/frontend](ui/frontend)) and an optional SQLite
+history.
 
-## What the algorithm does (from the prototype)
+The Julia files at the top level ([adsb_detect.jl](adsb_detect.jl),
+[polyphase.jl](polyphase.jl), [adsb.jl](adsb.jl),
+[preamble_detect.jl](preamble_detect.jl)) are the reference prototype. The
+C++ resampling filter follows the design in [polyphase.jl](polyphase.jl) (see
+[Resampling filter](#resampling-filter)).
 
-1. **Input**: complex IQ samples (`complex<float>`) from an SDR. The
-   prototype is currently hardcoded to 3.2 Msps (the max the test RTL-SDR
-   dongle can deliver) sampled around 1090 MHz, but the input sample rate is
-   just a parameter to the polyphase resampler and should be a runtime
-   config value in the C++ port, not a compile-time constant — different
-   SDRs/setups will have different max rates.
-2. **Resampling / matched filtering**: a polyphase filter bank
-   (`PolyphaseFilterBank` in [polyphase.jl](polyphase.jl)) resamples the IQ
-   stream to a fixed rate of **12 samples per Mode S symbol/bit (1 µs)**,
-   i.e. 6 samples per half-symbol "chip" (0.5 µs) — the underlying PPM
-   pulse-position unit — using a lowpass/Hanning windowed FIR bank with `Np`
-   phases and `M` taps per phase. The bank also supports generating
-   first/second-derivative taps (`Nd`) for interpolation, though the
-   streaming demodulator currently only uses the value tap. Like the input
-   rate, 12 samples/symbol is a prototype constant (`Np` in the filter bank,
-   `inv_ry`/`ry` and the `*6`/`*12` strides in `exec!`) and should become a
-   runtime-configurable parameter in the port, so we can trade off
-   timing-resolution vs. throughput and measure the effect on detection
-   performance.
-3. **Envelope**: magnitude (`abs`) of the resampled complex signal feeds a
-   short circular buffer (`y`), 12 samples/symbol (2 samples/chip).
-4. **Preamble correlation**: an 8-pulse preamble pattern (16 chips at
-   half-symbol resolution, `pat = [1,-1,1,-1,-1,-1,-1,1,-1,1,-1,-1,-1,-1,-1,-1]`)
-   is correlated against the last 16 chips' worth of envelope samples at
-   each of the sub-symbol phases (`ic` in `1:10`, out of 12 samples/symbol)
-   to find the best sample-timing phase and detect a candidate preamble.
-5. **PPM bit slicing**: once a preamble is found, each subsequent data bit
-   (up to 112 bits for a long frame) is sliced by comparing the envelope at
-   the two possible pulse positions within a symbol, half a symbol (6
-   samples) apart (`y[j] - y[j+6]`); the sign determines bit 0/1, and the
-   summed `|difference|` magnitude is used as a frame-quality/confidence
-   metric (`mag > 2*56` threshold).
-6. **Output**: a `UInt128` holding the demodulated bits (up to 112 bits,
-   right-aligned) plus the sample index where the frame was found.
-7. **CRC / validation** (downstream of the demodulator today): Mode S 24-bit
-   CRC remainder computation (`crc(M)`), format field (DF) extraction, and
-   ICAO/CRC cross-checking for format-dependent validation, plus ICAO
-   tracking. Some of this (CRC calc, DF-based frame-length branching) is
-   good to keep in the demod library since it is cheap, format-independent,
-   and needed to decide whether a candidate frame is worth reporting at all;
-   full protocol decode (`pms.decode`, position/track/velocity fields) stays
-   out of scope for this project (there are existing ADS-B decoder libs) and
-   belongs downstream.
-
-## Design principle: parameterize everything
-
-The prototype has several hardcoded constants (input sample rate, samples/
-symbol, detection thresholds, etc.) that were fine for one-off experiments
-but shouldn't stay silently hardcoded in the port. As a general rule for
-this project: anything in the prototype that's a tunable value rather than
-a structural fact of the ADS-B/Mode S waveform (e.g. bit timing, preamble
-pattern, and frame lengths are fixed by the spec; filter taps, thresholds,
-rates are not) should be exposed as a parameter, with a default equal to
-whatever the prototype currently uses, rather than buried as a magic
-number. This is both good practice and useful for this project specifically
-since part of the point of the port is to empirically test
-performance/accuracy tradeoffs across configurations (see AGC/normalization
-below).
-
-**"Parameterized" doesn't always mean "runtime-configurable," though.**
-Runtime config (a field in `adsb_demod_config_t`) is the default and
-preferred option wherever it's cheap — most thresholds, the input sample
-rate, filter design choices. But some values are tightly coupled to
-performance-critical code shape rather than being a free dial: e.g.
-`samples_per_symbol` likely needs to be a **compile-time constant** in the
-ispc kernels, because it drives gang width / loop-unrolling / vectorization
-strategy directly (see [ispc kernel strategy for a variable
-samples/symbol](#ispc-kernels)) — making it a true runtime value would mean
-either giving up that vectorization structure or branching across many
-compiled variants at runtime, neither of which is worth it just to avoid a
-rebuild. For cases like that, a static constant (or small
-`#define`/CMake-option-driven set of them) is the right call, as long as
-changing it and recompiling to test a different value stays easy — e.g. a
-single CMake option or header constant, not something buried across
-multiple files. Compile-time-constant parameters should still be treated
-as parameters for documentation purposes (defaults noted, not left as
-unexplained magic numbers) even though they're not part of the runtime C
-ABI.
-
-## Goals
-
-- Port the working prototype to C++ for throughput and to run continuously
-  against a live SDR (RTL-SDR now, others later) rather than post-processed
-  captures.
-- Vectorize/parallelize the hot loops (resampling FIR convolutions, preamble
-  correlation, PPM slicing) with ispc, targeting SIMD on CPU first, with an
-  eye toward an ispc GPU target (or a CUDA/Metal rewrite of the same kernels)
-  later if throughput demands it.
-- Ship the demodulator as a **shared library** (`libadsbdemod.so`/`.dylib`/
-  `.dll`) with a small, stable C ABI, so it can be:
-  - driven from a **CLI** for local testing/development against `.sigmf-data`
-    captures or a live RTL-SDR (first deliverable),
-  - loaded directly by **Flutter** via `dart:ffi` (no IPC), or
-  - wrapped by a **WebSocket/TCP server** for a decoupled Flutter (or any
-    other) client, or remote deployment (e.g. Pi near the antenna, UI
-    elsewhere on the network).
-- Output is a stream of decoded Mode S frames: `UInt128` payload (bit-packed,
-  right-aligned like the prototype) + metadata (timestamp, sample index,
-  SNR/confidence, maybe frequency offset) — a format that works equally well
-  serialized over a socket or read directly out of FFI-shared memory.
-
-## Implementation phasing
-
-Everything below (shared library, C ABI, SDR plugin architecture, GNU Radio
-block, Flutter/WebSocket paths) is the target end-state design — useful to
-have written down so early decisions don't paint the project into a corner,
-but not what gets built first. The actual first coding milestone is much
-narrower, since the Julia prototype already proves the algorithm works and a
-serial C++ port would just be a detour before the part that's actually
-interesting:
-
-- A single monolithic **ispc + C++ CLI prototype**, no shared library split
-  and no SDR plugin abstraction yet.
-- **IQ input from a file** (`.sigmf-data`, same as the prototype), not a live
-  SDR.
-- **Filter coefficients from a file** (the raw-file path from [Filter
-  coefficient source](#filter-coefficient-source)), not computed at runtime.
-- The resample/preamble/slice kernels are written **directly in ispc** —
-  skipping a scalar/serial C++ reference implementation entirely, since the
-  Julia prototype already serves that validation role.
-- Output: decoded frames to stdout, informally compared against the Julia
-  prototype's output on the same capture file (formal testing strategy is
-  still deferred, per [Open questions](#open-questions--things-to-validate-before-or-during-implementation)).
-
-Once this proves the core parallel algorithm out, the surrounding
-architecture (shared library, C ABI, SDR plugins, etc.) gets built up
-incrementally around it as described in the rest of this document.
-
-### Phase-0 prototype: current status
-
-The narrow ispc + C++ CLI prototype described above ([proto/](proto/)) is
-working end-to-end against `.sigmf-data` captures, validated against the
-Julia prototype's CRC pass rate on the same test capture, and has had a
-first round of performance work beyond the initial straight port:
-
-- **Multicore, not just SIMD**: `resample_block`, `preamble_scan`, and the
-  RMS reduction kernel (below) are all split across ispc `task`/`launch`,
-  in addition to each kernel's own SIMD gang parallelism — coarse-grained
-  multicore parallelism orthogonal to the vectorization. This required a
-  small hand-written task-system runtime (`src/tasksys.cpp`) implementing
-  ispc's `ISPCAlloc`/`ISPCLaunch`/`ISPCSync` ABI, since this ispc install
-  doesn't ship the reference implementation; fork-join per `launch` call
-  rather than a persistent worker pool, chosen for provable correctness
-  over a theoretical efficiency edge (see that file's comments).
-- **Packed/interleaved kernel input, matching raw SDR output**: the
-  resample and RMS-reduction kernels read IQ samples directly in
-  interleaved (real, imag, real, imag, ...) layout — the format an SDR
-  actually delivers — using ispc's `aos_to_soa2` shuffle-based AoS→SoA
-  conversion to get per-lane real/imag values without a gather. This
-  replaced an earlier planar (separate real/imag arrays) layout that
-  required a host-side deinterleave pass; there is no such pass anymore,
-  which matters for the streaming case below since it means no per-chunk
-  transpose step is needed between "samples just arrived from the radio"
-  and "samples the kernel can consume."
-- **Per-block RMS normalization, folded into the resample kernel's
-  output**: normalization (see [Software-side AGC /
-  normalization](#software-side-agc--normalization) below) is computed by
-  its own small parallel-reduction kernel (`sumsq_block`) over whatever
-  block of raw samples was just handed to `exec()`, with no state or
-  smoothing carried across blocks — each block normalizes independently.
-  Because the FIR filter is linear, the resulting scale factor is applied
-  once per *output* sample inside `resample_block` rather than as a
-  separate full-block pass rewriting every input sample.
-
-At this point the demodulator processes a whole test capture at roughly
-6–8x realtime on a 12-thread desktop CPU, and per-stage timing
-(`ADSB_TIMING=1`) shows `resample_block` and `preamble_scan` as the two
-dominant costs, roughly comparable to each other. The next planned step is
-architectural rather than kernel-level — see [Async orchestration: coro
-pipeline](#async-orchestration-coro-pipeline-planned) below.
-
-## Proposed architecture
-
-```mermaid
-flowchart TD
-    RTL["RTL-SDR device"] --> RtlLib
-    File["capture file<br>(.sigmf-data)"] --> FileLib
-
-    subgraph SDRPLUGINS["independent source-plugin .so's<br>(each implements the same small ISampleSource C ABI)"]
-        direction LR
-        RtlLib["libadsbsdr-rtlsdr.so (now)"]
-        FileLib["libadsbsdr-file.so (now)"]
-        OtherLib["libadsbsdr-*.so (later:<br>SoapySDR / HackRF / ...)"]
-    end
-
-    SDRPLUGINS -->|"dlopen selected plugin<br>at runtime, IQ samples"| ORCH
-
-    subgraph ORCH["adsb-cli (now) / future ws-server"]
-        Loop["owns SDR loop:<br>read samples, push to demod"]
-    end
-
-    ORCH -->|"push(IQ buffer)"| LIB
-
-    subgraph LIB["libadsbdemod (C ABI, C++ + ispc) — pure IQ-buffer in, frames out"]
-        direction TB
-        resample["polyphase resample"] --> preamble["preamble detect"]
-        preamble --> slice["PPM slice"]
-        slice --> check["CRC / DF check"]
-        check --> frame["frame"]
-    end
-
-    LIB -->|"decoded frames"| CLIOut["CLI: print/log"]
-    LIB -->|"decoded frames"| WSOut["ws-server: JSON/binary<br>over WebSocket"]
-    WSOut --> Flutter["Flutter UI (later)<br>table + map view"]
-    LIB -.->|"dart:ffi, alternative path"| Flutter
-
-    GR["GNU Radio flowgraph<br>(gr-osmosdr or similar<br>already handles SDR ingest)"] --> GRBLOCK
-    GRBLOCK["adsb-gr OOT block<br>work() calls same push()"] -->|"push(IQ buffer)"| LIB
-```
-
-*Layout note: the source-plugin `.so`s and `libadsbdemod` are drawn as
-separate subgraphs with the orchestrator (`adsb-cli`/`ws-server`) in
-between so the diagram reads top-to-bottom as actual data flow — radio/
-file at the top, IQ samples down through whichever source plugin is loaded
-and into the demod core, decoded
-frames continuing down to CLI/WebSocket/Flutter. Earlier drafts modeled
-frame delivery as a callback arrow pointing back up into the box that
-called `push`, which is technically accurate (it's a synchronous callback)
-but made Mermaid's auto-layout bottom-align the subgraphs and read
-confusingly. Modeling frames as continuing downward to distinct consumer
-nodes instead avoids that, at the cost of being slightly less literal about
-the callback being synchronous — a fine trade for readability here.*
-
-### Repo layout (proposed)
+## Repository layout
 
 ```
 adsb/
-  core/                     # libadsbdemod: pure IQ-buffer-in, frames-out
-    include/adsbdemod.h     # public C ABI header
+  *.jl                     Julia reference prototype
+  conan-recipes/librtlsdr  local Conan recipe for librtlsdr
+  ui/frontend/             Flutter UI (map, aircraft table, frame log, waterfall)
+  proto/                   the C++ implementation
+    CMakeLists.txt, conanfile.py
     src/
-      polyphase.{h,cpp}     # filter bank design/build (host-side, one-time)
-      demod.{h,cpp}         # ADSBDemod state machine, orchestrates ispc kernels
-      crc.{h,cpp}           # Mode S CRC + DF/length helpers
-      ispc/
-        resample.ispc       # polyphase FIR / resampling kernel
-        preamble.ispc        # preamble correlation across phases
-        slice.ispc           # PPM bit slicing + magnitude/confidence
-    tests/                  # unit tests (Catch2/GoogleTest) vs. Julia reference outputs
-  sdr/                      # source-plugin ABI + one independent .so per backend
-    include/adsbsdr.h       # stable ISampleSource-style C ABI, shared by all plugins
-    rtlsdr/                 # -> libadsbsdr-rtlsdr.so (first target)
-      source.cpp
-    file/                   # -> libadsbsdr-file.so (raw/sigmf IQ file replay,
-      source.cpp            #    used by the CLI for testing and by anyone
-                             #    wanting file input without a radio)
-    # soapysdr/, hackrf/, ...  # later: new backend = new directory = new .so,
-                             # no changes to existing plugins or to the host
-  cli/
-    main.cpp                # dlopen a source plugin -> libadsbdemod -> stdout/log
-  gnuradio/                 # (later) adsb-gr: OOT GNU Radio block wrapping
-                             # libadsbdemod directly (bypasses the sdr/ plugins —
-                             # GNU Radio owns ingest via its own source blocks)
-  bindings/                 # (later) flutter ffi glue, ws-server, etc.
-  third_party/ or CMake FetchContent for rtl-sdr, etc.
-  CMakeLists.txt
-  adsb_detect.jl, polyphase.jl, preamble_detect.jl   # reference prototype, kept for validation
+      common/   constants, cpu_layout (CPU split), tasksys.cpp (ispc task runtime on OpenMP)
+      dsp/      demod, peak_select, filter_bank, spectrum, iq_block (block + stitcher), kernels.ispc
+      decode/   frame_decode (CRC, DF, ICAO), aircraft (callsign/altitude/CPR position/velocity)
+      input/    file_stream, vita49_stream + vrt_assembler, rtlsdr_stream, sigmf_meta
+      output/   ws_publisher (WebSocket fan-out), aircraft_history (SQLite), frame_recorder (debug HDF5)
+      sim/      adsb_sim (Mode S signal simulator), sim_kernels.ispc
+      apps/
+        adsb/           the receiver: main.cpp (CLI), pipeline.{h,cpp} (demod loop, per-frame handling)
+        vita49_send/    VRT/UDP sender: RTL-SDR or simulated traffic
+        adsb_sim_eval/  simulator -> demodulator detection statistics
+    tests/      ctest tests, test captures (tests/data), vrt_to_sigmf.py
+    filters/    optional filter coefficient files + export_filter.jl
+    scenarios/  simulator scenarios (boston.json)
+    doc/        design notes (vita49-format.md), known issues
+    tools/      udp_sink.c (UDP receive diagnostics), debug_h5.jl (offline rerun of --debug-h5 frames)
+    handoff/    benchmark/reference-output notes
 ```
 
-### Build
-
-- **CMake** as the build system, with `ispc` invoked via a CMake module
-  (either the official `ispc.cmake` or a small custom rule) to compile
-  `.ispc` files to object files + an auto-generated header (`*_ispc.h`)
-  consumed by the C++ side.
-- Target both a static lib (for the CLI, simplest debugging) and a shared lib
-  (for FFI/dlopen use from Flutter or other hosts) from the same sources.
-- `ADSB_SAMPLES_PER_SYMBOL` (default 12, matching the prototype) is a CMake
-  option baked into the build as a compile-time constant consumed by the
-  ispc kernels — see [ispc kernels](#ispc-kernels) for why this one stays
-  compile-time instead of runtime-configurable. Changing it means
-  reconfiguring/rebuilding, which is an intentional, accepted tradeoff for
-  this particular value.
-- SDR device I/O lives in independent per-backend plugin shared libraries
-  (`sdr/`, see [Sample ingest / SDR abstraction](#sample-ingest--sdr-abstraction)
-  below), not part of the core. `libadsbdemod` only knows about IQ sample
-  buffers, never device I/O, and has no librtlsdr (or other SDR library)
-  dependency — this keeps it embeddable anywhere a buffer of samples can
-  come from (a file, a socket, a GNU Radio block, Flutter over FFI), and
-  keeps the ispc/vectorization work isolated from hardware-integration
-  churn and from any one backend's build dependencies.
-
-### Public C ABI (sketch)
-
-Kept intentionally small/opaque so it's easy to bind from Dart FFI, and easy
-to wrap in a WebSocket layer:
-
-```c
-typedef struct adsb_demod adsb_demod_t;
-
-// samples_per_symbol is NOT in this struct: it's a compile-time constant
-// (see #define ADSB_SAMPLES_PER_SYMBOL / CMake option in the Build section)
-// because the ispc kernels' gang width/unrolling are built around it.
-// Testing a different value means rebuilding with a different constant,
-// not passing a different config at runtime — see "Design principle:
-// parameterize everything" for why that's an intentional exception.
-// How the polyphase filter bank's coefficients are obtained — see
-// "Filter coefficient source" below for why this is staged rather than
-// jumping straight to a C++ filter-design implementation.
-typedef enum {
-    ADSB_FILTER_SOURCE_RAW_FILE,  // stage 1 (first): flat binary + sidecar
-                                    // metadata file, e.g. exported from the
-                                    // Julia PolyphaseFilterBank for exact
-                                    // Julia/C++ parity while prototyping
-    ADSB_FILTER_SOURCE_HDF5_FILE, // stage 2: self-describing, preferred
-                                    // long-term interchange format
-    ADSB_FILTER_SOURCE_COMPUTE,   // stage 3: native C++ port of the
-                                    // Hanning-windowed lowpass FIR design,
-                                    // no external file needed
-} adsb_filter_source_t;
-
-typedef struct {
-    adsb_filter_source_t source;
-    const char* path;    // required for *_FILE sources; ignored for COMPUTE
-} adsb_filter_config_t;
-
-typedef struct {
-    double sample_rate_hz;       // input IQ rate, e.g. 3.2e6 for the test RTL-SDR
-    adsb_filter_config_t filter; // polyphase filter bank coefficient source
-    float preamble_score_min;    // default matches prototype's `c < 3` cutoff
-    float slice_magnitude_min;   // default matches prototype's `mag > 2*56` cutoff
-    unsigned ispc_chunk_samples; // internal fixed-size processing chunk for
-                                  // the vectorized kernels; independent of
-                                  // caller's push() buffer sizes (default ~8192,
-                                  // matching the prototype's read size)
-    // normalization strategy selector + params (see AGC/normalization section)
-    // — defaults match the prototype
-} adsb_demod_config_t;
-
-adsb_demod_t* adsb_demod_create(const adsb_demod_config_t* config);
-void adsb_demod_destroy(adsb_demod_t*);
-
-// Push a block of interleaved complex<float> IQ samples, assumed to be
-// contiguous with (immediately follow) the samples from the previous
-// push() call. Decoded frames are delivered via the callback,
-// synchronously, before return.
-typedef struct {
-    uint64_t sample_index;   // sample index (monotonic) where frame was found
-    double   timestamp_sec;  // wall-clock or capture-relative time
-    unsigned num_bits;       // 56 or 112
-    __uint128_t payload;     // right-aligned demodulated bits (matches Julia UInt128)
-    float    confidence;     // magnitude/quality metric from PPM slicing
-} adsb_frame_t;
-
-typedef void (*adsb_frame_cb)(const adsb_frame_t* frame, void* user_data);
-
-void adsb_demod_push(adsb_demod_t*, const float* iq_interleaved, size_t num_samples,
-                      adsb_frame_cb cb, void* user_data);
-
-// Call before the next push() whenever the caller knows (or suspects, e.g.
-// from an SDR buffer-overflow indicator) that the upcoming samples are NOT
-// contiguous with whatever was pushed last — a dropped-samples gap. Clears
-// all stream-position state (the raw-IQ and envelope circular buffers plus
-// the resampling phase/timing accumulators — everything adsb_demod_create()
-// initializes fresh) so the next push() starts clean instead of assuming
-// continuity across the gap. Filter bank / config are untouched.
-// `next_sample_index` re-anchors sample_index in subsequently reported
-// frames to the real stream position, so it doesn't silently drift by
-// however many samples were actually dropped during the gap.
-void adsb_demod_reset(adsb_demod_t*, uint64_t next_sample_index);
-```
-
-`__uint128_t` is a GCC/Clang extension (fine for the CLI and a native Flutter
-FFI plugin); for the WebSocket layer or any host without 128-bit int support,
-frames get serialized as two `uint64_t`s or a 14-byte big-endian blob instead
-— the C ABI stays `__uint128_t`/`uint64_t[2]` and serialization is purely a
-concern of the transport layer, not the core.
-
-**Streaming state and gap handling.** `adsb_demod_t` treats its input as
-one logically continuous, unbounded IQ stream, delivered in arbitrary-sized
-chunks purely as an artifact of how the caller happens to read it (an SDR
-buffer size, a GNU Radio `work()` call, a file read) — it is not a sequence
-of independent blocks. Internal state (raw-IQ and envelope circular
-buffers, resampling phase/timing accumulators) persists across `push()`
-calls specifically so a preamble or frame that straddles a chunk boundary
-is still detected, matching how the prototype's `ADSBDemod`/`exec!` design
-already works. This assumes each `push()`'s samples are contiguous with the
-previous call's; when they're not — the input skipped ahead because
-something couldn't keep up (SDR USB overflow, a full ring buffer, a
-GNU Radio discontinuity, a WebSocket reconnect) — the caller must say so by
-calling `adsb_demod_reset()` before the next `push()`, since only the
-ingest side can know a gap happened; the demod core has no reliable way to
-infer "these samples aren't actually adjacent to the last ones" purely by
-inspecting IQ values. This does mean every `ISampleSource` plugin needs
-*some* way to surface "gap since last read" back to its host (even a
-simple bool from the read call is enough) for the host to forward into
-`adsb_demod_reset()` — worth keeping in mind as the plugin ABI
-(`sdr/include/adsbsdr.h`) is designed.
-
-### Streaming and chunking: one push API, an internal fixed-size chunk for ispc
-
-There's only one ingest API into `libadsbdemod` — `adsb_demod_push(IQ
-buffer)` — used identically by the CLI, the future ws-server, *and* the
-future `adsb-gr` GNU Radio block. That's possible because GNU Radio's
-OOT block model turns out to already match the shape the prototype uses:
-
-- A GNU Radio block's `work()` is called repeatedly by the scheduler with
-  however many samples are currently available in its input buffer
-  (`noutput_items`, bounded by buffer size) — it's a pull-based streaming
-  model, not something that hands you neat fixed-size chunks by default
-  (though `set_output_multiple()`/`set_history()` can constrain the
-  granularity if a block wants that). So an `adsb-gr` block's `work()`
-  would just forward whatever it's given straight into
-  `adsb_demod_push()` — the same call the CLI makes with whatever it reads
-  from a loaded source plugin or a file.
-- This is also exactly what the prototype already does: `exec!` is written
-  to accept an arbitrary-length `x` and internally advance through a
-  circular buffer, so it never assumed a fixed input block size — the
-  8192-sample reads in the live-capture path were just a convenient
-  librtlsdr read size, not a structural requirement. The C++ port keeps
-  that property: `adsb_demod_push` accepts any buffer length, and
-  `adsb_demod_t` owns persistent circular-buffer state across calls so
-  frames aren't lost or duplicated at push boundaries.
-
-That means the "I want fixed-size chunks so ispc can vectorize/parallelize
-over them" goal isn't actually about the ingest API shape — it's about
-what the library does *internally* once samples land in its buffer. The
-plan: `adsb_demod_push` appends incoming samples to the internal circular
-buffer as today, but the resample/preamble/slice ispc kernels run over an
-**internal, configurably-sized fixed chunk** (e.g. defaulting to something
-in the range of the prototype's 8192-sample reads, exposed as a config
-parameter per [Design principle: parameterize everything](#design-principle-parameterize-everything))
-whenever enough buffered samples are available — regardless of how big the
-caller's individual `push()` calls happen to be. A GNU Radio `work()` call
-with 200 samples and a file-replay `push()` with 65536 samples both just
-feed the same buffer; the ispc chunk size is a separate, independently
-tunable value from either of those. This also keeps latency reasonable for
-live streaming (frames get emitted as soon as a chunk's worth of new
-samples has been processed) without coupling the vectorization granularity
-to whatever block size a particular caller happens to use.
-
-### Async orchestration: coro pipeline (planned)
-
-The phase-0 prototype today (`proto/src/main.cpp`) loads an entire capture
-file, then makes one synchronous `AdsbDemod::exec()` call over the whole
-thing. That's fine for a debugging/benchmarking tool working over a fixed
-file, but doesn't reflect the real target: an unbounded, continuous stream
-of blocks (from a live SDR, or from a file being replayed as if it were
-one) feeding the demodulator forever. The next architectural step —
-**not yet implemented, this section is design, not status** — is to
-restructure that loop using **coro** (`/home/brad/sandbox/coro`, this
-team's own C++20 coroutines library, modelled on Tokio), rather than by
-parallelizing across the demod pipeline's own internal stages.
-
-**Why not pipeline the kernel stages themselves.** The obvious-looking
-alternative — start block N+1's RMS reduction while block N's resample is
-still running, etc., so multiple pipeline stages are in flight
-concurrently — was considered and rejected. Every kernel in `exec()`
-already spawns enough ispc tasks to saturate every hardware thread on its
-own (see [Phase-0 prototype: current
-status](#phase-0-prototype-current-status) above); there's no idle core
-capacity left for a second, differently-shaped kernel to fill by running
-alongside it. Running two already-fully-threaded stages concurrently would
-just have them contend for the same core count with different memory
-working sets (padded IQ + filter taps vs. the `y[]` envelope array vs. the
-preamble pattern), which is far more likely to *increase* the cache-miss
-rate than to help. `exec()` stays a single, sequential, atomic call per
-block — the same shape it is today, unchanged internally.
-
-**Where async orchestration genuinely helps instead: overlapping I/O with
-compute, not compute with compute.** This is exactly the pattern coro's
-own `doc/getting_started.md` documents (section "Feeding a compute loop
-for CPU-bound work," and its GPU-transfer extension): a tightly-coupled,
-CPU-bound compute loop that can't be usefully split further internally is
-wrapped as one opaque unit on a dedicated thread (`spawn_blocking`), and
-coro's job is limited to making sure that thread is never idle waiting on
-I/O — reading the next block, delivering the previous block's results —
-by running that I/O concurrently with the compute call via ordinary async
-coroutines on coro's executor. I/O (file reads today; USB/network reads
-from a live SDR later) and CPU-bound, already-fully-threaded compute are
-genuinely different resources, so overlapping *those* two is free
-throughput, unlike overlapping compute with compute above.
+Each `src/` directory builds as one static library. Headers sit next to their
+sources and are included as `"dir/name.h"`. The dependency order is:
 
 ```mermaid
 flowchart LR
-    subgraph Producer["async producer (coro executor thread)"]
-        Reader["block reader<br>(file today; SDR source later —<br>same shape, drop-in swap)"]
-    end
-
-    Reader -->|"co_await send(IqBlock)<br>bounded mpsc, e.g. depth 4"| InCh[("IQ channel")]
-    InCh -->|blocking_recv| Worker
-
-    subgraph Worker["compute_worker (spawn_blocking, dedicated OS thread)"]
-        Exec["AdsbDemod::exec()<br>— unchanged, one call per block,<br>internally task+SIMD parallel already"]
-    end
-
-    Worker -->|"try_send(AdsbFrame)<br>bounded mpsc"| OutCh[("frame channel")]
-    OutCh -->|co_await recv| Consumer
-
-    subgraph Consumer["async consumer chain (coro executor)"]
-        CRC["CRC / DF check"]
-        Track["ICAO tracking,<br>CPR lat/lon pairing"]
-        Out["output<br>(stdout / WS / etc.)"]
-        CRC --> Track --> Out
-    end
+    common --> dsp --> decode
+    dsp --> input
+    decode --> output
+    common --> sim
+    input --> apps
+    output --> apps
+    sim --> apps
 ```
 
-A few properties fall out of this shape without extra work:
+Each module's internals live in anonymous namespaces in its `.cpp` file. The
+headers declare only what other translation units use.
 
-- **Natural backpressure, and near-zero-cost I/O overlap.** The IQ channel
-  is bounded, so the reader coroutine suspends automatically once it's a
-  few blocks ahead of the compute thread — no explicit rate-limiting
-  logic needed. When compute is the bottleneck (the expected case), the
-  next block is already sitting in the channel the instant
-  `compute_worker` asks for it, so file-read (or, later, SDR-ingest)
-  latency is fully amortized under compute time, the same way the GPU
-  H2D-transfer overlap in coro's getting_started guide amortizes transfer
-  latency under kernel execution.
-- **File replay and live SDR ingest become the same producer shape.**
-  Swapping the file-reading coroutine for one that pulls blocks from a
-  live RTL-SDR (or another backend, per [Sample ingest / SDR
-  abstraction](#sample-ingest--sdr-abstraction) below) changes nothing
-  downstream of the IQ channel — `compute_worker` and the whole consumer
-  chain are unaware of where blocks came from. This is the same
-  decoupling goal the `adsb_demod_push`/`ISampleSource` design already
-  aims for, just realized as a channel boundary instead of a callback.
-- **The consumer chain is genuinely async-appropriate work**, not
-  compute-bound: CRC computation, DF-based validation, ICAO
-  tracking/matching (e.g. pairing odd/even DF17 frames for CPR position
-  decoding), and output are all cheap per-frame bookkeeping, so they run
-  as ordinary coroutines on coro's executor rather than needing their own
-  `spawn_blocking` thread.
+## Build
 
-This is deliberately independent of — and can land before or after —
-the shared-library/C-ABI/SDR-plugin work described elsewhere in this
-document. It first replaces `proto/src/main.cpp`'s single-shot
-whole-file loop with a chunked file-replay producer (validating the
-pipeline shape against the same test capture and CRC pass rate used
-today), and the live-SDR producer is a later, mostly-mechanical swap
-once this shape is proven out.
+Dependencies come from Conan: `coro`, `librtlsdr` (from
+[conan-recipes/librtlsdr](conan-recipes/librtlsdr)), `argparse`,
+`nlohmann_json`, `fftw` (float only), `sqlite3`, `xtensor` and `highfive`
+(with `hdf5`). `coro` is
+developed alongside this project and has to be exported to the local Conan
+cache. You also need `ispc` on `PATH` (or set `ISPC_ROOT`), plus OpenMP.
 
-### Sample ingest / SDR abstraction
+```sh
+cd proto
+conan install . --build=missing
+cmake --preset conan-release
+cmake --build build/Release -j
+ctest --test-dir build/Release
+```
 
-`libadsbdemod` never touches a radio — it only consumes IQ sample buffers
-via `adsb_demod_push`. Where those buffers come from is a separate concern,
-and it splits into two genuinely different cases:
+The executables (`adsb`, `vita49_send`, `adsb_sim_eval`) end up in
+`build/Release/`.
 
-1. **We own the radio** (CLI, future Flutter app, future WebSocket server):
-   something has to open the device, configure sample rate/frequency/gain,
-   and pull samples in a loop. Rather than one `libadsbsdr` library with
-   every backend statically linked in, each SDR backend is its **own**
-   small shared library implementing a single stable `ISampleSource`-style
-   C ABI (open/configure/read/close) defined once in `sdr/include/adsbsdr.h`:
-   `libadsbsdr-rtlsdr.so` (first target, matches the test hardware),
-   `libadsbsdr-file.so` (raw/SigMF file replay, so the CLI can use the same
-   code path for live capture and file testing), and later
-   `libadsbsdr-soapysdr.so` / `libadsbsdr-hackrf.so` / etc. A host
-   (`adsb-cli`, the future ws-server, Flutter over FFI) picks one at
-   startup/config time and `dlopen()`s it — adding a new SDR means writing
-   and shipping one new `.so` against the existing ABI header, not touching
-   `libadsbdemod`, the host, or any other backend's plugin. This is
-   basically the same idea as GNU Radio's own block model — small,
-   single-purpose, independently loadable units behind a common
-   interface — just applied to sample sources and kept independent of GNU
-   Radio itself, so it works for the CLI/Flutter/WS use case too.
-2. **Something else already owns the radio** (GNU Radio): the planned
-   `adsb-gr` OOT block wraps `libadsbdemod` directly and does *not* go
-   through the `sdr/` plugin ABI at all — GNU Radio's own source blocks
-   (e.g. `gr-osmosdr`, which already supports RTL-SDR and other backends)
-   handle device I/O and hand the block a stream of IQ samples; the block's
-   `work()` function just forwards them to `adsb_demod_push` and emits
-   decoded frames (as a GNU Radio message port, most likely). This is a
-   nice validation of the "core library only needs a buffer" design, and
-   gets GNU Radio flowgraph interop close to free once the core library
-   exists.
+CMake cache options:
 
-So `libadsbdemod` (the demod core, this project's main focus) stays
-independent of every SDR backend and of GNU Radio, and each SDR backend
-stays independent of every other backend and of the demod core. The one
-thing they share is the small `adsb_frame_push`-style buffer contract into
-`libadsbdemod`, and, among sample sources, the `sdr/include/adsbsdr.h`
-plugin ABI. Keeping backends as separate `.so`s also means an individual
-backend's build dependencies (librtlsdr, SoapySDR, whatever HackRF needs)
-never leak into anything else's build, and a broken/missing backend at
-runtime doesn't affect the others.
+| Option | Default | Meaning |
+|---|---|---|
+| `ADSB_SAMPLES_PER_SYMBOL` | 12 | Resampled rate in samples per 1 µs Mode S symbol. Compiled into the kernels. |
+| `ADSB_ISPC_TARGET` | *(autodetect)* | ispc `--target` override, e.g. `avx2-i32x8`, to compare against AVX-512. |
 
-*Scope note:* it's fair to see this whole system — swappable source
-plugins feeding a fixed demod core feeding swappable output consumers — as
-a small, special-case "flow graph," conceptually similar to GNU Radio's.
-Worth naming explicitly so it doesn't happen by accident: the intent here
-is *not* to build a general-purpose dataflow/scheduler framework in-house.
-The graph stays fixed and simple — exactly one source plugin feeding
-`libadsbdemod`, which feeds one or more fixed output consumers (CLI, WS,
-Flutter) — with genericity limited to "the source is swappable via a
-common ABI." If a use case ever needs arbitrary block composition, that's
-what the GNU Radio integration is for; reimplementing GNU Radio's scheduler
-ourselves is explicitly out of scope.
+## Running
 
-The `adsb-gr` GNU Radio block is a later nice-to-have, not part of the
-first iteration — noted here mainly so the core library's "just a buffer
-in, frames out" API shape stays compatible with it from the start rather
-than accidentally coupling itself to the `sdr/` plugin ABI or a specific
-ingest model.
+`adsb` takes global options, then a source subcommand, then that source's
+options:
 
-### Filter coefficient source
+```sh
+build/Release/adsb [global options] {file|vita49|rtlsdr} [source options]
+```
 
-`PolyphaseFilterBank` construction (in [polyphase.jl](polyphase.jl)) is the
-one piece of the prototype that leans on a real DSP library (`DSP.jl`'s
-`digitalfilter`, `hanning`, `xcorr`) rather than being simple arithmetic —
-everything downstream of the coefficient table (`h`) is straightforward
-dot-product/correlation code with an obvious C++/ispc translation. Rather
-than block the C++ port on first re-implementing Hanning-windowed FIR
-design in C++, coefficient sourcing is staged and configurable
-(`adsb_filter_config_t.source` in the ABI sketch above), so the demod core
-and ispc kernels can be built, tested, and validated against the coefficient
-table Julia already computes, well before the design routine itself is
-ported:
+| Global option | Default | |
+|---|---|---|
+| `--filter-taps` | 32 | Taps per phase of the designed resampling filter |
+| `--filter-phases` | 64 | Phases of the designed resampling filter |
+| `--filter-cutoff` | 3e6 | Lowpass cutoff of the designed filter in Hz, clamped to the input and resampled Nyquist |
+| `--filter-window` | hann | Window of the designed lowpass: `hann`, `hamming`, `blackman` or `kaiser` |
+| `--filter-kaiser-beta` | 8 | Kaiser window beta, with `--filter-window kaiser` |
+| `--filter-matched` | off | Also convolve the designed lowpass with a 0.5 µs boxcar (a filter matched to Mode S pulses) |
+| `--filter`, `--filter-meta` | off | Load the filter bank from these files instead of designing it |
+| `--rate` | from source | Input sample rate in Hz. `file` reads it from SigMF; `vita49` and `rtlsdr` use 2.4e6. For `vita49` it must match the sender's rate: an IF Context packet that advertises a different rate is a fatal error. |
+| `--freq` | 1090e6 | Center frequency. It is the tuner frequency for `rtlsdr` and labels the spectrum frames. |
+| `--preamble-min` | 3.0 | Preamble correlation threshold, in units of the block RMS |
+| `--slice-mag-min` | 112 | Bit-slice magnitude threshold, in units of the block RMS |
+| `--ws-port` | 0 (off) | Publish JSON over WebSocket on this port |
+| `--history-db` | off | SQLite file recording every aircraft update, for the UI's time scrubber |
+| `--spectrum` | off | Publish a 1024-point FFT of the raw IQ every 150 ms (for the waterfall) |
+| `--no-stdout` | | Don't print frames to stdout |
+| `--debug-h5` | off | Write every decoded frame, with its IQ and everything needed to rerun the demodulator, to this HDF5 file (see [Debug HDF5](#debug-hdf5)) |
+| `--debug-h5-failed-only` | | With `--debug-h5`, record only frames that fail CRC (not unchecked ones) |
 
-1. **Raw file import (first target)**: `libadsbdemod` loads precomputed
-   coefficients from a flat binary file (matching the `h` array's layout:
-   `M+2Nd` taps × `Np` phases × 1 or 3 planes, `float32`/`float64` as
-   written) plus a small sidecar metadata file (JSON or plain text —
-   `M`, `Np`, `Nd`, dtype, and whatever design parameters are worth
-   recording for reproducibility) describing its shape, since a raw
-   binary blob alone doesn't self-describe its dimensions. A short Julia
-   helper script (`write(io, p.h)` plus the sidecar) exports a
-   `PolyphaseFilterBank` built in Julia straight to this format. This is
-   the important one for prototyping: when tuning the filter design in
-   Julia, exporting and loading the *exact* coefficients into the C++
-   build eliminates "did the C++ port introduce a subtly different filter"
-   as a variable when comparing Julia vs. C++ detection behavior on the
-   same capture — CSV was considered too but raw binary matches the
-   prototype's existing IQ-file convention (`read!`/`write`) and avoids
-   text-parsing/precision-loss concerns.
-2. **HDF5 import (preferred long-term interchange format)**: same idea,
-   self-describing instead of needing a sidecar file, and a more natural
-   fit if filter coefficients ever need to travel alongside other
-   structured data (e.g. bundled with a capture or a test fixture). Adds
-   an HDF5 library dependency, so it's a later addition once the raw-file
-   path has proven the loader plumbing out.
-3. **Runtime computation in C++ (eventual default)**: a native port of the
-   Hanning-windowed lowpass FIR design, removing the Julia/file dependency
-   entirely for normal (non-debugging) use. Lower priority than getting
-   the demod core itself working, since the file-import paths already
-   unblock that.
+Sources:
 
-Loaded/computed coefficients must match the compiled-in
-`ADSB_SAMPLES_PER_SYMBOL` (`Np`); the loader validates this and fails
-loudly on a mismatch rather than silently reinterpreting the array.
+- **`file --iq x.sigmf-data [--meta x.sigmf-meta]`**: replays an interleaved
+  cf32 SigMF recording.
+- **`vita49 --port P [--bind addr] [--stream-id N] [--idle-timeout s]`**:
+  receives VRT IF Data packets (big-endian int16 IQ) plus IF Context packets
+  (rate, RF frequency) over UDP. The format is described in
+  [proto/doc/design/vita49-format.md](proto/doc/design/vita49-format.md).
+- **`rtlsdr [--device N] [--gain dB] [--buf-num N] [--buf-len B]`**: reads
+  from a live dongle. A negative gain means auto gain.
 
-### ispc kernels
+Other tools:
 
-The three inner loops from the prototype map fairly directly onto ispc
-`foreach`/gang-parallel kernels. `samples_per_symbol` (`Np`, default 12) is
-a **compile-time constant** (`ADSB_SAMPLES_PER_SYMBOL`, see
-[Build](#build)) here rather than a runtime parameter — per [Design
-principle: parameterize everything](#design-principle-parameterize-everything),
-it's tightly coupled to gang width/loop-unrolling in these kernels, so
-sweeping it means reconfiguring and rebuilding with a different constant,
-not passing a different value at runtime. `sample_rate_hz` stays a genuine
-runtime parameter (it doesn't change kernel shape, only the filter
-coefficient table computed on the host):
+- **`vita49_send --dest-port P [--rate] [--freq] ... {rtlsdr|sim}`**: streams
+  VRT/UDP. The `sim` source renders simulated traffic from a scenario
+  (`--scenario scenarios/boston.json`, `--snr-db`, `--duration`, `--seed`,
+  and pulse shape and receiver filter options). The simulator encodes DF17
+  identification, airborne position and velocity messages plus DF11 squitters.
+  Pulses are on-off keyed with finite edges and jitter, followed by an
+  anti-alias filter and AWGN. The output is deterministic for a given seed.
+- **`adsb_sim_eval --scenario ... [--snr-db] [--duration] [--rate]`**:
+  feeds the simulator straight into `AdsbDemod`, block by block, through the
+  same `BlockStitcher` path as `adsb` (`--block` sets the block size). It then
+  matches the output against the simulator's ground truth and reports, per
+  category (all, block-cut, overlapping, clean, per DF, per aircraft), the
+  rates for preamble detected, frame output, raw CRC OK, CRC fixed, CRC OK and
+  exact match. It also breaks down the misses, false candidates and
+  candidate timing error.
+- **`tests/vrt_to_sigmf.py`**: records a VRT stream to a SigMF file pair.
+- **`tools/udp_sink.c`**: a receive-only UDP sink that reports packet loss,
+  gaps and kernel drops.
 
-- **`resample.ispc`**: for each output symbol-rate sample, a dot product of
-  `M` filter taps (loaded/computed per [Filter coefficient
-  source](#filter-coefficient-source), sized for the compiled-in `Np`)
-  against a window of input IQ samples. Natural vectorization axis: compute
-  multiple output samples (or multiple polyphase branches) per gang. Since
-  the filter design depends on the runtime `sample_rate_hz` (and the
-  compiled-in `Np`), the coefficient table is loaded/computed once per
-  `adsb_demod_create()` call and passed into ispc as flat arrays, rather
-  than baked in as one fixed constant table.
-- **`preamble.ispc`**: correlate the fixed 16-chip preamble pattern against
-  the last 16 chips' worth of envelope samples at each of the tested
-  sub-symbol phases (`Np`-dependent, ~10 out of 12 in the prototype); natural
-  vectorization axis is across phases (SIMD lanes = phase candidates,
-  gang width driven by the compiled-in `Np`), producing the best-phase
-  index + score per evaluation.
-- **`slice.ispc`**: given a locked phase, slice up to 112 PPM bits in
-  parallel (each bit only needs two envelope samples half a symbol apart)
-  and reduce to the packed bits + magnitude sum. This one benefits most from
-  wide vectorization since 112 independent bit comparisons is very
-  SIMD-friendly.
+## Algorithm
 
-Longer term, since ispc also has an experimental GPU/`ispc -mgpu` path, and
-these kernels are simple, mostly-independent, data-parallel operations, they
-should port to a real GPU backend (CUDA/Metal/Vulkan compute) later without
-much conceptual change if CPU throughput isn't enough — worth validating
-early whether CPU SIMD alone is sufficient for the target sample rates
-before investing there.
+Each input block (128k samples) goes through the stages below.
+`AdsbDemod::exec` ([proto/src/dsp/demod.cpp](proto/src/dsp/demod.cpp)) runs
+stages 1–4, and `compute_frame_view` and `update_aircraft_from_me` run the
+decode stages.
 
-### CLI (first deliverable)
+Before a block is demodulated, its guard padding is filled with the
+neighboring blocks' samples (see [Runtime and threading](#runtime-and-threading)).
+Each block scans only the preamble positions centered on its own samples, and
+reads into the trailing padding for the tap window and the rest of the frame.
+A frame that straddles a boundary therefore decodes as if the stream were one
+array.
 
-`adsb-cli` should support at minimum:
+```mermaid
+flowchart TD
+    IQ["IQ block (cf32, guard-padded)"] --> R["1. Polyphase resample to 12 samples/µs → |z|<br/>+ block sum of squares (RMS)"]
+    R --> P["2. Preamble correlation at every position"]
+    P --> S["3. Greedy peak selection<br/>(threshold × RMS, exclusion radius)"]
+    S --> B["4. PPM bit slicing, 112 bits<br/>(magnitude threshold × RMS)"]
+    B --> C["5. CRC-24 / DF / ICAO validation<br/>+ single-bit correction (DF17/18)"]
+    C --> A["6. Aircraft state from DF17/18 ME field"]
+```
 
-- `--file <path.sigmf-data>` — read a captured IQ file (reusing the existing
-  `.sigmf-meta` for sample rate/format) and run the demodulator over it,
-  printing decoded frames (hex payload, DF, ICAO if CRC valid, confidence).
-- `--rtlsdr` (behind a build flag / optional dependency) — live capture via
-  librtlsdr, same output path.
-- Options to dump intermediate stats (frame rate, CRC pass rate) for
-  regression-testing against the Julia prototype's output on the same
-  capture file.
+1. **Resample and envelope** (`resample_block` in
+   [kernels.ispc](proto/src/dsp/kernels.ispc)).
+   - A polyphase FIR bank (`Np` phases × `taps`; the default is 64 × 32)
+     resamples the complex input to `ADSB_SAMPLES_PER_SYMBOL` (12) samples
+     per µs, and each output is the magnitude `|z|`.
+   - Output `m` sits at input position `m·ry/rx + 1/2 + 1/(2Np)`. The
+     position is computed in closed form in 36-bit fixed point, and its
+     integer and fractional parts give the center sample and the filter
+     phase. Outputs don't depend on each other, and no divide is needed.
+     With an even tap count the window is centered half a sample later, so
+     the `1/2` is dropped and outputs land at the same input times.
+   - 32 taps fill each filter row exactly (64 floats); 33 would pad each
+     row to 80.
+   - The SIMD gang runs across taps for one output at a time. Every tap is
+     stored twice (`h0,h0,h1,h1,…`), so each load of coefficients lines up
+     with the interleaved I/Q input without shuffles. Each filter row is
+     zero-padded to a multiple of 16.
+   - Partial sums are combined with a transpose-and-sum across the batch of
+     outputs.
+   - The same pass also sums the squares of the raw input, which gives the
+     block RMS.
+   - The work is split into contiguous ranges, one per ispc task. The output
+     count is rounded up to a multiple of 64, so every batch is full and the
+     kernel has no bounds checks.
+2. **Preamble correlation** (`preamble_scan`).
+   - Every output position `k` gets the score
+     `Σ y[k + j·6]·pat[j]` over the 16 half-µs chips of the fixed Mode S
+     preamble `[1,-1,1,-1,-1,-1,-1,1,-1,1,-1,-1,-1,-1,-1,-1]`.
+   - There is no sub-chip phase search. Peak selection handles alignment.
+3. **Peak selection** (`select_preamble_peaks` in
+   [peak_select.cpp](proto/src/dsp/peak_select.cpp)).
+   - The candidates are the positions scoring at least
+     `--preamble-min × RMS`.
+   - Repeat until none are left: accept the highest remaining score, then
+     discard everything within `(8 + 112) µs` of it on either side.
+   - This rejects the correlation's own sidelobes and matches inside the
+     message pulses, so the slicer starts on the true peak.
+   - The last pick's exclusion zone carries over into the next block, if
+     that block is contiguous. The selection is greedy per block, so a pick
+     near the end of a block stays final even if a stronger peak follows just
+     past the boundary. A sidelobe picked there fails CRC, and its zone then
+     suppresses the true peak, losing the frame. This is rare (about 1e-4 per
+     strong frame); see the note on `AdsbDemod` in
+     [demod.h](proto/src/dsp/demod.h) for a fix.
+4. **Bit slicing** (`slice_scan`).
+   - For each accepted candidate, the slicer reads 112 bits starting 8 µs
+     after the preamble. Bit `i` is `y[a] > y[a+6]`: early chip against
+     late chip.
+   - `Σ|y[a] − y[a+6]|` is the frame magnitude. Frames below
+     `--slice-mag-min × RMS` are dropped. `confidence` is this magnitude
+     divided by the RMS.
+   - The thresholds are scaled by the RMS instead of normalizing `y`. This
+     works because everything downstream is linear in the input scale.
+5. **Validation** ([frame_decode.cpp](proto/src/decode/frame_decode.cpp)).
+   - The DF comes from the first 5 bits. For short formats (DF 0/4/5/11) the
+     CRC-24 runs on the leading 56 bits.
+   - **DF17/18**: the frame is valid when the remainder is 0. Otherwise the
+     remainder is looked up in a table of single-bit syndromes, which leaves
+     out the 5 DF bits. On a match the bit is flipped back (`crc=fixed`).
+   - **DF11**: the frame is valid when the remainder is < 63, since the low
+     bits carry the interrogator ID.
+   - An ICAO address from a valid DF11/17/18 is added to a known set.
+   - **DF 0/4/5/16/20/21/24**: the address/parity field is ICAO XOR CRC. The
+     frame is accepted when the remainder matches an address that has
+     already been seen. DF24 is any DF from 24 to 31, since only its first
+     two bits are the format.
+   - **DF19/22** (military) have no general parity rule, so they are
+     reported as `crc=unchecked`. Every other DF is unassigned, which means
+     the frame is corrupt, and it fails.
+6. **Aircraft decode** ([aircraft.cpp](proto/src/decode/aircraft.cpp)).
+   Valid DF17/18 frames update per-ICAO state:
+   - callsign and emitter category (TC 1–4);
+   - barometric altitude and position (TC 9–18), using global CPR decode
+     from an even/odd frame pair;
+   - ground speed and track, or magnetic heading and IAS/TAS, plus vertical
+     rate (TC 19 subtypes 1–4);
+   - squawk (TC 28 subtype 1, emergency status);
+   - selected altitude and heading, baro setting and autopilot modes (TC 29
+     version 2);
+   - ADS-B version, NACp and SIL (TC 31, operational status);
+   - on-ground or airborne, from the position type (TC 5–8 surface, 9–18 and
+     20–22 airborne), and alert/SPI from the surveillance status.
 
-### Path to Flutter (not building yet, just keeping the door open)
+   Valid or address-matched replies of other DFs add altitude (DF0/4/16/20),
+   squawk (DF5/21), flight status: on ground, alert and SPI (DF4/5/20/21),
+   vertical status (DF0/16) and capability (DF11). The Comm-B field of
+   DF20/21 is decoded when it holds BDS 2,0 (callsign), 4,0 (selected
+   altitude, baro setting), 5,0 (roll, TAS) or 6,0 (heading, IAS, Mach). The
+   reply doesn't say which register it holds, so it is inferred by pyModeS's
+   rules; a field that fits both 5,0 and 6,0 goes to whichever agrees with
+   the aircraft's ADS-B velocity, and any other ambiguous field is skipped.
+   Not decoded: surface and GNSS positions, other Comm-B registers, ACAS
+   advisories, and Gillham or metric altitudes. Every frame is also published
+   with a one-line `summary` of what it says. Every valid or
+   address-matched frame, of any DF, counts toward the aircraft's message
+   count and signal level, and updates its last-seen time. The aircraft
+   record is emitted when a decoded field changes, and otherwise at most once
+   a second.
 
-Two integration options, both supported by the architecture above without
-changes to the core library:
+### Limitations
 
-1. **Direct FFI**: Flutter app links `libadsbdemod` directly via `dart:ffi`,
-   calls `adsb_demod_push` with samples read from a file/socket/USB, gets a
-   Dart callback per frame. Lowest latency, single-process, good for a
-   desktop/embedded (e.g. Raspberry Pi) deployment where UI and demod run
-   together.
-2. **WebSocket server**: a small C++ (or reuse the CLI's plumbing) process
-   wraps `libadsbdemod`, sources samples (file or RTL-SDR), and streams
-   decoded frames as JSON or a compact binary frame format over a
-   WebSocket. Flutter (or any other client, including a web dashboard)
-   connects remotely. Good for "antenna box on the roof, UI on a laptop/
-   phone" deployments.
+- **Per-block RMS.** The thresholds scale with each block's own RMS, with no
+  smoothing across blocks.
+- **Gaps break stitching.** Blocks are joined only when their sample ranges
+  meet. After a dropped block (the compute thread fell behind) the padding
+  stays zero, so a frame across the gap is lost. Stitching also looks just one
+  block ahead, so a block shorter than the trailing padding (such as the last
+  one at end of stream) leaves the rest of the padding zero.
+- **Detection is sensitive to amplitude.** At 20 dB SNR, `adsb_sim_eval` on
+  `boston.json` decodes about 100% of full- and 0.7-amplitude aircraft, about
+  93% at 0.5 amplitude, about 29% at 0.35 and about 0% at 0.25. Nearly all of
+  the misses have no preamble candidate at all.
+- **The WebSocket exit crash.** `adsb` can segfault at exit while a WebSocket
+  client is still connected. See
+  [ws-exit-segfault.md](proto/doc/known-issues/ws-exit-segfault.md).
 
-Both consume the same `adsb_frame_t` stream, so building #2 later is mostly
-a serialization + networking task, not a redesign.
+## Runtime and threading
 
-## Software-side AGC / normalization (open-ended — document current approach, revisit later)
+```mermaid
+flowchart LR
+    subgraph async["async core (coro runtime, 1 thread)"]
+        SRC["source task:<br/>file read / UDP recv + VRT assembly"]
+        WS["ws_publisher task<br/>(one coroutine per client)"]
+    end
+    RTL["librtlsdr thread"] -. "rtlsdr source" .-> SRC
+    subgraph compute["compute CPUs"]
+        LOOP["run_demod_loop<br/>(blocking thread)"] --> OMP["OpenMP team<br/>(ispc tasks)"]
+    end
+    SRC -- "CoroStream&lt;IqBlock&gt;" --> LOOP
+    LOOP -- "JSON lines (broadcast channel)" --> WS
+    LOOP -- "aircraft updates" --> DB[(SQLite)]
+```
 
-Distinct from any tuner/radio-side AGC (which is disabled in the prototype's
-live-capture path, `set_agc_mode`/`set_tuner_gain_mode` set to 0/manual):
-after reading a block of IQ samples, the prototype estimates the noise
-floor as the RMS magnitude of the raw samples, `sqrt(mean(abs2.(x)))`, and
-divides the IQ block by that value before any filtering/detection. This
-normalizes the average noise magnitude to roughly 1, which is what lets the
-downstream preamble-correlation and bit-slicing magnitude thresholds
-(`c < 3`, `mag > 2*56`, etc.) be simple hardcoded-ish constants instead of
-needing to be rescaled per capture/session.
+- **Sources.** Every source yields a `coro::CoroStream<IqBlock>`
+  ([iq_block.h](proto/src/dsp/iq_block.h)). Each block is allocated with
+  `AdsbDemod::padding()` zeroed samples on either side of the real ones and
+  records its stream sample index (`start`). Dropped blocks still count
+  toward `start`, so frame indices stay correct across drops.
+  - The lead is `(taps-1)/2` samples, which is how far the tap window reaches back.
+  - The trail covers the tap window plus one full frame after the block's last
+    sample. It grows with the sample rate: 317 samples at 2.4 Msps and
+    1515 at 12 Msps (32 taps).
+  - `file` reads a few chunks ahead of the consumer.
+  - `vita49` reassembles packets by timestamp, converts int16 samples to
+    float and zero-fills lost packets.
+  - `rtlsdr` converts uint8 samples in the librtlsdr callback.
+- **Demod loop.** `run_demod_loop`
+  ([pipeline.h](proto/src/apps/adsb/pipeline.h)) runs on a
+  `coro::spawn_blocking` thread and pulls blocks with `coro::blocking_next`.
+  - A `BlockStitcher` holds each block until the next one arrives. It then
+    copies the head of the new block into the held block's trailing padding
+    and the held block's tail into the new block's leading padding, and
+    demodulates the held block.
+  - This costs one block of latency (about 55 ms at 2.4 Msps) and copies a
+    few hundred samples per block.
+- **CPU layout** ([cpu_layout.h](proto/src/common/cpu_layout.h)).
+  - The coro runtime and IO run on the first allowed core and its SMT
+    siblings.
+  - The demod thread and its OpenMP team are limited to the remaining CPUs,
+    and the ispc task count is sized to that set.
+  - `ADSB_PIN=0` turns the split off.
+- **ispc tasks.** [tasksys.cpp](proto/src/common/tasksys.cpp) implements
+  ispc's `launch`/`sync` ABI on OpenMP.
+  - At startup, `adsb` sets `OMP_WAIT_POLICY=passive` and re-execs itself,
+    unless `OMP_WAIT_POLICY` or `GOMP_SPINCOUNT` is already set.
+  - Without this, idle workers spin through the ~55 ms gaps between live
+    blocks.
 
-This is a reasonable, simple starting point but is very much an open
-problem rather than a settled design:
+Environment variables:
 
-- It's a block-level (whole-capture or whole-chunk) estimate, not adaptive
-  within a block or across time — a noise floor that drifts during a long
-  live-capture session isn't tracked.
-- RMS-over-the-whole-block conflates noise with signal energy — a very busy
-  RF environment (lots of concurrent transmissions) would bias the estimate
-  upward and could suppress sensitivity to weaker signals.
-- No outlier/robust estimation (e.g. median-based) is used, so a single
-  strong transmission in the block could skew the normalization for the
-  rest of it.
+| Variable | Effect |
+|---|---|
+| `ADSB_TIMING=1` | Per-stage timings for each block, plus a throughput and realtime-factor line every second |
+| `ADSB_NTASKS=N` | Overrides the ispc task count |
+| `ADSB_PIN=0` | Disables the async/compute CPU split |
+| `ADSB_TASKSYS_STATS`, `ADSB_SPIN_US` | tasksys diagnostics and spin tuning; see [tasksys.cpp](proto/src/common/tasksys.cpp) |
 
-For the port: keep the same RMS-normalization approach as the default
-(computed per input block pushed to the demodulator), but treat the
-normalization strategy itself as swappable/parameterized rather than
-fixed, so alternatives can be tested empirically against the same capture
-data later.
+## Outputs
 
-**Decided: per-block, independently computed, no cross-block smoothing.**
-The phase-0 prototype implements exactly this today — a parallel-reduction
-kernel (`sumsq_block`) computes RMS from each block's own raw samples only,
-with no running/exponentially-smoothed estimate carried across blocks.
-An EMA-smoothed estimate was considered specifically to avoid a
-discontinuity for a frame straddling a block boundary, and rejected: if
-the receiver's own AGC steps mid-stream, that step won't land on a block
-boundary either, so there's no single "correct" value a block has to
-begin with in that case — smoothing would just delay reacting to a real
-level change rather than fix the discontinuity. Preferred failure mode is
-to miss/mis-decode whichever block a real level change lands in, then
-normalize correctly from the next block on, rather than lag behind every
-block trying to avoid that. This can be revisited if it proves to be a
-real problem in practice, but isn't expected to be one.
+- **stdout** prints one line per frame:
+  `idx=<sample> bits=112 confidence=<c> df=<n> icao=<hex|??????> crc=<ok|fixed|fail|unchecked> payload=<28 hex>`.
+  `unchecked` marks military DF19/22, which have no general parity rule.
+  When an aircraft changes, it also prints
+  `aircraft icao=... callsign=... cat=... squawk=... alt=...ft lat=... lon=... gs=...kt trk=... vr=...fpm hdg=... ias=...kt tas=...kt mach=... roll=... sel_alt=...ft ground alert spi t=...s`,
+  with only the fields that are known (and the flags that are set).
+- **WebSocket** (`--ws-port`) broadcasts one JSON object per message:
+  - `{"type":"frame",...}`, which includes `crc_ok`, `crc_checked` (false for
+    DF19/22), `crc_fixed_bit` (the bit single-bit correction flipped, or null)
+    and `summary`, a one-line description of what the frame says (for example
+    `"Velocity · 223 kt GS · trk 235° · -1408 fpm"`, null when the CRC failed).
+    The UI reports the CRC pass rate of the
+    self-checking formats (DF11/17/18) separately from the address-match
+    rate of DF0/4/5/16/20/21/24, and counts corrected frames separately. The
+    latter also fails correct frames from aircraft not yet confirmed on
+    DF11/17/18;
+  - `{"type":"aircraft",...}`, the aircraft's whole state. It is sent when a
+    decoded field changes, and otherwise at most once a second while frames
+    from the aircraft keep arriving. Besides the ADS-B fields it has:
+    - `category`, the emitter category (for example `"A3"`, large);
+    - `squawk`, from DF5/21 replies and ES emergency status;
+    - `altitude_ft`, from ES airborne position and DF0/4/16/20 replies;
+    - `heading_deg` (magnetic), `ias_kt` and `tas_kt`, from airspeed velocity
+      messages (TC19 subtypes 3-4) and Comm-B BDS 5,0 and 6,0;
+    - `mach` (BDS 6,0) and `roll_deg` (BDS 5,0, positive right wing down);
+    - `on_ground`, from DF4/5/20/21 flight status, DF0/16 vertical status,
+      DF11 capability and the ES position type; null until one arrives;
+    - `alert` (squawk changed, or an emergency) and `spi` (ident), from flight
+      status and ES surveillance status;
+    - `selected_altitude_ft`, `selected_altitude_source` (`"MCP"` or `"FMS"`),
+      `selected_heading_deg`, `baro_setting_hpa` and `autopilot_modes` (of
+      `"AP"`, `"VNAV"`, `"ALT"`, `"APP"`, `"LNAV"`), from ES target state
+      (TC29, version 2); selected altitude and baro setting also from BDS 4,0;
+    - `adsb_version`, `nac_p` (position accuracy, 0-11) and `sil` (integrity,
+      0-3), from ES operational status (TC31), the last two from version 1;
+    - `messages`, the count of frames of any DF from that address;
+    - `signal_db`, a moving average of the per-bit pulse amplitude relative to
+      its block's RMS. This is a relative level, not absolute power.
 
-Still open:
+    `last_seen_s` is stream time;
+    `last_seen_unix_s` is wall-clock time, the stream's start plus
+    `last_seen_s`. In file playback it runs ahead of (or behind) the real clock;
+  - `{"type":"spectrum",...}`, when `--spectrum` is on;
+  - `{"type":"snapshot","t","t_min","t_max","aircraft":[{"state":{...},"track":[[lat,lon,alt_ft],...]}]}`,
+    when `--history-db` is set. It gives the sky at Unix time `t`: every aircraft
+    updated in the 10 minutes up to `t`, with its latest state and its
+    positions in that window (up to 1000, oldest first, `alt_ft` null where
+    unknown). `t_min`/`t_max` span
+    the whole database and are null when it's empty. A client receives one on
+    connect (`t` = the newest update), which serves as a backfill, and one in
+    reply to each `{"type":"seek","t":<unix s>}` it sends;
+  - `{"type":"aircraft_history","icao","t","points":[[t,alt_ft,gs_kt,vr_fpm,signal_db,selected_alt_ft],...]}`,
+    when `--history-db` is set, in reply to
+    `{"type":"aircraft_history","icao":"<hex>","t":<unix s>}` (`t` optional,
+    default the aircraft's latest update). It holds that aircraft's updates in
+    the 30 minutes up to `t`, oldest first, with null for fields not yet known.
+    The UI uses it for the selected aircraft's detail charts;
+  - `{"type":"activity","bucket_s":60,"t0","counts":[...]}`, when
+    `--history-db` is set, in reply to `{"type":"activity","from":<unix s>}`
+    (`from` optional, default the whole database). `counts` holds the number of
+    distinct aircraft updated in each 60 s bucket (aligned to the Unix epoch),
+    consecutive from the bucket starting at `t0` (0 where none were), from the
+    bucket holding `from` to the latest. `t0` is null when there are none. The
+    last bucket may still be filling. The UI fetches the whole database after
+    connecting (about 15 ms per hour of history), then re-fetches from the last
+    bucket every 30 s, for the scrubber's histogram;
+  - `{"type":"heatmap","west","south","east","north","width","height","t0","t1","max","cells":[i,n,...]}`,
+    when `--history-db` is set, in reply to
+    `{"type":"heatmap","west","south","east","north","width":<int>,"height":<int>,"t0","t1"}`
+    (`t0`/`t1` optional, default the whole database). It divides the box into a
+    `width`×`height` grid (each at most 512), even in Web Mercator so it lines up
+    with the map, row 0 at the north. `cells` lists each nonzero cell as its
+    index `row*width+col` followed by the number of distinct flights that
+    crossed it between `t0` and `t1`; `max` is the largest. A flight is one
+    aircraft's positions with no gap of 30 minutes or more; positions under
+    60 s apart are joined by a line, so a flight counts in every cell it
+    passed through, not just where it was sampled. The grid is computed on
+    request (about 40 ms for an hour of history, 0.2 s for 5 h over a
+    400×300 grid). The UI's map heatmap asks for one grid cell per 4×4
+    pixels of the current view, again after the view or shown time changes
+    and every 30 s while live.
 
-- Robust statistics (median or percentile-based magnitude) instead of RMS,
-  to reduce sensitivity to strong in-block signals.
-- Whether normalization should live inside `libadsbdemod` at all vs. being
-  a preprocessing step the caller (CLI/FFI host) applies before pushing
-  samples — keeping it in the library is simpler for now (one thing to
-  configure, consistent behavior across CLI/FFI/WS callers) but worth
-  reconsidering if callers want more control.
+  Snapshot, history, activity and heatmap replies are unicast; other clients don't see them.
 
-As with other tunables, the detection thresholds that currently rely on
-this normalization (preamble correlation score, PPM slice magnitude, and
-any others found during porting) should be configurable parameters with
-defaults matching the prototype's hardcoded values, not fixed constants —
-see [Design principle: parameterize everything](#design-principle-parameterize-everything).
+  The Flutter UI connects to `ws://127.0.0.1:8765` by default, so run
+  `adsb --ws-port 8765 ...`.
+- **SQLite** (`--history-db`) holds an
+  `aircraft_updates(t, icao, lat, lon, state)` table in WAL mode, indexed on
+  `(t, icao)` (`t` is `last_seen_unix_s`; the index replaces an older one on
+  just `t`, dropped on open) and `(icao, t)`. Every published aircraft update is written live,
+  with `state` holding the published JSON. Snapshots read it over a separate
+  read-only connection. The schema changed from the old `positions` table, so
+  start a new file.
 
-## Open questions / things to validate before or during implementation
+  The UI is one page: the map over the aircraft table, with a scrubber bar
+  under both. The **Frames** and **Spectrum** chips in the top bar show the
+  frame log and spectrum waterfall in a dock that slides in on the right
+  (stacked when both are shown); drag its left edge to resize it.
 
-- **`sdr/include/adsbsdr.h` plugin ABI shape & versioning**: confirm RTL-SDR
-  is the only near-term backend target (it is, for now — matches the test
-  hardware), and whether the `ISampleSource` ABI should be designed up
-  front with SoapySDR/HackRF in mind or kept minimal and reshaped when a
-  second backend is actually added. Since backends are now independent
-  `.so`s loaded via `dlopen()` rather than compiled into one library, the
-  ABI also needs a versioning/compatibility story (e.g. an API version
-  field the host checks after loading) so a host and a backend built at
-  different times fail loudly instead of silently misbehaving. It also
-  needs to carry a per-read "gap since last read" signal (see [Streaming
-  state and gap handling](#public-c-abi-sketch)) so hosts can drive
-  `adsb_demod_reset()` correctly.
-- **Testing strategy**: plan to validate the C++/ispc core against the
-  Julia prototype by running both over the same `.sigmf-data` capture and
-  diffing decoded frames (sample index + payload), not just unit-testing
-  kernels in isolation.
+  In the UI, a history db puts a time scrubber under the map and table. Dragging
+  it shows the table and map (with trails) as of that time. The scrubber has two
+  levels. A thin overview strip spans the whole recording, with ticks that are
+  full height at local midnight, shaded as a histogram of how many aircraft
+  were seen per minute (each pixel shows its busiest minute), so busy periods
+  and gaps stand out. Clicking or dragging on it jumps to that time.
+  The slider below it covers only a window of that span (10 min to 12 h, 30 min
+  by default; pick it from the menu on the left). ◀/▶ move by one window, and
+  the time label opens a date and time picker. **Live**, or releasing the
+  slider at the right end of the recording, returns to live data. The frame
+  log and spectrum always show live data.
 
-## Non-goals (for this library)
+  Map markers and trails are coloured by altitude (legend at the bottom left).
+  Selecting an aircraft, on the map or in the table, opens a panel of its
+  altitude, ground speed, vertical rate and signal over the last 30 minutes.
+  With a history db these charts start full; without one they fill in from
+  live updates.
+- **HDF5** (`--debug-h5`) records frames for offline debugging; see below.
 
-- Full Mode S/ADS-B protocol decode (position, velocity, callsign, etc.) —
-  belongs downstream of this library, either in the Flutter app or a
-  separate decode library.
-- A UI of any kind — this repo is the demod core + CLI + (later) transport
-  layer only.
+### Debug HDF5
+
+`--debug-h5 <file>` records each frame `AdsbDemod` returns, whether or not it
+passes CRC, together with the IQ it came from and everything needed to rerun
+the demodulator on it. The file is flushed about once a second, so it stays
+readable after Ctrl+C. [tools/debug_h5.jl](proto/tools/debug_h5.jl) reruns
+every recorded frame from its IQ and checks the result against the stored
+envelope, bits, preamble score and confidence. It also works as a library for
+stepping through a single frame:
+
+```sh
+adsb --debug-h5 frames.h5 --debug-h5-failed-only file --iq capture.sigmf-data
+julia proto/tools/debug_h5.jl frames.h5   # needs HDF5.jl
+```
+
+Positions are 0-based. *Output* indices count resampled envelope samples from
+the start of the frame's block; *input* indices count IQ samples from the
+block's first real sample.
+
+| Path | Contents |
+|---|---|
+| `/` attributes | `format_version`, `command_line`, `sample_rate_hz`, `output_rate_hz`, `samples_per_symbol`, `num_bits`, `preamble_pattern`, `preamble_spacing`, `bit_offset`, `exclusion_radius`, `max_lookahead`, `preamble_score_min`, `slice_magnitude_min`, and the resampler schedule `pos_frac_bits`, `pos_step`, `pos_offset`, `index_offset`, `window_lead` |
+| `/filter` | float32 `{num_phases, taps}` in C order, so Julia reads it as `h[tap, phase]`. Taps are in the order they multiply increasing sample indices. Attributes: `taps`, `num_phases`, `cutoff_hz` (0 when loaded), `description` (for example `hann, cutoff 1.2 MHz` or `loaded <path>`) |
+| `/frames/<sample_index>` attributes | `sample_index` (stream index of the preamble, as printed), `block_start`, `block_n`, `output_index` (preamble position), `envelope_start`, `iq_start`, `level` (block RMS), `preamble_score` and `confidence` (both divided by `level`), `df`, `icao`, `icao_known`, `crc` (`ok`, `fixed`, `fail` or `unchecked`), `crc_ok`, `fixed_bit`, `num_bits`, `payload_raw` and `payload` (28 hex digits, before and after CRC correction) |
+| `/frames/<sample_index>/iq` | complex float32 (`r`, `i` compound), input indices `iq_start ...`. These are exactly the samples the stored envelope reads. |
+| `/frames/<sample_index>/envelope` | float32 envelope at output indices `envelope_start ...`, running from 16 us before the preamble to 8 us past the frame, clipped to the block |
+| `/frames/<sample_index>/bits` | uint8, the 112 sliced bits (raw, before correction) |
+
+Recomputing the demodulator's steps:
+
+- **Envelope at output `m`:** let `P = m*pos_step + pos_offset`,
+  `base = P >> pos_frac_bits` and
+  `phase = ((P & (2^pos_frac_bits - 1)) * num_phases) >> pos_frac_bits`.
+  Then `y[m] = |sum_j h[phase, j] * x[base - window_lead + j]|`, where `x[i]`
+  is `iq[i - iq_start]`.
+- **Preamble score:** `sum_k preamble_pattern[k] * y[output_index + k*preamble_spacing] / level`.
+- **Bit `i`:** with `s = output_index + bit_offset + i*samples_per_symbol`,
+  the bit is 1 when `y[s] - y[s + samples_per_symbol/2] > 0`.
+- **Confidence:** the sum of `|y[s] - y[s + samples_per_symbol/2]|` over all
+  bits, divided by `level`.
+
+`level` is the RMS of the frame's whole block, so it can't be recomputed
+from the stored IQ alone, and it is stored as an attribute instead.
+
+## Resampling filter
+
+By default `adsb` designs the polyphase resampling filter at startup, once
+the input rate is known. The design is the same as `PolyphaseFilterBank` in
+[polyphase.jl](polyphase.jl): a windowed sinc lowpass (Hann by default) of
+`taps × phases` coefficients at `phases` times the input rate, scaled to
+unity DC gain, with phase p taking every `phases`-th coefficient from p.
+
+The cutoff is `--filter-cutoff` (3 MHz), clamped to the input Nyquist and to
+the resampled Nyquist (6 MHz at 12 Msps out). Above 6 Msps in, the filter
+therefore also band-limits the input, the anti-alias and noise filter
+that was otherwise a separate prefilter. At 2.4 Msps it clamps to 1.2 MHz;
+with `--filter-taps 33` that is exactly the old `filters/filter.bin`.
+
+Lower cutoffs pay off at high input rates. These are clean-frame CRC OK
+rates from `adsb_sim_eval` (boston scenario, 20 s, 33 taps; 32 taps gives
+the same or within one frame) by cutoff:
+
+| Input rate, SNR | 1.5 MHz | 2 MHz | 3 MHz | 4 MHz | Nyquist (old) |
+|---|---|---|---|---|---|
+| 12 Msps, 8 dB | 27.5% | 25.2% | 18.2% | 11.9% | 1.0% |
+| 12 Msps, 12 dB | 51.6% | 49.2% | 42.6% | 38.5% | 28.1% |
+| 24 Msps, 8 dB | 34.6% | 34.6% | 29.9% | 27.3% | 19.1% |
+| 24 Msps, 12 dB | 58.4% | 58.6% | 55.0% | 50.7% | 44.0% |
+
+The window barely matters, and a pulse-matched filter doesn't help. The
+table compares clean-frame CRC OK rates from `adsb_sim_eval` (boston
+scenario, 30 s × 3 seeds, 32 taps):
+
+| Design | 2.4 Msps, 18 dB | 2.4 Msps, 22 dB | 12 Msps, 8 dB | 12 Msps, 14 dB |
+|---|---|---|---|---|
+| Hann (default) | 52.8% | 78.4% | 18.4% | 57.3% |
+| Hamming | 52.9% | 78.3% | 18.3% | 57.4% |
+| Blackman | 53.0% | 78.4% | 18.6% | 57.4% |
+| Kaiser β 4 / 8 / 12 | 52.8–53.1% | 78.4–78.6% | 18.2–18.7% | 57.2–57.6% |
+| Hann, `--filter-matched` | 47.7% | 73.2% | 22.9% | 63.2% |
+| Hann, cutoff 1.5 MHz | 52.8% | 78.4% | 27.4% | 66.6% |
+| Hann, cutoff 1.0 MHz | 52.0% | 78.1% | 13.9% | 52.5% |
+
+- **Window:** sidelobe level doesn't matter at the demodulator's SNRs, and
+  the transition width changes the response less than the cutoff does.
+- **Matched filter:** `--filter-matched` beats the default at 12 Msps only
+  because it narrows the band, and a plain 1.5 MHz cutoff does better. At
+  2.4 Msps it loses about 5 points, almost all in preamble detection: the
+  wider pulses leak into the neighbouring chips, which the preamble
+  correlation counts negatively. On the real 3.2 Msps gqrx capture it
+  decodes 78 DF11/17/18 frames against 90 for every window.
+
+The cutoff is what to tune, and only at high input rates.
+
+`--filter` and `--filter-meta` load a bank from files instead. The files
+hold raw float32 coefficients in Julia column-major order (taps × Np), with a
+`key=value` sidecar (`taps`, `Np`, `planes`, `dtype`). Only plane 0 is used.
+[export_filter.jl](proto/filters/export_filter.jl) writes them from
+`PolyphaseFilterBank`:
+
+```sh
+cd adsb
+julia proto/filters/export_filter.jl [M=33] [Np=64] [out_prefix]
+```
+
+`filters/filter.bin` (33 × 64) and `filters/filter101.bin` (101 × 65) are
+examples of such files; both use the input-Nyquist cutoff.
+
+Either way, the taps are reversed so the kernel walks coefficients and
+samples in the same direction. Each tap is then duplicated for interleaved
+I/Q, and each row is padded.
+
+## Testing
+
+- **`ctest`** runs four tests:
+  - `adsb_sim_test`: simulator encoders, CRC, modulation round trip,
+    scenario parsing and determinism;
+  - `vita49_stream_test`: VRT assembly;
+  - `peak_select_test`;
+  - `block_stitcher_test`: guard padding across contiguous, short and
+    non-contiguous blocks.
+- **Reference output.** Run
+  `adsb --filter-taps 33 --filter-cutoff 6e6 file --iq tests/data/adsb_cf32.sigmf-data`
+  (12 Msps; the reference was made with a 33-tap, 6 MHz filter). It should report 24
+  frames, and its stdout should match
+  [handoff/frames_ref_adsb_cf32.txt](proto/handoff/frames_ref_adsb_cf32.txt)
+  byte for byte. The capture isn't in git; see
+  [handoff/HANDOFF.md](proto/handoff/HANDOFF.md).
+- **Detection statistics.** Run
+  `adsb_sim_eval --scenario scenarios/boston.json --snr-db 20 --duration 20`
+  and compare the tables before and after a change. Adding `--block 1024`
+  puts hundreds of frames across block boundaries, which exercises the
+  stitching.
