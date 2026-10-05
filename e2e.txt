@@ -1,0 +1,56 @@
+== build
+filter: 32 taps x 64 phases, hann, cutoff 3 MHz
+listening for VRT/UDP on 0.0.0.0:50000 at 2e+08 Hz (Ctrl+C to stop)
+streaming VRT/UDP to 127.0.0.1:50000 (stream id 1)
+simulating ADS-B: rate=200000000 Hz, seed=1, snr=30 dB, 5 aircraft
+  icao=a1b2c3 callsign=SIM0001 lat=42.3601 lon=-71.0589 alt=35000ft gs=450kt trk=90 vr=0fpm
+  icao=a4d5e6 callsign=SIM0002 lat=42.8000 lon=-70.5000 alt=20000ft gs=250kt trk=200 vr=-1500fpm
+  icao=a7f801 callsign=SIM0003 lat=41.9000 lon=-72.0000 alt=28000ft gs=480kt trk=45 vr=1200fpm
+  icao=aa1234 callsign=SIM0004 lat=43.1000 lon=-71.9000 alt=8000ft gs=180kt trk=315 vr=0fpm
+  icao=acbeef callsign=SIM0005 lat=42.0000 lon=-70.2000 alt=41000ft gs=520kt trk=270 vr=0fpm
+[vita49_send] render queue: 253 batches of 44 packets (20.0 ms, 16.3 MB)
+[vita49_send] sent 4000000320 samples in 20.00 s: 200.0 Msps (100.0% of the 200.0 Msps requested); 0 samples (0.00%) dropped on overrun
+send: 14.20 user 4.15 sys 20.00 wall 91% cpu
+no packets for 2 s; stopping
+vita49: data packets 11111112, context 20, zero-filled samples 0, late/duplicate 0, restarts 0, other-stream 0, invalid 0, discarded before rate known 0, blocks dropped (compute thread behind) 0
+vita49: whole run: 100.0% of the 200.0 Msps real-time signal demodulated over 20.0 s
+518 frame(s) decoded
+adsb: 18.01 user 7.80 sys 23.02 wall 112% cpu
+== build
+filter: 32 taps x 64 phases, hann, cutoff 3 MHz
+listening for VRT/UDP on 0.0.0.0:50000 at 2e+08 Hz (Ctrl+C to stop)
+streaming VRT/UDP to 127.0.0.1:50000 (stream id 1)
+simulating ADS-B: rate=200000000 Hz, seed=1, snr=30 dB, 5 aircraft
+  icao=a1b2c3 callsign=SIM0001 lat=42.3601 lon=-71.0589 alt=35000ft gs=450kt trk=90 vr=0fpm
+  icao=a4d5e6 callsign=SIM0002 lat=42.8000 lon=-70.5000 alt=20000ft gs=250kt trk=200 vr=-1500fpm
+  icao=a7f801 callsign=SIM0003 lat=41.9000 lon=-72.0000 alt=28000ft gs=480kt trk=45 vr=1200fpm
+  icao=aa1234 callsign=SIM0004 lat=43.1000 lon=-71.9000 alt=8000ft gs=180kt trk=315 vr=0fpm
+  icao=acbeef callsign=SIM0005 lat=42.0000 lon=-70.2000 alt=41000ft gs=520kt trk=270 vr=0fpm
+[vita49_send] render queue: 253 batches of 44 packets (20.0 ms, 16.3 MB)
+[vita49_send] sent 4000000320 samples in 20.00 s: 200.0 Msps (100.0% of the 200.0 Msps requested); 0 samples (0.00%) dropped on overrun
+send: 14.11 user 4.19 sys 20.00 wall 91% cpu
+no packets for 2 s; stopping
+vita49: data packets 11111112, context 20, zero-filled samples 0, late/duplicate 0, restarts 0, other-stream 0, invalid 0, discarded before rate known 0, blocks dropped (compute thread behind) 0
+vita49: whole run: 100.0% of the 200.0 Msps real-time signal demodulated over 20.0 s
+518 frame(s) decoded
+adsb: 17.95 user 7.85 sys 23.02 wall 112% cpu
+== build
+filter: 32 taps x 64 phases, hann, cutoff 3 MHz
+listening for VRT/UDP on 0.0.0.0:50000 at 2e+08 Hz (Ctrl+C to stop)
+streaming VRT/UDP to 127.0.0.1:50000 (stream id 1)
+simulating ADS-B: rate=200000000 Hz, seed=1, snr=30 dB, 5 aircraft
+  icao=a1b2c3 callsign=SIM0001 lat=42.3601 lon=-71.0589 alt=35000ft gs=450kt trk=90 vr=0fpm
+  icao=a4d5e6 callsign=SIM0002 lat=42.8000 lon=-70.5000 alt=20000ft gs=250kt trk=200 vr=-1500fpm
+  icao=a7f801 callsign=SIM0003 lat=41.9000 lon=-72.0000 alt=28000ft gs=480kt trk=45 vr=1200fpm
+  icao=aa1234 callsign=SIM0004 lat=43.1000 lon=-71.9000 alt=8000ft gs=180kt trk=315 vr=0fpm
+  icao=acbeef callsign=SIM0005 lat=42.0000 lon=-70.2000 alt=41000ft gs=520kt trk=270 vr=0fpm
+[vita49_send] render queue: 253 batches of 44 packets (20.0 ms, 16.3 MB)
+[vita49] WARNING: 99.5% of the 200.0 Msps real-time signal demodulated over 2.0 s; 0.5% dropped because the demodulator fell behind
+[vita49_send] sent 4000000320 samples in 20.00 s: 200.0 Msps (100.0% of the 200.0 Msps requested); 0 samples (0.00%) dropped on overrun
+send: 14.40 user 4.40 sys 20.00 wall 94% cpu
+[vita49] back to full rate: 100.0% of the 200.0 Msps real-time signal demodulated over 2.0 s
+no packets for 2 s; stopping
+vita49: data packets 11111112, context 20, zero-filled samples 0, late/duplicate 0, restarts 0, other-stream 0, invalid 0, discarded before rate known 0, blocks dropped (compute thread behind) 15
+vita49: WARNING: whole run: 100.0% of the 200.0 Msps real-time signal demodulated over 20.0 s; 0.0% dropped because the demodulator fell behind
+518 frame(s) decoded
+adsb: 17.84 user 7.89 sys 23.02 wall 111% cpu

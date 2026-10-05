@@ -36,10 +36,12 @@ dependencies:
   cupertino_icons: ^1.0.8
 
   # WebSocket client used to receive decoded-frame JSON lines from the
-  # adsb demod/decode backend (see proto/src/main.cpp's --ws-port).
+  # adsb demod/decode backend (see src/apps/adsb/main.cpp's --ws-port).
   web_socket_channel: ^3.0.1
   flutter_map: ^8.3.2
   latlong2: ^0.10.1
+  # Saves the display settings (units, clock) between runs.
+  shared_preferences: ^2.5.5
 
 dev_dependencies:
   flutter_test:

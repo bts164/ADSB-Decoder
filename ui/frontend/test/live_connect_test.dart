@@ -21,7 +21,7 @@ void main() {
     await tester.pump();
 
     // The app batches incoming frames/aircraft and only applies them (via
-    // setState) once a second -- see _flushUpdates in main.dart -- so poll
+    // setState) once a second -- see _flushUpdates in lib/page/frame_table_page.dart -- so poll
     // with real-time pumps rather than a single delay+pump, since a lone
     // pump() after the wait isn't guaranteed to observe a real Timer that
     // fired inside runAsync's zone.
