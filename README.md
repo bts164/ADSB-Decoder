@@ -914,17 +914,23 @@ a scrubber bar under both.
   - Without one, they fill in from live updates.
 
 With a history db, the scrubber shows the table and map (with trails) as of
-any past time. It has two levels:
+any past time. It narrows down in three levels:
 
-- **Overview strip.** A thin strip spans the whole recording.
+- **Whole recording.** A thin strip on top spans the whole recording.
   - Its ticks are full height at local midnight.
   - It is shaded as a histogram of how many aircraft were seen per minute,
     with each pixel showing its busiest minute, so busy periods and gaps stand
     out.
-  - Clicking or dragging on it jumps to that time.
-- **Slider.** The slider below the strip covers only a window of that span.
-  - The window is 10 min to 12 h, 30 min by default. Pick it from the menu on
-    the left.
+  - A box marks the range the strip below covers. Clicking or dragging jumps
+    to that time and brings the range along.
+- **Range.** A second strip, drawn the same way, covers only that range.
+  - The range is 6 h to 7 days, 1 day by default. Pick it from the upper menu
+    on the left.
+  - A box marks the slider's window. Clicking or dragging jumps to that time
+    within the range.
+- **Slider.** The slider below the strips covers only a window of the range.
+  - The window is 10 min to 12 h, 30 min by default. Pick it from the lower
+    menu on the left.
   - ◀ and ▶ move by one window.
   - The time label opens a date and time picker.
 

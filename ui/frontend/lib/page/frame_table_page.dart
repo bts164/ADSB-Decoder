@@ -134,14 +134,19 @@ class _FrameTablePageState extends State<FrameTablePage> {
   double? _historyEndS;
   // Scrubber position, or null when live.
   double? _scrubTimeS;
-  // The fine slider covers _scrubWindowS starting at _scrubWindowStartS, or the
-  // newest _scrubWindowS when that's null (live, or never moved). The overview
-  // strip above it spans the whole history and moves the window.
+  // The scrubber narrows down in three levels. The top strip spans the whole
+  // history and moves the range: _scrubRangeS starting at _scrubRangeStartS,
+  // or the newest _scrubRangeS when that's null (live, or never moved). The
+  // middle strip spans the range and moves the window within it, likewise
+  // _scrubWindowS from _scrubWindowStartS, which the fine slider covers.
+  static const _scrubRangeChoicesS = [6 * 3600.0, 12 * 3600.0, 86400.0, 2 * 86400.0, 7 * 86400.0];
+  double _scrubRangeS = 86400;
+  double? _scrubRangeStartS;
   static const _scrubWindowChoicesS = [600.0, 1800.0, 3600.0, 3 * 3600.0, 12 * 3600.0];
   double _scrubWindowS = 1800;
   double? _scrubWindowStartS;
   // Distinct aircraft per _activityBucketS bucket, consecutive from
-  // _activityT0 (Unix s), for the overview strip's histogram. Replaced, not
+  // _activityT0 (Unix s), for the overview strips' histogram. Replaced, not
   // mutated, on each activity reply, so the painter can tell it changed.
   // Fetched whole after the backfill, then the tail every _activityPollInterval.
   static const _activityPollInterval = Duration(seconds: 30);
@@ -275,6 +280,7 @@ class _FrameTablePageState extends State<FrameTablePage> {
     _historyStartS = null;
     _historyEndS = null;
     _scrubTimeS = null;
+    _scrubRangeStartS = null;
     _scrubWindowStartS = null;
     _activityTimer?.cancel();
     _activity = const [];

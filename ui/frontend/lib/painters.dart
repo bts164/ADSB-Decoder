@@ -240,11 +240,11 @@ class AltitudeScalePainter extends CustomPainter {
   bool shouldRepaint(AltitudeScalePainter old) => false;
 }
 
-/// The scrubber's overview strip: the whole recording [startS, endS] as a
-/// histogram of `activity` (aircraft per `activityBucketS` bucket from
+/// One of the scrubber's overview strips: the span [startS, endS] of the
+/// recording as a histogram of `activity` (aircraft per `activityBucketS` bucket from
 /// `activityT0`; each pixel shows the busiest bucket it covers), with ticks
-/// (full-height lines at local midnight), the fine slider's window
-/// [windowStartS, windowEndS] and the scrub position.
+/// (full-height lines at local midnight), a box over [windowStartS,
+/// windowEndS] (the span of the level below) and the scrub position.
 class TimelinePainter extends CustomPainter {
   TimelinePainter({
     required this.startS,
@@ -314,7 +314,10 @@ class TimelinePainter extends CustomPainter {
     if (t0 == null || activity.isEmpty) return;
     // The busiest bucket touching each pixel column.
     final columns = List<int>.filled(math.max(1, size.width.ceil()), 0);
-    for (var i = 0; i < activity.length; i++) {
+    // Only the buckets within the strip: it may show just part of the recording.
+    final first = math.max(0, ((startS - t0) / activityBucketS).floor());
+    final last = math.min(activity.length - 1, ((endS - t0) / activityBucketS).ceil() - 1);
+    for (var i = first; i <= last; i++) {
       if (activity[i] == 0) continue;
       final t = t0 + i * activityBucketS;
       final c0 = x(t).floor().clamp(0, columns.length - 1);
