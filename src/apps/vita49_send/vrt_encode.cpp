@@ -67,13 +67,6 @@ void write_vrt_header(uint8_t* out, uint32_t stream_id, uint32_t packet_count_mo
     store_be32(out + 16, static_cast<uint32_t>(ts.psec & 0xFFFFFFFFu));
 }
 
-// Allocates a VRT IF Data packet with the header written and the payload left uninitialized.
-VrtPacket make_vrt_packet(uint32_t stream_id, uint32_t packet_count_mod16, PacketClock::Stamp ts, size_t count) {
-    VrtPacket pkt{xt::xtensor<uint8_t, 1>::from_shape({vrt_packet_bytes(count)})};
-    write_vrt_header(pkt.bytes.data(), stream_id, packet_count_mod16, ts, count);
-    return pkt;
-}
-
 }  // namespace
 
 std::optional<VrtPacket> ContextSender::next_if_due(PacketClock& clock) {
@@ -92,17 +85,16 @@ std::optional<VrtPacket> ContextSender::next_if_due(PacketClock& clock) {
 // byte is always 0, so the convert and the byte swap fuse into one
 // XOR-and-zero-interleave pass (auto-vectorizable) written straight into the
 // packet -- no intermediate int16 array, no reload for a later swap.
-VrtPacket build_vrt_packet_u8(uint32_t stream_id, uint32_t packet_count_mod16, PacketClock::Stamp ts, const uint8_t* src,
-                              size_t count) {
-    VrtPacket pkt = make_vrt_packet(stream_id, packet_count_mod16, ts, count);
-    uint8_t* payload = pkt.bytes.data() + kVrtHeaderBytes;
+void write_vrt_packet_u8(uint8_t* out, uint32_t stream_id, uint32_t packet_count_mod16, PacketClock::Stamp ts,
+                         const uint8_t* src, size_t count) {
+    write_vrt_header(out, stream_id, packet_count_mod16, ts, count);
+    uint8_t* payload = out + kVrtHeaderBytes;
     for (size_t i = 0; i < count; i++) {
         payload[4 * i] = src[2 * i] ^ 0x80;          // I high byte
         payload[4 * i + 1] = 0;                      // I low byte
         payload[4 * i + 2] = src[2 * i + 1] ^ 0x80;  // Q high byte
         payload[4 * i + 3] = 0;                      // Q low byte
     }
-    return pkt;
 }
 
 void write_vrt_packet_i16(uint8_t* out, uint32_t stream_id, uint32_t packet_count_mod16, PacketClock::Stamp ts,

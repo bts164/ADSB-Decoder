@@ -120,11 +120,12 @@ constexpr size_t vrt_packet_bytes(size_t count) { return kVrtHeaderBytes + 4 * c
 // Trailer, UTC + picosecond timestamps, one 32-bit word per I/Q pair, big-endian
 // throughout including the payload.
 
-// Allocates a VRT IF Data packet from `count` interleaved rtlsdr 8-bit
-// offset-binary I/Q pairs (128 == zero). Each becomes int16 (b - 128) * 256 on
-// the wire -- the payload's declared 16-bit width, not added precision.
-VrtPacket build_vrt_packet_u8(uint32_t stream_id, uint32_t packet_count_mod16, PacketClock::Stamp ts, const uint8_t* src,
-                              size_t count);
+// Writes a whole VRT IF Data packet to `out` (vrt_packet_bytes(count) bytes) from
+// `count` interleaved rtlsdr 8-bit offset-binary I/Q pairs (128 == zero). Each
+// becomes int16 (b - 128) * 256 on the wire -- the payload's declared 16-bit
+// width, not added precision.
+void write_vrt_packet_u8(uint8_t* out, uint32_t stream_id, uint32_t packet_count_mod16, PacketClock::Stamp ts,
+                         const uint8_t* src, size_t count);
 
 // Writes a whole VRT IF Data packet to `out` (vrt_packet_bytes(count) bytes). `src` is
 // `count` interleaved host-order int16 I/Q pairs (the simulator's native output);

@@ -143,6 +143,13 @@ struct Config {
      * decoder. Off by default: a long-running stream would otherwise grow it without bound.
      */
     bool record_transmissions = false;
+
+    /**
+     * Threads the noise and quantization stage may use (>= 1); it is nearly all of the render time at output
+     * rates of 16 MHz and up. The output does not depend on it. More than one only pays off when generate()
+     * is called with at least a few thousand samples per thread: see Simulator::block_samples().
+     */
+    unsigned render_threads = 1;
 };
 
 /** One simulated transmission, as recorded when Config::record_transmissions is set. */
@@ -166,6 +173,12 @@ public:
      * The size must be even.
      */
     void generate(std::span<int16_t> iq);
+
+    /**
+     * The most samples generate() renders in one piece (a longer call is rendered as several): the call size
+     * that makes the best use of Config::render_threads.
+     */
+    size_t block_samples() const;
 
     /**
      * Transmissions recorded since the last call (Config::record_transmissions), in no particular order.

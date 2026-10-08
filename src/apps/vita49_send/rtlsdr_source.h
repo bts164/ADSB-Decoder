@@ -5,8 +5,10 @@
 #include <cstddef>
 #include <cstdint>
 
-#include <coro/coro.h>
-#include <coro/io/udp_socket.h>
+#include "apps/vita49_send/packet_sender.h"
+
+#include <coro/coro_stream.h>
+#include <coro/sync/watch.h>
 
 namespace vita49_send {
 
@@ -22,10 +24,11 @@ struct RtlSdrSourceParams {
     double context_interval_s;
 };
 
-// Opens and tunes the device, then streams its samples to `sock` (already connected) until SIGINT or the
-// device stops. The librtlsdr callback thread encodes each chunk into VRT packets and hands them to this task
-// through a channel; the callback never blocks, so when the send side falls behind it drops packets (and says
-// so) rather than stall USB. Throws std::runtime_error if the device can't be opened.
-coro::Coro<void> rtlsdr_send_loop(coro::UdpSocket sock, RtlSdrSourceParams params);
+// A stream of an RTL-SDR's samples as VRT packets, one per batch, until SIGINT or the device stops. Opens and
+// tunes the device when first polled; throws std::runtime_error from there if it can't be opened. The
+// librtlsdr callback thread encodes each chunk into packets and queues them for the stream. The callback
+// never blocks, so when the consumer falls behind it drops packets, counted on `paceTx`
+// (PaceStats::overrun_queue_full), rather than stall USB.
+coro::CoroStream<PacketBatch> rtlsdr_packet_stream(RtlSdrSourceParams params, coro::WatchSender<PaceStats> paceTx);
 
 }  // namespace vita49_send

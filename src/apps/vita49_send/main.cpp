@@ -11,27 +11,36 @@
 // (UDP) are both different from adsb's own IqBlock-consuming pipeline.
 //
 // Files: this one parses the command line and picks a source; rtlsdr_source.* and
-// sim_source.* are the two sources; vrt_encode.* builds the packets both send.
+// sim_source.* are the two sources, each a coro::CoroStream<PacketBatch>;
+// packet_sender.* sends whichever stream it is given; vrt_encode.* builds the
+// packets both sources produce.
 
 #include <cstdint>
+#include <cstdlib>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
 
+#include <unistd.h>
+
 #include <argparse/argparse.hpp>
 
 #include "apps/log_options.h"
+#include "apps/vita49_send/packet_sender.h"
 #include "apps/vita49_send/rtlsdr_source.h"
 #include "apps/vita49_send/sim_source.h"
 #include "common/cpu_layout.h"
 #include "sim/adsb_sim.h"
 
 #include <coro/coro.h>
+#include <coro/coro_stream.h>
 #include <coro/io/socket_address.h>
 #include <coro/io/udp_socket.h>
 #include <coro/runtime/runtime.h>
+#include <coro/sync/watch.h>
 
 namespace {
 
@@ -96,6 +105,9 @@ coro::Coro<int> async_main(int argc, char** argv) {
         "applied at sample rates below 16 MHz, where the signal is rendered oversampled and decimated");
     sim_cmd.add_argument("--oversample").scan<'u', unsigned>().default_value(0u).help(
         "render at this integer multiple of the sample rate before filtering (0 = automatic)");
+    sim_cmd.add_argument("--render-threads").scan<'u', unsigned>().default_value(4u).help(
+        "threads rendering the signal. add more when the log reports samples dropped as "
+        "\"render too slow\". The signal is the same whatever the count");
     sim_cmd.add_argument("--queue-ms").scan<'g', double>().default_value(20.0).help(
         "how far ahead of real time the signal is rendered, in ms: packets queued for sending, so the sender "
         "catches up after a stall at send-only speed. Costs rate * 4 B per second of queue (80 MB per 100 ms at "
@@ -148,6 +160,10 @@ coro::Coro<int> async_main(int argc, char** argv) {
     co_await sock.connect(*dest);
     LOGF(INFO, "streaming VRT/UDP to %s (stream id %u)", dest->to_string(), stream_id);
 
+    // Only the source differs between modes: each hands its coro::CoroStream<PacketBatch> to the same
+    // send_loop() call below. The sources report what they drop on the pace statistics.
+    auto [paceTx, paceRx] = coro::watch_channel(PaceStats{});
+    std::optional<coro::CoroStream<PacketBatch>> stream;
     if (program.is_subcommand_used(sim_cmd)) {
         SimStreamParams params;
         params.sim.sample_rate_hz = static_cast<uint32_t>(rate_hz);
@@ -158,6 +174,7 @@ coro::Coro<int> async_main(int argc, char** argv) {
         params.sim.pulse_jitter_s = sim_cmd.get<double>("--pulse-jitter-ns") * 1e-9;
         params.sim.rx_cutoff = sim_cmd.get<double>("--rx-cutoff");
         params.sim.oversample = sim_cmd.get<unsigned>("--oversample");
+        params.sim.render_threads = sim_cmd.get<unsigned>("--render-threads");
         params.samples_per_packet = samples_per_packet;
         params.stream_id = stream_id;
         params.duration_s = sim_cmd.get<double>("--duration");
@@ -183,23 +200,28 @@ coro::Coro<int> async_main(int argc, char** argv) {
             LOGF(INFO, "  icao=%06x callsign=%.8s lat=%.4f lon=%.4f alt=%dft gs=%.0fkt trk=%.0f vr=%dfpm", a.icao,
                  a.callsign, a.lat_deg, a.lon_deg, a.alt_ft, a.ground_speed_kt, a.track_deg, a.vrate_fpm);
         }
-        co_await sim_send_loop(std::move(sock), std::move(sim), params);
-        co_return 0;
+        // Data packets go out up to 44 (of 1468 B) per send via UDP GSO: the kernel's per-datagram work, not
+        // the syscall, is what limits a small-datagram sender, and GSO does that work once per send. See the
+        // PERFORMANCE NOTE in main().
+        params.batch_packets = enable_gso(sock, vrt_packet_bytes(samples_per_packet));
+        stream.emplace(sim_packet_stream(std::move(sim), params, paceTx.clone()));
+    } else {
+        RtlSdrSourceParams params;
+        params.device_index = rtl_cmd.get<int>("--device");
+        params.rate_hz = rate_hz;
+        params.freq_hz = freq_hz;
+        params.gain_db = rtl_cmd.get<double>("--gain");
+        params.buf_num = rtl_cmd.get<unsigned>("--buf-num");
+        params.buf_len = rtl_cmd.get<unsigned>("--buf-len");
+        params.samples_per_packet = samples_per_packet;
+        params.stream_id = stream_id;
+        params.context_interval_s = context_interval_s;
+        stream.emplace(rtlsdr_packet_stream(params, paceTx.clone()));
     }
 
-    RtlSdrSourceParams params;
-    params.device_index = rtl_cmd.get<int>("--device");
-    params.rate_hz = rate_hz;
-    params.freq_hz = freq_hz;
-    params.gain_db = rtl_cmd.get<double>("--gain");
-    params.buf_num = rtl_cmd.get<unsigned>("--buf-num");
-    params.buf_len = rtl_cmd.get<unsigned>("--buf-len");
-    params.samples_per_packet = samples_per_packet;
-    params.stream_id = stream_id;
-    params.context_interval_s = context_interval_s;
     try {
-        co_await rtlsdr_send_loop(std::move(sock), params);
-    } catch (const std::runtime_error& err) {  // the device couldn't be opened
+        co_await send_loop(std::move(sock), std::move(*stream), rate_hz, std::move(paceTx), std::move(paceRx));
+    } catch (const std::runtime_error& err) {  // the device couldn't be opened, or a send failed
         LOGF(ERROR, "%s", err.what());
         co_return 1;
     }
@@ -261,7 +283,7 @@ int main(int argc, char* argv[]) {
     //
     //  * Batching: the sim source sends data packets with UDP GSO (PacketBatch,
     //    up to 44 x 1468 B per send); the rtlsdr source doesn't need to at
-    //    2.4 Msps. Measured bare metal (i5-11500H, loopback, 1468 B, performance
+    //    2.4 Msps, and puts one packet in each PacketBatch. Measured bare metal (i5-11500H, loopback, 1468 B, performance
     //    governor, CPU us per datagram): send() 1.75, sendmmsg x20 1.67, GSO x10
     //    0.54, GSO x20 0.46. The kernel's per-datagram stack work dominates, not
     //    syscall entry, so sendmmsg barely helps and GSO does. (An earlier note
@@ -275,6 +297,16 @@ int main(int argc, char* argv[]) {
     //    fills -- measure the fast/slow ratio then. On the recv side (the future
     //    VITA-49 reader) the fast path only hits when a datagram is already
     //    queued, so a consumer that keeps up will take the slow path often.
+    // With `sim --render-threads` above 1 the render threads are an OpenMP team (see common/tasksys.cpp), which
+    // by libgomp's default spins for a while after each piece of work: whole cores burned whenever the
+    // generator is ahead of real time and waiting. Default to passive, as the adsb decoder does: libgomp reads
+    // its env only at load, before main(), so set it and re-execute once; an explicit OMP_WAIT_POLICY or
+    // GOMP_SPINCOUNT wins. If exec fails we just run with the default policy.
+    if (std::getenv("OMP_WAIT_POLICY") == nullptr && std::getenv("GOMP_SPINCOUNT") == nullptr) {
+        setenv("OMP_WAIT_POLICY", "passive", 1);
+        execv("/proc/self/exe", argv);
+    }
+
     // Every thread here paces or hands off packets, so all get a short slice: woken on time, it preempts
     // whatever else holds its core instead of waiting out that thread's slice and then bursting.
     adsb::cpu_layout::set_short_slice(true);

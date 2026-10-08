@@ -157,7 +157,7 @@ constexpr KindSchedule kSchedules[] = {
 constexpr unsigned kPreambleChips = 16;
 constexpr uint64_t kChipsPerSecond = 2'000'000;  // 0.5 us chips
 constexpr unsigned kMaxChips = kPreambleChips + 2 * 112;
-// generate() renders at most this many output samples at a time.
+// generate() renders at most this many output samples at a time, per render thread.
 constexpr size_t kSubBlockSamples = 32768;
 constexpr double kBaseAmplitude = 0.5 * 32767.0;  // strongest aircraft, int16 counts
 
@@ -406,11 +406,17 @@ struct Simulator::Impl {
     xt::xtensor<float, 1> xi, xq;   // render-rate window
     xt::xtensor<uint8_t, 1> dirty;  // per output sample: window contains signal
     xt::xtensor<float, 1> si, sq;   // FIR output per output sample (only used when half_taps > 0)
+    // [from, to] index ranges of xi/xq the current block's pulses were added to: all that generate_block has
+    // to clear afterwards. Pulses are sparse, so this is far less than zeroing the whole window per block.
+    std::vector<std::pair<size_t, size_t>> touched;
     uint64_t noise_key;          // see sim_kernels.ispc: noise is a pure function of (key, sample index)
     double noise_sigma;
     uint64_t next_sample = 0;
 
-    void generate_block(std::span<int16_t> iq);  // iq.size() <= 2 * kSubBlockSamples
+    size_t block_samples;  // generate() renders at most this many output samples at a time
+    int render_threads;
+
+    void generate_block(std::span<int16_t> iq);  // iq.size() <= 2 * block_samples
 
     explicit Impl(const Config& c) : cfg(c) {
         if (cfg.sample_rate_hz < kMinSampleRateHz)
@@ -429,13 +435,17 @@ struct Simulator::Impl {
         render_rate = static_cast<double>(oversample) * cfg.sample_rate_hz;
         half_taps = oversample > 1 ? kTapsPerOversample * oversample : 0;
         if (half_taps) taps = xt::cast<float>(design_lowpass(half_taps, cfg.rx_cutoff / oversample));  // designed in double
-        const size_t max_window = (kSubBlockSamples - 1) * oversample + 2 * half_taps + 1;
-        xi = xt::xtensor<float, 1>::from_shape({max_window});
-        xq = xt::xtensor<float, 1>::from_shape({max_window});
-        dirty = xt::xtensor<uint8_t, 1>::from_shape({kSubBlockSamples});
+        if (cfg.render_threads < 1) throw std::invalid_argument("adsb_sim: render_threads must be >= 1");
+        render_threads = static_cast<int>(cfg.render_threads);
+        block_samples = kSubBlockSamples * cfg.render_threads;
+        const size_t max_window = (block_samples - 1) * oversample + 2 * half_taps + 1;
+        // Zero between blocks: generate_block clears what it wrote (see `touched`).
+        xi = xt::zeros<float>({max_window});
+        xq = xt::zeros<float>({max_window});
+        dirty = xt::xtensor<uint8_t, 1>::from_shape({block_samples});
         if (half_taps) {
-            si = xt::xtensor<float, 1>::from_shape({kSubBlockSamples});
-            sq = xt::xtensor<float, 1>::from_shape({kSubBlockSamples});
+            si = xt::xtensor<float, 1>::from_shape({block_samples});
+            sq = xt::xtensor<float, 1>::from_shape({block_samples});
         }
         rise_h = cfg.pulse_rise_s * render_rate;
         fall_h = cfg.pulse_fall_s * render_rate;
@@ -544,6 +554,7 @@ struct Simulator::Impl {
             const auto to = std::min(hi, static_cast<int64_t>(std::floor(bottom_fall)));
             if (from > to) continue;
             mark_dirty(from - lo, to - lo, n);
+            touched.emplace_back(static_cast<size_t>(from - lo), static_cast<size_t>(to - lo));
             // An explicit loop: the equivalent xtensor expression (arange/minimum/clip added into a view)
             // measured ~7% slower at 20 Msps, where this is the hot path.
             for (int64_t h = from; h <= to; h++) {
@@ -561,16 +572,18 @@ Simulator::~Simulator() = default;
 
 std::vector<Transmission> Simulator::take_transmissions() { return std::exchange(m_impl->recorded, {}); }
 
+size_t Simulator::block_samples() const { return m_impl->block_samples; }
+
 void Simulator::generate(std::span<int16_t> iq) {
-    // Work in cache-sized pieces: the render buffers are two doubles per sample, so an unbounded call
+    // Work in cache-sized pieces: the render buffers are two floats per sample, so an unbounded call
     // would stream tens of MB through memory several times (measured: ~335 Msps at 2M samples per call
-    // vs ~480 Msps in pieces). The output is chunk-independent, so this changes nothing but speed. It is
-    // single-threaded: a piece is only ~70 us of work, so fork-join threading through the ispc task
-    // system (at the time, a thread per task per launch) measured 4-6x slower, not faster.
+    // vs ~480 Msps in pieces). The output is chunk-independent, so this changes nothing but speed. A piece
+    // is one cache-sized share per render thread: the threads split the noise stage, a fork-join per piece
+    // (see sim_kernels.ispc), which costs a wake-up that a larger piece spreads over more samples.
     assert(iq.size() % 2 == 0);
     const size_t n = iq.size() / 2;
     for (size_t done = 0; done < n;) {
-        const size_t len = std::min(n - done, kSubBlockSamples);
+        const size_t len = std::min(n - done, m_impl->block_samples);
         m_impl->generate_block(iq.subspan(2 * done, 2 * len));
         done += len;
     }
@@ -605,8 +618,6 @@ void Simulator::Impl::generate_block(std::span<int16_t> iq) {
     const auto window = static_cast<size_t>(hi - lo + 1);
     if (window > d.xi.size() || window > d.xq.size() || n > d.dirty.size())
         throw std::logic_error("Simulator: block larger than the render buffers");
-    std::fill_n(d.xi.data(), window, 0.0f);
-    std::fill_n(d.xq.data(), window, 0.0f);
     std::fill_n(d.dirty.data(), n, uint8_t{0});
     for (const auto& tx : d.active) d.add_tx(tx, lo, hi, n);
 
@@ -644,7 +655,14 @@ void Simulator::Impl::generate_block(std::span<int16_t> iq) {
     }
     static_assert(std::endian::native == std::endian::little, "sim_finish packs (I, Q) int16 pairs little-endian");
     ispc::sim_finish(sig_i, sig_q, s0, d.noise_key, static_cast<float>(d.noise_sigma), static_cast<int>(n),
-                     reinterpret_cast<int32_t*>(iq.data()));
+                     reinterpret_cast<int32_t*>(iq.data()), d.render_threads);
+
+    // Leave xi/xq all zero for the next block.
+    for (const auto& [from, to] : d.touched) {
+        std::fill(d.xi.data() + from, d.xi.data() + to + 1, 0.0f);
+        std::fill(d.xq.data() + from, d.xq.data() + to + 1, 0.0f);
+    }
+    d.touched.clear();
 
     // Keep a transmission until no later output sample's window can reach it.
     const double next_lo = static_cast<double>(static_cast<int64_t>(s1) * N - M);
