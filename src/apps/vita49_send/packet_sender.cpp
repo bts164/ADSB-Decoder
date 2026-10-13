@@ -50,6 +50,14 @@ coro::Coro<void> send_loop(coro::UdpSocket sock, coro::CoroStream<PacketBatch> s
     // Cancelled when this coroutine returns.
     auto pace_monitor = coro::spawn(paceMonitorLoop(paceRx.clone()));
     const auto t0 = steady_clock::now();
+    // Logged however the loop ends: at the end of the stream, or when main() cancels this coroutine on Ctrl+C
+    // (the frame is then destroyed where it is suspended, so only a destructor still runs).
+    struct Summary {
+        coro::WatchReceiver<PaceStats>& paceRx;
+        steady_clock::time_point t0;
+        double rate_hz;
+        ~Summary() { log_pace_summary(paceRx.get(), duration<double>(steady_clock::now() - t0).count(), rate_hz); }
+    } summary{paceRx, t0, rate_hz};
     uint64_t sent = 0;
     steady_clock::duration send_wait{};
     while (auto batch = co_await coro::next(stream)) {
@@ -65,7 +73,6 @@ coro::Coro<void> send_loop(coro::UdpSocket sock, coro::CoroStream<PacketBatch> s
             return true;
         });
     }
-    log_pace_summary(paceRx.get(), duration<double>(steady_clock::now() - t0).count(), rate_hz);
 }
 
 coro::Coro<void> paceMonitorLoop(coro::WatchReceiver<PaceStats> paceRx) {

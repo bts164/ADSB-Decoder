@@ -27,19 +27,21 @@
  */
 
 /**
- * Handles one demodulated frame: validates it (compute_frame_view), logs it, publishes it with its
- * frame_summary(), and for a frame with a confirmed address updates its AircraftState: decoded fields
+ * Handles one demodulated frame: validates it (compute_frame_view), logs it, adds it with its
+ * frame_summary() to `out`, and for a frame with a confirmed address updates its AircraftState: decoded fields
  * (update_aircraft_from_frame), and
- * message count, signal level and last-seen time from any DF. The aircraft is published and recorded when a
+ * message count, signal level and last-seen time from any DF. The aircraft is added to `out` and recorded when a
  * decoded field changed, or at most once a second for the rest; it's logged only for the former.
  *
  * The log lines are verbose ones, off by default: aircraft changes at --verbosity 1, every frame at 2.
  * @param f frame from AdsbDemod::exec()
  * @param rate_hz input sample rate, for the frame's stream time
  * @param start_unix_s wall-clock time of stream sample 0 (Unix seconds), for AircraftState::last_seen_unix_s
+ * @param out JSON to publish for this frame's block, appended to: comma-separated objects, as
+ *     ws_publisher_publish() takes
  * @return the validated frame
  */
-DecodedFrameView handle_frame(const AdsbFrame& f, double rate_hz, double start_unix_s);
+DecodedFrameView handle_frame(const AdsbFrame& f, double rate_hz, double start_unix_s, std::string& out);
 
 /** run_demod_loop's optional HDF5 debug recording (FrameRecorder). */
 struct DebugRecordOptions {
@@ -50,11 +52,13 @@ struct DebugRecordOptions {
 
 /**
  * Runs every IqBlock from `stream` through a BlockStitcher, AdsbDemod and handle_frame() until the stream
- * ends, publishing a spectrum frame at most every kSpectrumInterval when `enable_spectrum` is set. The
- * stitcher holds each block until the next arrives, so frames come out one block late.
+ * ends, publishing each block's frames and aircraft in one ws_publisher_publish(), with a spectrum frame at
+ * most every kSpectrumInterval when `enable_spectrum` is set. The stitcher holds each block until the next
+ * arrives, so frames come out one block late.
  *
- * Runs on a coro::spawn_blocking thread, since it pulls blocks with coro::blocking_next. With `ADSB_TIMING`
- * set, logs throughput and realtime factor every kStatusReportInterval.
+ * Runs on a coro::spawn_blocking thread, since it pulls blocks with coro::blocking_next. That call is where
+ * a cancelled task is unwound (coro::BlockingCancelled), which is how Ctrl+C stops it. Logs the frame count
+ * however it ends. With `ADSB_TIMING` set, logs throughput and realtime factor every kStatusReportInterval.
  * @param filter polyphase filter bank for the AdsbDemod
  * @param rate_hz input sample rate
  * @param preamble_min AdsbDemod preamble threshold

@@ -9,9 +9,6 @@
 
 #include <rtl-sdr.h>
 
-#include <coro/coro.h>
-#include <coro/task/join_handle.h>
-
 /**
  * @file
  * An open, tuned RTL-SDR, shared by `adsb rtlsdr` (rtlsdr_stream.h) and vita49_send's rtlsdr source. What
@@ -35,18 +32,13 @@ struct RtlSdrTuning {
  * having been asked for, it closes the handle and reopens the device, at once and then after 1, 2, 4 and
  * every 8 seconds, until it is back.
  *
- * Owns its own SIGINT shutdown: spawns a lightweight coroutine (via coro::spawn(), onto the ambient runtime)
- * that awaits coro::signal(SIGINT) and asks read_async() to stop. That makes it return (closing the caller's
- * channel, so its stream ends) whether it is reading or waiting to reconnect, without closing the device on
- * a runtime thread, so interrupting needs no select()/orchestration at any call site -- whoever holds an
- * RtlSdr just gets interrupted out from under them, and the destructor closes the device. If the RtlSdr is
- * destroyed for any other reason first, ~JoinHandle cancels the still-pending watcher automatically (see
- * join_handle.h's cancel-on-destroy default).
+ * Knows nothing about Ctrl+C. read_async() runs until the RtlSdr is closed or destroyed: the program's
+ * top-level SIGINT handler drops whatever owns the stream, the stream's coroutine frame is destroyed, and
+ * ~RtlSdr stops the read. Cancelling the spawn_blocking task that runs read_async() is not enough by itself,
+ * because the thread is inside librtlsdr, which is not a cancellation point; only close() (through
+ * rtlsdr_cancel_async()) gets it out.
  *
- * Accepted gap, not a case these programs need to cover: a SIGINT raised before any RtlSdr exists is not
- * handled.
- *
- * Not movable: the watcher and a running read_async() hold `this`.
+ * Not movable: a running read_async() holds `this`.
  */
 class RtlSdr {
 public:
@@ -55,7 +47,6 @@ public:
 
     /**
      * Opens the device, sets rate, frequency and gain, resets its buffer and logs the settings.
-     * Must be called on a coro runtime thread (for the SIGINT watcher).
      * @throws std::runtime_error if the device can't be opened
      */
     explicit RtlSdr(const RtlSdrTuning& tuning);
@@ -66,7 +57,7 @@ public:
     RtlSdr& operator=(const RtlSdr&) = delete;
 
     /**
-     * Streams from the device until Ctrl+C or close(), calling `cb` on this thread with each buffer as
+     * Streams from the device until close(), calling `cb` on this thread with each buffer as
      * rtlsdr_read_async() does. Blocks, so call it on a coro::spawn_blocking thread. If the device goes away
      * it reconnects (see the class comment) and carries on with the same `cb`; no samples arrive meanwhile.
      * @param cb librtlsdr buffer callback
@@ -87,9 +78,6 @@ public:
 private:
     struct Relay;
 
-    // A static member taking the object as a parameter, not a capturing lambda: a lambda coroutine's captures
-    // live in the closure object, which is gone once the spawn() expression ends.
-    static coro::Coro<void> stop_on_sigint(RtlSdr* self);
     static void relay_cb(unsigned char* buf, uint32_t len, void* relay);
 
     // Sets the stop flag and ends a running read or reconnect wait. Doesn't block.
@@ -104,5 +92,4 @@ private:
     std::atomic<bool> m_stop = false;
     rtlsdr_dev_t* m_dev = nullptr;      // nullptr while disconnected and once closed
     bool m_reading = false;             // read_async() is running
-    coro::JoinHandle<void> m_sigint_watcher;
 };

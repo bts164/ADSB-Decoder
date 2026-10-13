@@ -1,10 +1,8 @@
 #include "input/vita49_stream.h"
 
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <cmath>
-#include <csignal>
 #include <cstdio>
 #include <fstream>
 #include <memory>
@@ -14,7 +12,6 @@
 #include <system_error>
 
 #include <coro/coro.h>
-#include <coro/io/signal.h>
 #include <coro/io/udp_socket.h>
 #include <coro/runtime/runtime.h>
 #include <coro/sync/mpsc.h>
@@ -29,18 +26,12 @@
 namespace {
 
 constexpr size_t kMaxDatagramBytes = 65536;
-constexpr auto kPollInterval = std::chrono::milliseconds(250);  // how often to look at Ctrl+C / idle state
+constexpr auto kPollInterval = std::chrono::milliseconds(250);  // how often to look at the idle state
 constexpr size_t kChannelBlocks = 8;
 constexpr auto kStatusInterval = std::chrono::seconds(2);
 // How far below real time a window may run before it counts as slow: packets arrive in bursts, so a window
 // edge can fall mid-burst.
 constexpr double kRealtimeSlack = 0.02;
-
-coro::Coro<void> wait_for_sigint(std::shared_ptr<std::atomic<bool>> stop) {
-    co_await coro::signal(SIGINT);
-    LOGF(INFO, "stopping after SIGINT");
-    stop->store(true);
-}
 
 // Datagrams the kernel has dropped on the UDP socket(s) bound to `port` because the receive buffer was
 // full, from /proc/net/udp{,6}'s last column; nullopt where that isn't available.
@@ -177,10 +168,11 @@ std::string InputStatus::describe() const {
 
 namespace {
 
-// Binds the socket and reads datagrams until Ctrl+C or the idle timeout,
-// cutting the assembled sample stream into guard-padded IqBlocks. Owns `tx`,
-// so the channel closes (ending the consumer's stream) when this returns or
-// throws.
+// Binds the socket and reads datagrams until the idle timeout, or until it is
+// cancelled because vita49_iq_stream() was dropped (Ctrl+C is handled in
+// main(), not here), cutting the assembled sample stream into guard-padded
+// IqBlocks. Owns `tx`, so the channel closes (ending the consumer's stream)
+// when this returns or throws.
 coro::Coro<void> receive_loop(Vita49Options opts, coro::MpscSender<IqBlock> tx, IqPadding pad,
                               uint32_t chunk_samples) {
     auto sock = co_await coro::UdpSocket::bind(opts.bind_host, opts.port);
@@ -189,15 +181,20 @@ coro::Coro<void> receive_loop(Vita49Options opts, coro::MpscSender<IqBlock> tx, 
     LOGF(INFO, "listening for VRT/UDP on %s:%u at %g Hz (Ctrl+C to stop)", opts.bind_host, opts.port,
          opts.sample_rate_hz);
 
-    auto stop = std::make_shared<std::atomic<bool>>(false);
-    auto sigint_watcher = coro::spawn(wait_for_sigint(stop));
-
     // Reordered, gap-filled samples land here (Assembler::drain() appends; see vrt_assembler.h's
     // Sink concept), building chunk_samples-sized IqBlocks directly in place -- a completed block is
     // moved straight out via pop() with no copy from an intermediate accumulator.
     IqBlockChunker chunker(pad, chunk_samples);
     uint64_t dropped_blocks = 0;
     InputMonitor monitor(opts.sample_rate_hz, opts.port);
+    // Reported however the loop ends: on the idle timeout, or when this task is cancelled (the frame is
+    // then destroyed where it is suspended, so only a destructor still runs).
+    struct Report {
+        const vrt::Assembler& assembler;
+        const uint64_t& dropped_blocks;
+        InputMonitor& monitor;
+        ~Report() { report(assembler.stats(), dropped_blocks, monitor.total(assembler.stats())); }
+    } final_report{assembler, dropped_blocks, monitor};
     auto send_ready = [&] {
         while (chunker.ready() > 0) {
             IqBlock block = chunker.pop();
@@ -243,7 +240,7 @@ coro::Coro<void> receive_loop(Vita49Options opts, coro::MpscSender<IqBlock> tx, 
     auto tick = coro::sleep_for(kPollInterval);
     auto last_rx = std::chrono::steady_clock::now();
     bool received = false;
-    while (!stop->load()) {
+    for (;;) {
         auto r = co_await coro::select(coro::ref(recv), coro::ref(tick));
         if (r.index() == 1) {
             tick = coro::sleep_for(kPollInterval);
@@ -271,7 +268,6 @@ coro::Coro<void> receive_loop(Vita49Options opts, coro::MpscSender<IqBlock> tx, 
         }
     }
     drain(true);
-    report(assembler.stats(), dropped_blocks, monitor.total(assembler.stats()));
 }
 
 }  // namespace

@@ -1,7 +1,6 @@
 #include "apps/vita49_send/sim_source.h"
 
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <optional>
@@ -17,7 +16,6 @@
 #include <coro/coro.h>
 #include <coro/coro_stream.h>
 #include <coro/io/byte_buffer.h>
-#include <coro/io/signal.h>
 #include <coro/runtime/runtime.h>
 #include <coro/sync/mpsc.h>
 #include <coro/sync/sleep.h>
@@ -31,12 +29,6 @@ namespace {
 using namespace std::chrono;
 using namespace std::chrono_literals;
 
-coro::Coro<void> wait_for_sigint(std::shared_ptr<std::atomic<bool>> stop) {
-    co_await coro::signal(SIGINT);
-    LOGF(INFO, "stopping after SIGINT");
-    stop->store(true);
-}
-
 // One step of the simulated stream: rendered ahead of time by sim_generate(), released by sim_packet_stream()
 // once due.
 struct SimItem {
@@ -47,11 +39,13 @@ struct SimItem {
 
 // Renders the simulated stream into SimItems on its own thread and queues them for sim_packet_stream(). The
 // queue's capacity is how far ahead of real time it may get; flush() waits while the queue is full. Returns
-// when the stream ends, `stop` is set, or the receiver is dropped. Owns everything it touches (see
+// when the stream ends or the receiver is dropped. Knows nothing about Ctrl+C: when sim_packet_stream() is
+// dropped, its handle to this task asks it to cancel, and flush()'s blocking_wait() -- reached once per batch
+// -- throws coro::BlockingCancelled, which unwinds this function. Owns everything it touches (see
 // spawn_blocking()).
 void sim_generate(std::unique_ptr<adsb_sim::Simulator> sim, SimStreamParams params, steady_clock::time_point t0,
-                  std::shared_ptr<std::atomic<bool>> stop, coro::MpscSender<SimItem> tx,
-                  coro::MpscReceiver<BatchBytes> free_rx, BatchPool pool, coro::WatchSender<PaceStats> paceTx) {
+                  coro::MpscSender<SimItem> tx, coro::MpscReceiver<BatchBytes> free_rx, BatchPool pool,
+                  coro::WatchSender<PaceStats> paceTx) {
     const size_t batch_packets = params.batch_packets;
     const double rate = params.sim.sample_rate_hz;
     PacketClock clock{params.sim.sample_rate_hz};
@@ -104,7 +98,7 @@ void sim_generate(std::unique_ptr<adsb_sim::Simulator> sim, SimStreamParams para
         return true;
     };
 
-    while (!stop->load() && pos < samples_limit) {
+    while (pos < samples_limit) {
         // Packets left, rounded up; pos < samples_limit, so this can't overflow (samples_limit may be UINT64_MAX).
         const size_t n = static_cast<size_t>(std::min<uint64_t>(render_packets, 1 + (samples_limit - pos - 1) / spp));
         sim->generate(std::span(block.data(), 2 * n * spp));
@@ -180,16 +174,14 @@ coro::CoroStream<PacketBatch> sim_packet_stream(std::unique_ptr<adsb_sim::Simula
     auto [free_tx, free_rx] = coro::mpsc_channel<BatchBytes>(queue_items + 2);
     BatchPool pool = std::make_shared<coro::MpscSender<BatchBytes>>(std::move(free_tx));
 
-    auto stop = std::make_shared<std::atomic<bool>>(false);
-    auto sigint_watcher = coro::spawn(wait_for_sigint(stop));
-
     const auto t0 = steady_clock::now();
+    // Dropped with this stream if the consumer stops early (Ctrl+C in main()), which cancels the task.
     auto generator = coro::spawn_blocking(
-        [sim = std::move(sim), params, t0, stop, tx = std::move(tx), free_rx = std::move(free_rx),
+        [sim = std::move(sim), params, t0, tx = std::move(tx), free_rx = std::move(free_rx),
          pool = std::move(pool), paceTx = paceTx.clone()]() mutable {
             // Rendering is compute, not IO: it keeps the default slice rather than the IO threads' short one.
             adsb::cpu_layout::set_short_slice(false);
-            sim_generate(std::move(sim), std::move(params), t0, std::move(stop), std::move(tx), std::move(free_rx),
+            sim_generate(std::move(sim), std::move(params), t0, std::move(tx), std::move(free_rx),
                          std::move(pool), std::move(paceTx));
         });
 
@@ -197,9 +189,7 @@ coro::CoroStream<PacketBatch> sim_packet_stream(std::unique_ptr<adsb_sim::Simula
         // Scoped, so that leaving the loop drops the receiver and releases a generator waiting for queue space.
         coro::MpscReceiver<SimItem> queue = std::move(rx);
         uint64_t late = 0;  // samples dropped here
-        while (!stop->load()) {
-            auto item = co_await coro::next(queue);
-            if (!item) break;
+        while (auto item = co_await coro::next(queue)) {
             // Hold each batch back until the wall clock reaches its last sample. Coro timers bound the
             // IoDriver's epoll_pwait2 at nanosecond resolution, fine enough for a batch. Already due (the
             // consumer is behind): ready at once, no timer queued.

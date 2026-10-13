@@ -54,7 +54,7 @@ void rtlsdr_stream_cb(unsigned char* buf, uint32_t len, void* ctx_ptr) {
 }  // namespace
 
 // Streams raw IQ blocks off `device_index`: librtlsdr's own event-handling
-// thread (inside RtlSdr::read_async, which blocks until Ctrl+C, reconnecting
+// thread (inside RtlSdr::read_async, which blocks until the RtlSdr is destroyed, reconnecting
 // if the device is unplugged -- see rtlsdr_device.h) delivers raw uint8 I/Q buffers via
 // callback; the callback converts each buffer to a padded float I/Q
 // block (same guard-padding contract exec() requires, see demod.h) and

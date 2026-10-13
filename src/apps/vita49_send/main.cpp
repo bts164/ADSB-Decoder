@@ -15,6 +15,7 @@
 // packet_sender.* sends whichever stream it is given; vrt_encode.* builds the
 // packets both sources produce.
 
+#include <csignal>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
@@ -37,9 +38,11 @@
 
 #include <coro/coro.h>
 #include <coro/coro_stream.h>
+#include <coro/io/signal.h>
 #include <coro/io/socket_address.h>
 #include <coro/io/udp_socket.h>
 #include <coro/runtime/runtime.h>
+#include <coro/sync/select.h>
 #include <coro/sync/watch.h>
 
 namespace {
@@ -219,8 +222,14 @@ coro::Coro<int> async_main(int argc, char** argv) {
         stream.emplace(rtlsdr_packet_stream(params, paceTx.clone()));
     }
 
+    // The one place Ctrl+C is handled: it cancels send_loop(), which drops the source stream with it. Neither
+    // source watches for the signal itself. Dropping the sim stream cancels its render thread (see
+    // sim_generate()); dropping the rtlsdr stream destroys its RtlSdr, which stops the read.
     try {
-        co_await send_loop(std::move(sock), std::move(*stream), rate_hz, std::move(paceTx), std::move(paceRx));
+        auto done = co_await coro::select(
+            send_loop(std::move(sock), std::move(*stream), rate_hz, std::move(paceTx), std::move(paceRx)),
+            coro::signal(SIGINT));
+        if (done.index() == 1) LOGF(INFO, "stopped by SIGINT");
     } catch (const std::runtime_error& err) {  // the device couldn't be opened, or a send failed
         LOGF(ERROR, "%s", err.what());
         co_return 1;

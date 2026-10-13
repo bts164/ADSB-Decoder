@@ -58,7 +58,7 @@ struct Vita49Options {
 };
 
 /**
- * Binds a UDP socket and streams IqBlocks until Ctrl+C or the sender goes quiet for
+ * Binds a UDP socket and streams IqBlocks until it is dropped or the sender goes quiet for
  * Vita49Options::idle_timeout_s.
  *
  * A receive task on the runtime keeps draining the socket while the demod thread is busy, handing blocks

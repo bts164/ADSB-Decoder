@@ -15,9 +15,15 @@ constexpr double kAircraftRefreshS = 1.0;
 // Interval between run_demod_loop's `ADSB_TIMING` throughput reports.
 constexpr std::chrono::milliseconds kStatusReportInterval{1000};
 
+// Adds one JSON object to the text a block publishes (see ws_publisher_publish()).
+void append_json(std::string& out, const std::string& json) {
+    if (!out.empty()) out += ',';
+    out += json;
+}
+
 }  // namespace
 
-DecodedFrameView handle_frame(const AdsbFrame& f, double rate_hz, double start_unix_s) {
+DecodedFrameView handle_frame(const AdsbFrame& f, double rate_hz, double start_unix_s, std::string& out) {
     DecodedFrameView v = compute_frame_view(f, rate_hz);
     VLOGF(2, "frame %v", v);
     nlohmann::json frame = v;
@@ -25,7 +31,7 @@ DecodedFrameView handle_frame(const AdsbFrame& f, double rate_hz, double start_u
     const auto known = v.icao_known ? table.find(v.icao) : table.end();
     const std::string summary = frame_summary(v, known == table.end() ? nullptr : &known->second);
     frame["summary"] = summary.empty() ? nlohmann::json(nullptr) : nlohmann::json(summary);
-    ws_publisher_publish(frame.dump());
+    append_json(out, frame.dump());
 
     // Every frame whose address checks out counts toward its aircraft's
     // messages and signal level, and marks it seen.
@@ -44,7 +50,7 @@ DecodedFrameView handle_frame(const AdsbFrame& f, double rate_hz, double start_u
             ac.last_published_s = t_s;
             std::string json = nlohmann::json(ac).dump();
             aircraft_history_record(ac, json);
-            ws_publisher_publish(std::move(json));
+            append_json(out, json);
         }
     }
     return v;
@@ -83,21 +89,30 @@ uint64_t run_demod_loop(FilterBank filter, double rate_hz, float preamble_min, f
     BlockStitcher stitcher;
     uint64_t sample_count = 0;
     uint64_t frame_count = 0;
+    // Logged however the loop ends: at the end of the stream, or unwinding with coro::BlockingCancelled
+    // out of blocking_next() because the task was cancelled (Ctrl+C in main()).
+    struct FrameCountLog {
+        const uint64_t& frame_count;
+        ~FrameCountLog() { LOGF(INFO, "%u frame(s) decoded", frame_count); }
+    } frame_count_log{frame_count};
     auto process = [&](const IqBlock& block) {
+        // Everything this block publishes, sent as one ws_publisher_publish() at the end.
+        std::string published;
         if (spectrum && block.n >= static_cast<size_t>(kSpectrumFftSize)) {
             auto now = std::chrono::steady_clock::now();
             if (now >= next_spectrum_at) {
                 auto mag_db = spectrum->compute(block.iq().first<2 * kSpectrumFftSize>());
-                ws_publisher_publish(nlohmann::json(SpectrumFrame{mag_db, rate_hz, freq_hz}).dump());
+                append_json(published, nlohmann::json(SpectrumFrame{mag_db, rate_hz, freq_hz}).dump());
                 next_spectrum_at = now + kSpectrumInterval;
             }
         }
 
         auto frames = demod.exec(block);
         for (const auto& f : frames) {
-            DecodedFrameView v = handle_frame(f, rate_hz, start_unix_s);
+            DecodedFrameView v = handle_frame(f, rate_hz, start_unix_s, published);
             if (recorder) recorder->record(demod, block, f, v);
         }
+        if (!published.empty()) ws_publisher_publish(std::move(published));
         frame_count += frames.size();
         sample_count += block.n;
 

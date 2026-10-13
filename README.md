@@ -233,7 +233,7 @@ flowchart LR
         LOOP["run_demod_loop<br/>(blocking thread)"] --> OMP["OpenMP team<br/>(ispc tasks)"]
     end
     SRC -- "CoroStream&lt;IqBlock&gt;" --> LOOP
-    LOOP -- "JSON lines (broadcast channel)" --> WS
+    LOOP -- "JSON, one send per block (broadcast channel)" --> WS
     LOOP -- "aircraft updates" --> DB[(SQLite)]
 ```
 
@@ -264,6 +264,7 @@ the filter and picks the source. Every source then feeds the same
 | `--preamble-min` | 3.0 | Preamble correlation threshold, in units of the block RMS |
 | `--slice-mag-min` | 112 | Bit-slice magnitude threshold, in units of the block RMS |
 | `--ws-port` | off | Publish JSON over WebSocket on this port |
+| `--ws-interval` | 1.0 | Seconds between the updates sent to each `--ws-port` client |
 | `--history-db` | off | SQLite file recording every aircraft update, for the UI's time scrubber |
 | `--spectrum` | off | Publish a 1024-point FFT of the raw IQ every 150 ms (for the waterfall) |
 | `--debug-h5` | off | Write every decoded frame, with its IQ and everything needed to rerun the demodulator, to this HDF5 file (see [Debug HDF5](#debug-hdf5)) |
@@ -358,7 +359,7 @@ The three sources:
   - If the dongle is unplugged, the source reopens it: at once, then after
     1, 2, 4 and every 8 seconds until it is back. Stream time skips the
     outage, so aircraft times stay on the wall clock.
-  - The device handling (open, tune, reconnect, stop on Ctrl+C) is in
+  - The device handling (open, tune, reconnect, stop when dropped) is in
     [rtlsdr_device.h](src/input/rtlsdr_device.h), which `vita49_send`
     also uses.
 
@@ -653,9 +654,13 @@ frame idx=<sample> bits=112 confidence=<c> df=<n> icao=<hex|??????> crc=<ok|fixe
 
 #### WebSocket
 
-`--ws-port` broadcasts one JSON object per message
-([ws_publisher.h](src/output/ws_publisher.h)). There are four broadcast
-message types.
+`--ws-port` sends each client an update every `--ws-interval` seconds (1 by
+default): one message holding a JSON array of everything published since the
+client's last update, in order ([ws_publisher.h](src/output/ws_publisher.h)).
+An interval with nothing published sends nothing. The history snapshot sent on
+connect and the replies to a client's requests are not held for an update;
+each is a message holding one JSON object. There are four broadcast message
+types.
 
 `{"type":"frame",...}` is sent for every frame. Besides the frame itself it
 has:
@@ -1153,5 +1158,6 @@ Compare its tables before and after a demodulator change.
 | `ADSB_TIMING=1` | Logs per-stage timings for each block, plus a throughput and realtime-factor line every second |
 | `ADSB_NTASKS=N` | Overrides the ispc task count |
 | `ADSB_PIN=0` | Disables the async/compute CPU split |
+| `ADSB_WS_MAX_PENDING_BYTES=N` | Most published JSON one WebSocket client may have waiting before the oldest is dropped (default 16 MiB) |
 | `ADSB_TASKSYS_STATS=1` | Logs tasksys diagnostics at exit; see [tasksys.cpp](src/common/tasksys.cpp) |
 | `OMP_WAIT_POLICY`, `GOMP_SPINCOUNT` | If either is set, `adsb` keeps it instead of defaulting to a passive wait policy |

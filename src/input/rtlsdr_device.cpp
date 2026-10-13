@@ -3,13 +3,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <csignal>
 #include <stdexcept>
 #include <string>
-
-#include <coro/coro.h>
-#include <coro/io/signal.h>
-#include <coro/runtime/runtime.h>
 
 #include "common/log.h"
 
@@ -51,7 +46,6 @@ RtlSdr::RtlSdr(const RtlSdrTuning& tuning) : m_tuning(tuning) {
     m_dev = open_tuned(tuning);
     if (nullptr == m_dev)
         throw std::runtime_error("failed to open rtl-sdr device " + std::to_string(tuning.device_index));
-    m_sigint_watcher = coro::spawn(stop_on_sigint(this));
 
     LOGF(INFO, "streaming from rtl-sdr device %d: rate=%g Hz, freq=%g Hz, gain=%s (Ctrl+C to stop)",
          tuning.device_index, tuning.rate_hz, tuning.freq_hz,
@@ -135,14 +129,4 @@ void RtlSdr::close() {
         rtlsdr_close(m_dev);
         m_dev = nullptr;
     }
-}
-
-coro::Coro<void> RtlSdr::stop_on_sigint(RtlSdr* self) {
-    co_await coro::signal(SIGINT);
-    LOGF(INFO, "stopping after SIGINT");
-    // Only asks the read to stop: closing the device would block this runtime thread until the read
-    // returns. The read's return ends the caller's stream, and ~RtlSdr closes the device.
-    // Race (accepted): ~RtlSdr may be running on another thread if SIGINT lands during teardown -- the
-    // watcher is only cancelled after the destructor body has run.
-    self->request_stop();
 }

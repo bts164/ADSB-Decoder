@@ -30,6 +30,8 @@
 #include <coro/coro.h>
 #include <coro/io/signal.h>
 #include <coro/runtime/runtime.h>
+#include <coro/sync/select.h>
+#include <coro/task/spawn_blocking.h>
 
 #include "output/aircraft_history.h"
 #include "input/file_stream.h"
@@ -77,6 +79,8 @@ coro::Coro<int> async_main(int argc, char** argv) {
         "bit-slice magnitude threshold");
     program.add_argument("--ws-port").scan<'u', uint16_t>().help(
         "publish decoded frames as JSON over a WebSocket server on this port (default: no server)");
+    program.add_argument("--ws-interval").scan<'g', double>().default_value(1.0).help(
+        "seconds between the updates sent to each --ws-port client");
     program.add_argument("--history-db").help(
         "record every aircraft update to this SQLite file, live, for the UI's time scrubber; --ws-port "
         "clients get the recent sky on connect and can seek through it (default: not recorded)");
@@ -131,6 +135,9 @@ coro::Coro<int> async_main(int argc, char** argv) {
         if (program.present<uint16_t>("--ws-port") == uint16_t{0}) {
             throw std::runtime_error("--ws-port must be between 1 and 65535");
         }
+        if (!(program.get<double>("--ws-interval") > 0.0)) {
+            throw std::runtime_error("--ws-interval must be greater than 0");
+        }
     } catch (const std::exception& err) {
         // Show the usage of the parser the bad argument belonged to.
         std::cerr << err.what() << "\n";
@@ -159,6 +166,8 @@ coro::Coro<int> async_main(int argc, char** argv) {
     float preamble_min = program.get<float>("--preamble-min");
     float slice_mag_min = program.get<float>("--slice-mag-min");
     std::optional<uint16_t> ws_port = program.present<uint16_t>("--ws-port");
+    const auto ws_interval = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::duration<double>(program.get<double>("--ws-interval")));
     std::optional<std::string> history_db_path = program.present("--history-db");
     bool enable_spectrum = program.get<bool>("--spectrum");
     DebugRecordOptions debug{
@@ -181,14 +190,14 @@ coro::Coro<int> async_main(int argc, char** argv) {
             co_return 1;
         }
         if (!aircraft_history_init(*history_db_path)) co_return 1;
-        ws_publisher_init(*ws_port);
+        ws_publisher_init(*ws_port, ws_interval);
         LOGF(INFO, "serving %s on port %u (Ctrl+C to stop)", *history_db_path, *ws_port);
         co_await coro::signal(SIGINT);
         co_return 0;
     }
 
     if (ws_port) {
-        ws_publisher_init(*ws_port);
+        ws_publisher_init(*ws_port, ws_interval);
     }
     if (history_db_path) {
         aircraft_history_init(*history_db_path);
@@ -247,21 +256,30 @@ coro::Coro<int> async_main(int argc, char** argv) {
         stream.emplace(file_iq_stream(file_cmd.get<std::string>("--iq"), pad, kFileStreamChunkSamples));
     }
 
-    uint64_t frame_count;
+    // The demod thread owns the source stream. Returns nothing, so that the handle can still be awaited
+    // after a cancel (a cancelled task has no value to hand back); run_demod_loop() logs the frame count.
+    auto demod = coro::spawn_blocking(
+        [filter = std::move(filter), rate_hz, preamble_min, slice_mag_min, stream = std::move(*stream), freq_hz,
+         enable_spectrum, debug = std::move(debug)]() mutable {
+            adsb::cpu_layout::set_short_slice(false);
+            adsb::cpu_layout::bind_compute_thread();
+            run_demod_loop(std::move(filter), rate_hz, preamble_min, slice_mag_min, std::move(stream), freq_hz,
+                           enable_spectrum, debug);
+        });
+    // The one place Ctrl+C is handled: no source watches for the signal itself. Cancelling the demod task
+    // throws it out of blocking_next(); unwinding destroys the stream, and with it the source (its receive
+    // task, or its RtlSdr, whose destructor stops the read).
     try {
-        frame_count = co_await coro::spawn_blocking(
-            [filter = std::move(filter), rate_hz, preamble_min, slice_mag_min, stream = std::move(*stream),
-             freq_hz, enable_spectrum, debug = std::move(debug)]() mutable {
-                adsb::cpu_layout::set_short_slice(false);
-                adsb::cpu_layout::bind_compute_thread();
-                return run_demod_loop(std::move(filter), rate_hz, preamble_min, slice_mag_min, std::move(stream),
-                                       freq_hz, enable_spectrum, debug);
-            });
+        auto done = co_await coro::select(coro::ref(demod), coro::signal(SIGINT));
+        if (done.index() == 1) {
+            LOGF(INFO, "stopping after SIGINT");
+            // Wait for the thread to unwind, so the source is torn down while the runtime is still up.
+            co_await std::move(demod).cancel_and_join();
+        }
     } catch (const std::exception& e) {
         LOGF(ERROR, "%s", e.what());
         co_return 1;
     }
-    LOGF(INFO, "%u frame(s) decoded", frame_count);
 
     co_return 0;
 }
@@ -282,7 +300,7 @@ int main(int argc, char *argv[])
 
     // IO threads (the runtime and uv loop created below) inherit a short slice so a waking reader preempts
     // whatever else holds its core; the demod thread restores the default for itself and its OpenMP team.
-    adsb::cpu_layout::set_short_slice(true);
+    //adsb::cpu_layout::set_short_slice(true);
     if (adsb::cpu_layout::enabled()) {
         adsb::cpu_layout::bind_async_thread();
         return coro::Runtime(1).block_on(async_main(argc, argv));

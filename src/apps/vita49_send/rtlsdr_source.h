@@ -24,7 +24,7 @@ struct RtlSdrSourceParams {
     double context_interval_s;
 };
 
-// A stream of an RTL-SDR's samples as VRT packets, one per batch, until SIGINT or the device stops. Opens and
+// A stream of an RTL-SDR's samples as VRT packets, one per batch, until it is dropped. Opens and
 // tunes the device when first polled; throws std::runtime_error from there if it can't be opened. The
 // librtlsdr callback thread encodes each chunk into packets and queues them for the stream. The callback
 // never blocks, so when the consumer falls behind it drops packets, counted on `paceTx`

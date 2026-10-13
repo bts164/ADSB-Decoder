@@ -19,7 +19,7 @@ struct SimStreamParams {
     adsb_sim::Config sim;
     size_t samples_per_packet;
     uint32_t stream_id;
-    double duration_s;  // <= 0: until SIGINT
+    double duration_s;  // <= 0: until the stream is dropped
     double rf_freq_hz;  // advertised in the context packet; the simulated signal is baseband
     double context_interval_s;
     double queue_s;  // how far ahead of real time the generator may render
@@ -43,7 +43,7 @@ struct SimStreamParams {
 // falls more than 100 ms behind drops the late samples, like a FIFO overrun, and counts them on `paceTx`. The
 // IQ content at a given timestamp depends only on the sim config, not on this pacing.
 //
-// Ends after params.duration_s of signal, or on SIGINT.
+// Ends after params.duration_s of signal. Dropping the stream stops the render thread.
 coro::CoroStream<PacketBatch> sim_packet_stream(std::unique_ptr<adsb_sim::Simulator> sim, SimStreamParams params,
                                                 coro::WatchSender<PaceStats> paceTx);
 

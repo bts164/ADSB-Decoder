@@ -328,38 +328,24 @@ class _FrameTablePageState extends State<FrameTablePage> {
     }
     _sub = channel.stream.listen(
       (event) {
-        // Frames/aircraft can arrive at rates far higher than the UI can
-        // (or should) redraw at, so just buffer them here -- _flushUpdates,
-        // on a timer, is what actually triggers a rebuild.
+        // A periodic update is a list of messages; the snapshot and each
+        // reply to a request is one message on its own.
+        final Object? decoded;
         try {
-          final json = jsonDecode(event as String) as Map<String, dynamic>;
-          switch (json['type']) {
-            case 'frame':
-              _pendingFrames.add(FrameRecord.fromJson(json));
-            case 'aircraft':
-              final ac = AircraftRecord.fromJson(json);
-              _pendingAircraft[ac.icao] = ac;
-            case 'snapshot':
-              _onSnapshot(AircraftSnapshot.fromJson(json));
-            case 'aircraft_history':
-              _onAircraftHistory(json);
-            case 'heatmap':
-              _onHeatmap(json);
-            case 'input_status':
-              _inputStatus.value = InputStatus.fromJson(json);
-            case 'activity':
-              _onActivity(json);
-            case 'spectrum':
-              final rows = [..._spectrumHistory.value, SpectrumFrame.fromJson(json)];
-              if (rows.length > _maxSpectrumRows) {
-                rows.removeRange(0, rows.length - _maxSpectrumRows);
-              }
-              _spectrumHistory.value = rows;
-          }
+          decoded = jsonDecode(event as String);
         } catch (e, st) {
-          // Skip the message rather than tearing down the connection, but say
-          // why: a handler that throws here fails silently otherwise.
           debugPrint('dropped ws message: $e\n$st');
+          return;
+        }
+        for (final item in decoded is List ? decoded : [decoded]) {
+          try {
+            _onMessage(item as Map<String, dynamic>);
+          } catch (e, st) {
+            // Skip the message rather than tearing down the connection (or
+            // losing the rest of its update), but say why: a handler that
+            // throws here fails silently otherwise.
+            debugPrint('dropped ws message: $e\n$st');
+          }
         }
       },
       onError: (e) => _disconnect(error: '$e'),
@@ -502,6 +488,36 @@ class _FrameTablePageState extends State<FrameTablePage> {
   /// Applies a snapshot from the backend. The first, sent on connect before
   /// any live message, backfills the live aircraft and trails; the rest
   /// answer seeks and are shown while scrubbing.
+  // Handles one message from the backend. Frames/aircraft can arrive at
+  // rates far higher than the UI can (or should) redraw at, so they are just
+  // buffered here -- _flushUpdates, on a timer, is what actually triggers a
+  // rebuild.
+  void _onMessage(Map<String, dynamic> json) {
+    switch (json['type']) {
+      case 'frame':
+        _pendingFrames.add(FrameRecord.fromJson(json));
+      case 'aircraft':
+        final ac = AircraftRecord.fromJson(json);
+        _pendingAircraft[ac.icao] = ac;
+      case 'snapshot':
+        _onSnapshot(AircraftSnapshot.fromJson(json));
+      case 'aircraft_history':
+        _onAircraftHistory(json);
+      case 'heatmap':
+        _onHeatmap(json);
+      case 'input_status':
+        _inputStatus.value = InputStatus.fromJson(json);
+      case 'activity':
+        _onActivity(json);
+      case 'spectrum':
+        final rows = [..._spectrumHistory.value, SpectrumFrame.fromJson(json)];
+        if (rows.length > _maxSpectrumRows) {
+          rows.removeRange(0, rows.length - _maxSpectrumRows);
+        }
+        _spectrumHistory.value = rows;
+    }
+  }
+
   void _onSnapshot(AircraftSnapshot s) {
     if (s.startS != null) {
       _historyStartS = math.min(_historyStartS ?? s.startS!, s.startS!);

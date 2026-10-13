@@ -13,7 +13,7 @@
  */
 
 /**
- * Streams IqBlocks from an RTL-SDR until Ctrl+C. If the device is unplugged the stream pauses until it has
+ * Streams IqBlocks from an RTL-SDR until the stream is dropped. If the device is unplugged the stream pauses until it has
  * reconnected (RtlSdr::read_async), then resumes with block starts advanced by the samples missed.
  *
  * librtlsdr's own thread (inside rtlsdr_read_async) delivers raw uint8 I/Q buffers to a callback, which
