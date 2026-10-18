@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <unordered_set>
 
 #include <absl/strings/str_format.h>
 #include <nlohmann/json_fwd.hpp>
@@ -38,12 +39,14 @@ struct DecodedFrameView {
  * - DF19/22 (military) have no general parity rule, so they are unchecked (crc_checked false, crc_ok false).
  * - Every other DF is unassigned, so the frame is corrupt: checked, and failed.
  *
- * Confirmed addresses accumulate in an internal set as frames arrive, so this is not thread-safe.
+ * The receiver calls it through AircraftTracker::view(), which owns `known_icaos`.
  *
- * @param f frame from AdsbDemod::exec()
+ * @param f frame from demodulate()
  * @param rate_hz input sample rate (unused)
+ * @param known_icaos addresses confirmed so far, which a valid DF11/17/18 adds to. Short replies are checked
+ *     against it, so it has to persist from frame to frame of one stream.
  */
-DecodedFrameView compute_frame_view(const AdsbFrame& f, double rate_hz);
+DecodedFrameView compute_frame_view(const AdsbFrame& f, double rate_hz, std::unordered_set<uint32_t>& known_icaos);
 
 /** "ok", "fixed" (ok after a single-bit correction), "fail" or "unchecked". */
 const char* crc_status(const DecodedFrameView& v);

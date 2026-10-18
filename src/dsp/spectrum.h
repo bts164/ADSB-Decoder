@@ -1,6 +1,5 @@
 #pragma once
 
-#include <chrono>
 #include <memory>
 #include <span>
 
@@ -11,31 +10,30 @@
  * @file
  * Spectrum for the UI waterfall, computed from the raw pre-resample IQ.
  *
- * A side channel off the blocks run_demod_loop (pipeline.h) hands to AdsbDemod: before resampling, so it
- * shows the true center-frequency offset and out-of-band noise. One windowed FFT of one block every
- * kSpectrumInterval, not a continuous transform, since a waterfall only needs a few updates per second.
+ * A side channel off the blocks run_demod_loop (pipeline.h) hands to demodulate(): before resampling, so it
+ * shows the true center-frequency offset and out-of-band noise. One windowed FFT of one block every so often,
+ * not a continuous transform, since a waterfall only needs a few updates per second.
  */
 
-constexpr int kSpectrumFftSize = 1024;  /**< FFT length, in samples */
-constexpr std::chrono::milliseconds kSpectrumInterval{150};  /**< minimum time between spectrum frames */
-
-/** Hann-windowed FFT of kSpectrumFftSize samples, with its FFTW plan and buffers. */
+/** Hann-windowed FFT of kFftSize samples, with its FFTW plan and buffers. */
 class SpectrumComputer {
 public:
+    static constexpr int kFftSize = 1024;  /**< FFT length, in samples */
+
     SpectrumComputer();
     ~SpectrumComputer();
 
     /**
-     * Windows and transforms kSpectrumFftSize samples.
-     * @param iq kSpectrumFftSize samples, as interleaved I/Q
+     * Windows and transforms kFftSize samples.
+     * @param iq kFftSize samples, as interleaved I/Q
      * @return fftshifted magnitude in dB: bin 0 is the most negative frequency (-rate/2 relative to
      *         center) and the last bin the most positive, ready to plot against a linear frequency axis
      */
-    xt::xtensor<float, 1> compute(std::span<const float, 2 * kSpectrumFftSize> iq);
+    xt::xtensor<float, 1> compute(std::span<const float, 2 * kFftSize> iq);
 
 private:
     struct Impl;
-    std::unique_ptr<Impl> impl_;
+    std::unique_ptr<Impl> m_impl;
 };
 
 /** One SpectrumComputer::compute() result with the context needed to serialize it. */

@@ -5,6 +5,9 @@
 #include <cmath>
 #include <stdexcept>
 #include <string>
+#include <vector>
+
+#include <absl/strings/str_join.h>
 
 #include "common/log.h"
 
@@ -15,21 +18,52 @@ constexpr std::array<std::chrono::seconds, 5> kReconnectBackoff{
     std::chrono::seconds{0}, std::chrono::seconds{1}, std::chrono::seconds{2}, std::chrono::seconds{4},
     std::chrono::seconds{8}};
 
-// Opens and tunes the device; nullptr if it can't be opened.
-rtlsdr_dev_t* open_tuned(const RtlSdrTuning& tuning) {
-    rtlsdr_dev_t* dev = nullptr;
-    if (rtlsdr_open(&dev, static_cast<uint32_t>(tuning.device_index)) != 0) return nullptr;
+// librtlsdr's transfer buffers when read_async() is given 0, or a length that isn't a multiple of 512. Its
+// header doesn't export them.
+constexpr uint32_t kDefaultBufNum = 15;
+constexpr uint32_t kDefaultBufLen = 16 * 32 * 512;
 
-    rtlsdr_set_sample_rate(dev, static_cast<uint32_t>(tuning.rate_hz));
-    rtlsdr_set_center_freq(dev, static_cast<uint32_t>(tuning.freq_hz));
+// Opens and tunes the device. nullptr, with the reason in `error`, if it can't be opened or rejects the rate or
+// frequency: streaming at other settings would mislabel every sample. A rejected gain is only logged.
+rtlsdr_dev_t* open_tuned(const RtlSdrTuning& tuning, std::string& error) {
+    rtlsdr_dev_t* dev = nullptr;
+    if (rtlsdr_open(&dev, static_cast<uint32_t>(tuning.device_index)) != 0) {
+        error = absl::StrFormat("failed to open rtl-sdr device %d", tuning.device_index);
+        return nullptr;
+    }
+    if (rtlsdr_set_sample_rate(dev, static_cast<uint32_t>(tuning.rate_hz)) != 0) {
+        error = absl::StrFormat("rtl-sdr device %d rejected sample rate %g Hz", tuning.device_index, tuning.rate_hz);
+    } else if (rtlsdr_set_center_freq(dev, static_cast<uint32_t>(tuning.freq_hz)) != 0) {
+        error = absl::StrFormat("rtl-sdr device %d rejected center frequency %g Hz", tuning.device_index,
+                                tuning.freq_hz);
+    }
+    if (!error.empty()) {
+        rtlsdr_close(dev);
+        return nullptr;
+    }
     if (tuning.gain_db < 0.0) {
-        rtlsdr_set_tuner_gain_mode(dev, 0);  // auto
-    } else {
-        rtlsdr_set_tuner_gain_mode(dev, 1);  // manual
-        rtlsdr_set_tuner_gain(dev, static_cast<int>(std::lround(tuning.gain_db * 10.0)));
+        if (rtlsdr_set_tuner_gain_mode(dev, 0) != 0)  // auto
+            LOGF(WARNING, "rtl-sdr device %d rejected auto gain", tuning.device_index);
+    } else if (rtlsdr_set_tuner_gain_mode(dev, 1) != 0 ||  // manual
+               rtlsdr_set_tuner_gain(dev, static_cast<int>(std::lround(tuning.gain_db * 10.0))) != 0) {
+        LOGF(WARNING, "rtl-sdr device %d rejected gain %g dB", tuning.device_index, tuning.gain_db);
     }
     rtlsdr_reset_buffer(dev);
     return dev;
+}
+
+// A manual gain the tuner has no step for is quietly replaced by a step near it (the R820T takes the first one
+// at or above), and librtlsdr reports the gain as asked for. So say so, and list the steps.
+void check_gain_step(rtlsdr_dev_t* dev, const RtlSdrTuning& tuning) {
+    if (tuning.gain_db < 0.0) return;
+    const int count = rtlsdr_get_tuner_gains(dev, nullptr);
+    if (count <= 0) return;
+    std::vector<int> steps(static_cast<size_t>(count));  // tenths of a dB
+    rtlsdr_get_tuner_gains(dev, steps.data());
+    if (std::ranges::find(steps, std::lround(tuning.gain_db * 10.0)) != steps.end()) return;
+    LOGF(WARNING, "rtl-sdr device %d: %g dB is not one of the tuner's gain steps, so it uses one near it. Steps "
+         "(dB): %s", tuning.device_index, tuning.gain_db,
+         absl::StrJoin(steps, " ", [](std::string* out, int g) { absl::StrAppendFormat(out, "%.1f", g / 10.0); }));
 }
 
 }  // namespace
@@ -43,24 +77,43 @@ struct RtlSdr::Relay {
 };
 
 RtlSdr::RtlSdr(const RtlSdrTuning& tuning) : m_tuning(tuning) {
-    m_dev = open_tuned(tuning);
-    if (nullptr == m_dev)
-        throw std::runtime_error("failed to open rtl-sdr device " + std::to_string(tuning.device_index));
+    std::string error;
+    m_dev = open_tuned(tuning, error);
+    if (nullptr == m_dev) throw std::runtime_error(error);
 
-    LOGF(INFO, "streaming from rtl-sdr device %d: rate=%g Hz, freq=%g Hz, gain=%s (Ctrl+C to stop)",
-         tuning.device_index, tuning.rate_hz, tuning.freq_hz,
+    // The rate and frequency the device reports, which are what it uses: the resampler can round the rate.
+    m_rate_hz = rtlsdr_get_sample_rate(m_dev);
+    m_freq_hz = rtlsdr_get_center_freq(m_dev);
+    LOGF(INFO, "streaming from rtl-sdr device %d: rate=%.0f Hz, freq=%.0f Hz, gain=%s (Ctrl+C to stop)",
+         tuning.device_index, m_rate_hz, m_freq_hz,
          tuning.gain_db < 0.0 ? std::string("auto") : absl::StrFormat("%g dB", tuning.gain_db));
+    if (std::abs(m_rate_hz - tuning.rate_hz) >= 1.0)
+        LOGF(WARNING, "rtl-sdr device %d runs at %.0f Hz, not the %g Hz asked for", tuning.device_index, m_rate_hz,
+             tuning.rate_hz);
+    check_gain_step(m_dev, tuning);
 }
 
 int RtlSdr::read_async(rtlsdr_read_async_cb_t cb, void* ctx, uint32_t buf_num, uint32_t buf_len,
                        const OnReconnect& on_reconnect) {
+    // Resolved here rather than by librtlsdr, which doesn't report what it chose.
+    if (buf_len % 512 != 0) {
+        LOGF(WARNING, "rtl-sdr buffer length %u is not a multiple of 512; using librtlsdr's default instead",
+             buf_len);
+        buf_len = 0;
+    }
+    const uint32_t num = buf_num ? buf_num : kDefaultBufNum;
+    const uint32_t len = buf_len ? buf_len : kDefaultBufLen;
+    LOGF(INFO, "rtl-sdr device %d: %u transfer buffers%s of %u bytes%s, %.1f ms each", m_tuning.device_index, num,
+         buf_num ? "" : " (librtlsdr's default)", len, buf_len ? "" : " (librtlsdr's default)",
+         len / 2 / m_rate_hz * 1e3);
+
     std::unique_lock lock(m_mutex);
     m_reading = true;
     int rc = 0;
     while (!m_stop && nullptr != m_dev) {
         Relay relay{this, m_dev, cb, ctx};
         lock.unlock();
-        rc = rtlsdr_read_async(relay.dev, relay_cb, &relay, buf_num, buf_len);
+        rc = rtlsdr_read_async(relay.dev, relay_cb, &relay, num, len);
         lock.lock();
         // Only a stop request or a lost device ends the read: librtlsdr cancels it itself when the USB
         // transfers start failing.
@@ -89,14 +142,15 @@ bool RtlSdr::reconnect(std::unique_lock<std::mutex>& lock) {
 
         // Opening takes a while, so not under the lock: request_stop() must not block a runtime thread.
         lock.unlock();
-        rtlsdr_dev_t* dev = open_tuned(m_tuning);
+        std::string error;
+        rtlsdr_dev_t* dev = open_tuned(m_tuning, error);
         lock.lock();
         if (nullptr != dev) {
             m_dev = dev;  // closed by close() if a stop was asked for meanwhile
             return !m_stop;
         }
         const auto next = kReconnectBackoff[std::min(attempt + 1, kReconnectBackoff.size() - 1)];
-        LOGF(WARNING, "rtl-sdr device %d not found; trying again in %d s", m_tuning.device_index, next.count());
+        LOGF(WARNING, "%s; trying again in %d s", error, next.count());
     }
 }
 

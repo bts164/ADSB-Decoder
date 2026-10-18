@@ -145,14 +145,14 @@ The UI connects to `ws://127.0.0.1:8765`, so run `adsb` with `--ws-port 8765`.
 From the repository root:
 
 ```sh
-# Replay a recording (the sample rate comes from the .sigmf-meta)
+# Replay a recording (the format, rate and frequency come from the .sigmf-meta)
 build/Release/adsb file --iq capture.sigmf-data
 
 # Live from an RTL-SDR, publishing to the UI and recording history
 build/Release/adsb --ws-port 8765 --history-db history.sqlite rtlsdr --gain 40
 
 # Simulated traffic over VITA-49/UDP: the receiver in one terminal...
-build/Release/adsb --rate 10e6 --ws-port 8765 vita49 --port 4991
+build/Release/adsb --ws-port 8765 vita49 --port 4991 --rate 10e6
 # ...the sender in another
 build/Release/vita49_send --rate 10e6 --dest-port 4991 sim --scenario scenarios/boston.json
 
@@ -185,15 +185,16 @@ adsb/
     common/   constants, cpu_layout (CPU split), tasksys.cpp (ispc task runtime on OpenMP)
     dsp/      demod, peak_select, filter_bank, spectrum, iq_block (block + stitcher), kernels.ispc
     decode/   frame_decode (CRC, DF, ICAO), aircraft (callsign/altitude/CPR position/velocity, Comm-B)
-    input/    file_stream, vita49_stream + vrt_assembler + iq_block_chunker,
-              rtlsdr_stream + rtlsdr_device, sigmf_meta
+    net/      UDP sending helpers: datagram_batch (GSO batches + buffer pool), gso
+    vrt/      the VITA-49 (VRT) wire format: format, encode (sender), assembler (receiver reorder/gap-fill)
+    input/    file_stream, vita49_stream + iq_block_chunker, rtlsdr_stream + rtlsdr_device, sigmf_meta
     output/   ws_publisher (WebSocket fan-out), aircraft_history (SQLite), frame_recorder (debug HDF5)
     sim/      adsb_sim (Mode S signal simulator), sim_kernels.ispc
     apps/
       filter_options.h  resampling-filter command-line options
       adsb/             the receiver: main.cpp (CLI), pipeline.{h,cpp} (demod loop, per-frame handling)
       vita49_send/      VRT/UDP sender: main.cpp (CLI), rtlsdr_source / sim_source (the two sources),
-                        vrt_encode (VRT packets, timestamps, context packets)
+                        packet_sender (send loop), pace_stats (overrun reporting)
       adsb_sim_eval/    simulator -> demodulator detection statistics
   tests/      ctest tests, vrt_to_sigmf.py; tests/data holds captures (not in git)
   filters/    example filter coefficient files + export_filter.jl
@@ -220,29 +221,111 @@ flowchart LR
     decode --> adsb_sim_eval
 ```
 
+## Design
+
+`adsb` and `vita49_send` are both built as a pipeline: a chain of tasks on one
+coro runtime, each a stage that owns its state, connected by streams and
+channels. The diagrams below show each app's chain. The rules are:
+
+- **A stage is a task that owns its state.** The sink's `AircraftTracker`
+  and the demodulator's `BlockStitcher` belong to their tasks, and no stage
+  reaches into another's. Nothing is shared between stages, so nothing needs
+  a lock.
+- **Stages are joined by bounded queues.** Where one stage just feeds the
+  next, it is a buffered task stream (`build_task().buffer(n)`). Where a
+  callback or a thread of its own produces, it is an mpsc channel. A queue's
+  depth is how far its producer may run ahead.
+- **A full queue holds the producer back.** The exceptions are the stages
+  fed by hardware in real time, the RTL-SDR callback and the UDP socket. They
+  drop instead, since waiting would lose more than it saves, and log and plot
+  every drop.
+- **A shared resource gets an actor.** One task owns it and handles requests
+  from one channel, in order. A request that needs an answer carries a
+  oneshot sender for it. The history database is one: the sink sends it
+  inserts and the WebSocket clients send it queries.
+- **Fan-out is a broadcast, shared status a watch.** Every WebSocket client
+  has its own receiver on one broadcast channel. `vita49_send`'s stages
+  report drops on one watch channel, which the pace monitor reads.
+- **Parallelism is inside a stage.** A stage that needs more than one core
+  splits its own work with `coro::parallel()` (the demodulator, the sim's
+  renderer). More stages would only add queues.
+- **Shutdown starts at the end of the chain.** Ctrl+C is handled once, in
+  `main.cpp`. Dropping the last stage's task cancels it, which drops the
+  stream it pulls from, and so on back to the source; no stage watches for
+  the signal itself. The detached services (the WebSocket server and the
+  history actor) are cancelled and drained by the runtime as it shuts down,
+  and the history actor writes what is still queued first.
+
 ## The receiver (`adsb`)
 
 ```mermaid
-flowchart LR
-    subgraph async["async core (coro runtime, 1 thread)"]
-        SRC["source task:<br/>file read / UDP recv + VRT assembly"]
-        WS["ws_publisher task<br/>(one coroutine per client)"]
+flowchart TB
+    subgraph source["source: one per subcommand"]
+        direction LR
+        FILE["<b>file</b><br/>file_read task<br/>reads one block per chunk"]
+        VRT["<b>vita49</b><br/>vita49_receive task<br/>UDP recv, VRT reorder and gap fill"]
+        RTL["<b>rtlsdr</b><br/>blocking thread<br/>librtlsdr callback, u8 to cf32"]
     end
-    RTL["librtlsdr thread"] -. "rtlsdr source" .-> SRC
-    subgraph compute["compute CPUs"]
-        LOOP["run_demod_loop<br/>(blocking thread)"] --> OMP["OpenMP team<br/>(ispc tasks)"]
+    DEMOD["<b>demodulate task</b><br/>spectrum_tap(): FFT<br/>BlockStitcher: padding<br/>AdsbDemod: resample,<br/>preamble, slice"]
+    PAR["coro::parallel() parts<br/>one per worker"]
+    SINK["<b>demod task</b><br/>run_demod_loop()<br/>handle_frame(): validate,<br/>decode, AircraftTracker"]
+    REC["debug_h5 task<br/>FrameRecorder"]
+    HIST["history actor<br/>blocking thread"]
+    subgraph ws["WebSocket server"]
+        direction LR
+        ACC["ws_accept task"] --> CLI["ws_client task<br/>one per client"]
     end
-    SRC -- "CoroStream&lt;IqBlock&gt;" --> LOOP
-    LOOP -- "JSON, one send per block (broadcast channel)" --> WS
-    LOOP -- "aircraft updates" --> DB[(SQLite)]
+    H5[("HDF5")]
+    DB[("SQLite")]
+    UI(["UI"])
+
+    FILE -- "buffered, 4 blocks" --> DEMOD
+    VRT -- "mpsc, 64 MiB" --> DEMOD
+    RTL -- "mpsc, 4 blocks, drops when full" --> DEMOD
+    DEMOD <-- "fork / join" --> PAR
+    DEMOD -- "buffered, 64 blocks" --> SINK
+    SINK -- "broadcast" --> CLI
+    SINK -. "--history-db: mpsc, 16" .-> HIST
+    SINK -. "--debug-h5: mpsc, 4" .-> REC
+    REC --> H5
+    HIST <--> DB
+    DEMOD -. "--spectrum: broadcast" .-> CLI
+    VRT -. "input status, broadcast" .-> CLI
+    CLI -. "queries, oneshot replies" .-> HIST
+    CLI <--> UI
 ```
+
+How to read the diagram:
+
+- **Boxes:** every box is a task on the one coro runtime, except the two marked
+  "blocking thread", which run on coro's blocking pool (`spawn_blocking`).
+  The stages listed in a task's box run in that task's polls: the task pulls
+  the stream through them.
+- **Arrows:** each arrow is labelled with its channel and its depth, in
+  blocks or requests where no unit is given. A dashed arrow is there only
+  with the option it names. The spectrum and the input status go only to
+  WebSocket clients, so they also need `--ws-port`.
+- **`serve`:** the subcommand has no source and no demodulation. It runs only
+  the history actor and the WebSocket server.
 
 The pieces fit together like this:
 
 1. A source turns its input into a `coro::CoroStream<IqBlock>`.
-2. The demod loop pulls blocks from that stream on its own thread, then
-   demodulates and decodes each block.
-3. The loop hands the results to the outputs.
+2. A demodulate task on the same runtime pulls blocks from that stream,
+   through the optional spectrum tap, then stitches and demodulates them
+   (`demodulate()` in [demod.h](src/dsp/demod.h)). Each block's resampling
+   and preamble search are split across the runtime's workers. It can run
+   ahead of the demod loop, through a buffered stream (4 blocks deep with
+   `--debug-h5`, since each block then holds its IQ).
+3. The demod loop validates and decodes each block's frames in order, and
+   keeps each aircraft's state in its `AircraftTracker`. It then hands the
+   block's results to the outputs:
+    - one broadcast send of JSON to the WebSocket clients;
+    - with `--history-db`, one insert of the block's aircraft updates to the
+      history actor, which owns the database and also answers the clients'
+      history queries;
+    - with `--debug-h5`, the frames and their IQ, to a recorder task, so
+      writing the file doesn't hold up the loop.
 
 [main.cpp](src/apps/adsb/main.cpp) only parses the command line, designs
 the filter and picks the source. Every source then feeds the same
@@ -259,14 +342,12 @@ the filter and picks the source. Every source then feeds the same
 | `--filter-kaiser-beta` | 8 | Kaiser window beta, with `--filter-window kaiser` |
 | `--filter-matched` | off | Also convolve the designed lowpass with a 0.5 µs boxcar (a filter matched to Mode S pulses) |
 | `--filter`, `--filter-meta` | off | Load the filter bank from these files instead of designing it |
-| `--rate` | from source | Input sample rate in Hz. `file` reads it from SigMF; `vita49` and `rtlsdr` use 2.4e6. For `vita49` it must match the sender's rate: an IF Context packet that advertises a different rate is a fatal error. |
-| `--freq` | 1090e6 | Center frequency. It is the tuner frequency for `rtlsdr` and labels the spectrum frames. |
 | `--preamble-min` | 3.0 | Preamble correlation threshold, in units of the block RMS |
 | `--slice-mag-min` | 112 | Bit-slice magnitude threshold, in units of the block RMS |
 | `--ws-port` | off | Publish JSON over WebSocket on this port |
 | `--ws-interval` | 1.0 | Seconds between the updates sent to each `--ws-port` client |
 | `--history-db` | off | SQLite file recording every aircraft update, for the UI's time scrubber |
-| `--spectrum` | off | Publish a 1024-point FFT of the raw IQ every 150 ms (for the waterfall) |
+| `--spectrum` | off | Publish a 1024-point FFT of the raw IQ every 150 ms (for the waterfall); needs `--ws-port`, and is ignored with a warning without it |
 | `--debug-h5` | off | Write every decoded frame, with its IQ and everything needed to rerun the demodulator, to this HDF5 file (see [Debug HDF5](#debug-hdf5)) |
 | `--debug-h5-failed-only` | | With `--debug-h5`, record only frames that fail CRC (not unchecked ones) |
 | `--log-level` | info | Least severe log message written to stderr: `info`, `warning`, `error`, `fatal`, or `none` |
@@ -276,9 +357,21 @@ the filter and picks the source. Every source then feeds the same
 
 | Source | Options |
 |---|---|
-| `file` | `--iq x.sigmf-data` (required), `--meta x.sigmf-meta` (default: the `--iq` file's sibling) |
-| `vita49` | `--port P` (required), `--bind addr` (0.0.0.0), `--stream-id N` (default: the first one seen), `--idle-timeout s` (2; 0 = never) |
-| `rtlsdr` | `--device N` (0), `--gain dB` (negative = auto), `--buf-num N`, `--buf-len B` (0 = librtlsdr's defaults: 15 buffers of 256 KB) |
+| `file` | `--iq x.sigmf-data` (required), `--meta x.sigmf-meta` (default: the `--iq` file's sibling, if there is one), `--rate Hz`, `--freq Hz` |
+| `vita49` | `--port P` (required), `--bind addr` (0.0.0.0), `--stream-id N` (default: the first one seen), `--idle-timeout s` (2; 0 = never), `--rate Hz` (required), `--freq Hz` (1090e6) |
+| `rtlsdr` | `--device N` (0), `--gain dB` (negative = auto), `--buf-num N`, `--buf-len B` (0 = librtlsdr's defaults: 15 buffers of 256 KB), `--rate Hz` (2.4e6), `--freq Hz` (1090e6) |
+
+**Sample rate and center frequency.** The frequency is the tuner frequency
+for `rtlsdr`; otherwise it only labels the spectrum frames.
+
+- `file` reads them, and the sample format (`cf32_le` or `ci16_be`), from the
+  SigMF metadata. `--rate` and `--freq` override it, with a warning when they
+  differ. Without a metadata file it reads raw `cf32_le` at 2.4e6 and 1090e6,
+  with a warning.
+- `vita49` uses `--rate`, which must match the sender's rate: an IF Context
+  packet that gives a different rate is a fatal error.
+- `rtlsdr` tunes to `--rate` and `--freq`, and uses what the device actually
+  runs at, with a warning when that differs.
 
 **`serve` subcommand.** `serve` takes no input and has no options of its own.
 
@@ -295,9 +388,14 @@ Every source yields `IqBlock`s ([iq_block.h](src/dsp/iq_block.h)) of
 128k samples. `rtlsdr` yields one block per librtlsdr buffer, which is the
 same size by default.
 
-- Each block is allocated with `AdsbDemod::padding()` zeroed samples on either
+- Each block is allocated with `demod_padding()` zeroed samples on either
   side of the real ones.
 - Each block records its stream sample index (`start`).
+- Each block holds its samples in the format its source receives them in
+  ([iq_format.h](src/dsp/iq_format.h)), and the resampler reads that format
+  directly. No source spends a pass over its samples converting them:
+  `rtlsdr` yields float blocks, `file` blocks in the file's format, and
+  `vita49` the packets' big-endian int16 unchanged.
 - A block dropped because the demodulator fell behind still counts toward
   `start`, so frame indices stay correct across drops.
 - The lead padding is `(taps-1)/2` samples, which is how far the tap window
@@ -308,9 +406,10 @@ same size by default.
 
 The three sources:
 
-- **`file`** ([file_stream.h](src/input/file_stream.h)) replays an
-  interleaved cf32 SigMF recording. It reads a few blocks ahead of the
-  consumer on the coro runtime, so file IO overlaps demodulation.
+- **`file`** ([file_stream.h](src/input/file_stream.h)) replays a SigMF
+  recording (`cf32_le` or `ci16_be`) or a raw `cf32_le` file. It reads a few
+  blocks ahead of the consumer on the coro runtime, so file IO overlaps
+  demodulation.
 - **`vita49`** ([vita49_stream.h](src/input/vita49_stream.h)) receives
   the stream `vita49_send` emits. That stream has two kinds of packet: VRT IF
   Data packets carry big-endian int16 IQ, and IF Context packets carry the
@@ -320,17 +419,17 @@ The three sources:
     while the demod thread is busy. It reads with UDP GRO where available, so
     a run of same-size datagrams arrives in one syscall.
   - **Assembly.** `vrt::Assembler`
-    ([vrt_assembler.h](src/input/vrt_assembler.h)) puts the packets
+    ([vrt/assembler.h](src/vrt/assembler.h)) puts the packets
     back in order:
     - it re-sorts packets by timestamp in a 256-packet window;
     - it zero-fills gaps where packets never arrived;
     - it treats a timestamp jump of more than 1 s as a sender restart.
-  - **Blocks.** The Assembler writes each payload straight into an
-    `IqBlockChunker`
+  - **Blocks.** The Assembler copies each payload, unconverted, straight
+    into an `IqBlockChunker`
     ([iq_block_chunker.h](src/input/iq_block_chunker.h)), which builds
     the padded blocks in place with no further copy.
-  - **Handoff.** Finished blocks go to the demod thread through an 8-block
-    channel. If that channel fills, blocks are dropped, so the socket keeps
+  - **Handoff.** Finished blocks go to the demod thread through a 128-block
+    (64 MiB) channel. If that channel fills, blocks are dropped, so the socket keeps
     being read.
   - **Rate check.** Every 2 s while packets arrive, the source checks that
     the input keeps up with real time:
@@ -392,8 +491,12 @@ flowchart TD
     C --> A["6. Aircraft state from DF17/18 ME field"]
 ```
 
-1. **Resample and envelope** (`resample_block` in
-   [kernels.ispc](src/dsp/kernels.ispc)).
+1. **Resample and envelope** (`resample_body` in
+   [kernels.ispc](src/dsp/kernels.ispc), compiled once per sample format as
+   `resample_block_f32` and `resample_block_i16be`).
+   - The block's format picks the kernel. Each converts its samples to float
+     as it reads them and scales its outputs, so everything after this stage
+     sees the same values whatever the format.
    - A polyphase FIR bank (`Np` phases × `taps`; the default is 64 × 32)
      resamples the complex input to `ADSB_SAMPLES_PER_SYMBOL` (12) samples
      per µs. Each output is the magnitude `|z|`.
@@ -438,7 +541,7 @@ flowchart TD
      - A sidelobe picked there fails CRC, and its exclusion zone then
        suppresses the true peak, so the frame is lost.
      - This happens to about 1e-4 of strong frames.
-     - See the note on `AdsbDemod` in [demod.h](src/dsp/demod.h) for a
+     - See the note on `demodulate()` in [demod.h](src/dsp/demod.h) for a
        fix.
 4. **Bit slicing** (`slice_scan`).
    - For each accepted candidate, the slicer reads 112 bits starting 8 µs
@@ -596,32 +699,40 @@ Either way, the taps are then prepared for the kernel:
 2. Each tap is duplicated for interleaved I/Q.
 3. Each row is padded.
 
-### Threading and CPU layout
+### Threading
 
-- **Async core.** The coro runtime runs the sources and WebSocket clients on
-  one thread. That thread and its libuv threads are restricted to the first
-  allowed core and its SMT siblings
-  ([cpu_layout.h](src/common/cpu_layout.h)).
-- **Compute CPUs.** `run_demod_loop` runs on a `coro::spawn_blocking` thread
-  and pulls blocks with `coro::blocking_next`.
-  - It is restricted to the remaining CPUs, along with the OpenMP team that
-    runs the ispc tasks.
-  - The ispc task count is sized to that set of CPUs.
-  - `ADSB_PIN=0` turns the split off. The runtime then uses its default
-    worker count.
-- **ispc tasks.** [tasksys.cpp](src/common/tasksys.cpp) implements
-  ispc's `launch`/`sync` ABI on OpenMP.
-  - At startup, `adsb` sets `OMP_WAIT_POLICY=passive` and re-execs itself,
-    unless `OMP_WAIT_POLICY` or `GOMP_SPINCOUNT` is already set.
-  - Without this, idle workers spin through the ~55 ms gaps between live
-    blocks.
-- **Scheduler slice.** On Linux 6.12+ the IO threads ask for a 100 µs
-  scheduler slice.
+- **One runtime.** A work-stealing coro runtime with one worker per hardware
+  thread runs everything: the sources, the WebSocket clients and the demod
+  loop. No thread is pinned to a CPU.
+- **Demodulator.** `AdsbDemod::exec()` runs the resampler and the preamble
+  correlation as one `coro::parallel()` call, one part per worker.
+  - Each part computes its share of the resampled envelope
+    (`resample_chunk_*` in [kernels.ispc](src/dsp/kernels.ispc)), waits at
+    the call's barrier for the others, then computes its share of the
+    preamble scores (`preamble_chunk`).
+  - The parts start on workers that are already running or briefly parked,
+    so a block costs no thread launch; peak picking, bit slicing and frame
+    assembly run in the demodulate task itself.
+  - `ADSB_NTASKS` overrides the part count.
+- **OpenMP.** [kernels.ispc](src/dsp/kernels.ispc) also has `launch`
+  versions of the two kernels (`resample_block_*`, `preamble_scan`), which
+  nothing calls now. [tasksys.cpp](src/common/tasksys.cpp) implements ispc's
+  `launch`/`sync` ABI on OpenMP for them.
+- **Simulator.** `vita49_send sim` runs on one runtime too, with the
+  renderer as a task of its own (see [`sim` source](#sim-source)).
+  - `Simulator::generate()` runs the decimation filter and the noise stage
+    as one `coro::parallel()` call of `--render-threads` parts
+    (`sim_finish_range` in [sim_kernels.ispc](src/sim/sim_kernels.ispc)).
+    It fills a list of spans, so the renderer writes the samples straight
+    into the VRT packets' payloads.
+- **Scheduler slice.** On Linux 6.12+ `vita49_send`'s runtime workers ask
+  for a 100 µs scheduler slice.
   - With it, a thread woken by a packet preempts whatever desktop thread
-    holds its core, instead of waiting out that thread's ~3 ms slice.
+    holds its core, instead of waiting out that thread's ~3 ms slice. The
+    sim's rendering shares those workers, so a send that comes due preempts
+    it too.
   - Without it, both `adsb` and `vita49_send` lost about 0.5% of a 50 Msps
-    stream.
-  - The demod thread and its OpenMP team keep the default slice.
+    stream. `adsb` doesn't currently ask for it.
 
 ### Outputs
 
@@ -826,7 +937,7 @@ stores the history in one table:
 #### Debug HDF5
 
 `--debug-h5 <file>` ([frame_recorder.h](src/output/frame_recorder.h))
-records each frame `AdsbDemod` returns, whether or not it passes CRC.
+records each frame `demodulate()` yields, whether or not it passes CRC.
 
 - With each frame it stores the IQ the frame came from and everything needed
   to rerun the demodulator on it.
@@ -983,13 +1094,52 @@ It also takes `adsb`'s log options (`--log-level`, `--log-file`,
   first packet. After that they advance by sample count, so they have no
   jitter.
 
+```mermaid
+flowchart LR
+    subgraph source["source: one per subcommand"]
+        direction TB
+        RTL["<b>rtlsdr</b><br/>blocking thread<br/>librtlsdr callback,<br/>encodes VRT packets"]
+        GEN["<b>sim</b><br/>sim_generate task<br/>renders into packet payloads"]
+    end
+    PAR["coro::parallel() parts<br/>--render-threads"]
+    subgraph udp_send["udp_send task"]
+        direction TB
+        PACE["paced_sim_stream()<br/>holds each batch until due"] --> SEND["send_loop()<br/>one send per batch"]
+    end
+    MON["pace_monitor task<br/>drop warnings, once a second"]
+    NET(["UDP to adsb vita49"])
+
+    GEN <-- "fork / join" --> PAR
+    GEN -- "mpsc, --queue-ms ahead" --> PACE
+    RTL -- "mpsc, 1024 packets, drops when full" --> SEND
+    SEND --> NET
+    SEND -. "PaceStats, watch" .-> MON
+    RTL & GEN & PACE -.-> MON
+```
+
+Every box is a task on the one coro runtime, except the `rtlsdr` callback,
+which runs on coro's blocking pool (`spawn_blocking`). `paced_sim_stream()`
+runs in the send task's polls, and is there only with `sim`.
+
+- **Packets.** Both sources interleave the IF Context packets with the data.
+  The sim's batches are GSO batches of up to 44 packets. The `rtlsdr` source
+  sends one packet per batch.
+- **Drops.** Every place that drops samples records it on the pace
+  statistics (a watch channel), and so does the send loop for what it sent.
+  The pace monitor turns the changes into one warning a second.
+
 The code in [src/apps/vita49_send](src/apps/vita49_send) is split
 by concern:
 
-- `vrt_encode` builds the packets and timestamps.
-- `rtlsdr_source` and `sim_source` are the two sources.
-- `main.cpp` holds the command line, plus a performance note with the
-  measurements behind the send path's design.
+- `rtlsdr_source` and `sim_source` are the two sources, each with its own
+  subcommand options.
+- `packet_sender` sends whichever source's stream it is given, and
+  `pace_stats` reports what a source dropped on overrun.
+- `main.cpp` holds the shared options and builds the chosen source's stream.
+
+The packets and their timestamps come from
+[src/vrt/encode.h](src/vrt/encode.h), and they go out in the GSO batches of
+[src/net/datagram_batch.h](src/net/datagram_batch.h).
 
 ### `rtlsdr` source
 
@@ -1021,6 +1171,7 @@ The `sim` source renders simulated ADS-B traffic in-process
 | `--seed` | Random seed |
 | `--pulse-rise-ns`, `--pulse-fall-ns`, `--pulse-jitter-ns` | Pulse shape |
 | `--rx-cutoff`, `--oversample` | Receiver filter |
+| `--render-threads` | Parallel parts each render step is split into, on the runtime's workers, default 4 |
 | `--queue-ms` | How far ahead of real time to render, default 20 |
 
 The simulator models this traffic:
@@ -1039,9 +1190,10 @@ The simulator models this traffic:
   chunked or paced.
 
 The sim source paces itself against the wall clock like a capture device. It
-works in two stages, so rendering and sending run in parallel on two cores:
+works in two stages, both runtime tasks, so rendering and sending run in
+parallel:
 
-1. **Render.** A generator thread renders batches of up to 44 packets.
+1. **Render.** A generator task renders batches of up to 44 packets.
    - It queues them up to `--queue-ms` (default 20) of signal ahead of real
      time.
    - The queue costs 4 B per sample, which is 16 MB for 20 ms at 200 Msps.
@@ -1056,8 +1208,9 @@ works in two stages, so rendering and sending run in parallel on two cores:
 If either stage runs more than 100 ms late, it behaves like a capture device
 that overruns:
 
-- It drops the late samples. They are still rendered, so the IQ at every
-  later timestamp is unchanged.
+- It drops the late samples. When rendering is what fell behind, the
+  simulator skips the dropped span instead of rendering it, so it can catch
+  up. Either way the IQ at every later timestamp is unchanged.
 - The receiver sees a timestamp gap.
 - It logs a `fell behind real time; dropped N samples` warning once a
   second while this happens.
@@ -1088,9 +1241,8 @@ adsb_sim_eval --scenario scenarios/boston.json [--snr-db 30] [--duration 60] [--
               [--seed] [--preamble-min] [--slice-mag-min] [--block 131072] [--tolerance-us 3]
 ```
 
-`adsb_sim_eval` feeds the simulator straight into `AdsbDemod`, block by block.
-It uses the same `BlockStitcher` path as `adsb`, and `--block` sets the block
-size.
+`adsb_sim_eval` feeds the simulator straight into `demodulate()`, block by
+block, as `adsb` does, and `--block` sets the block size.
 
 It then matches the output against the simulator's ground truth.
 
@@ -1141,7 +1293,7 @@ Compare its tables before and after a demodulator change.
   - `iq_block_chunker_test`: building padded blocks from appended samples;
   - `peak_select_test`;
   - `block_stitcher_test`: padding across contiguous, short and
-    non-contiguous blocks.
+    non-contiguous blocks, in each sample format.
 - **Reference capture.** `tests/data/adsb_cf32.sigmf-data` is a 12 Msps
   capture, not in git. It should decode 24 frames with
   `adsb --filter-taps 33 --filter-cutoff 6e6 file --iq tests/data/adsb_cf32.sigmf-data`.
@@ -1153,11 +1305,38 @@ Compare its tables before and after a demodulator change.
 
 ## Environment variables
 
+For profiling and tuning. `adsb --help` lists them too, and each is logged
+when it is first read, with its value.
+
 | Variable | Effect |
 |---|---|
-| `ADSB_TIMING=1` | Logs per-stage timings for each block, plus a throughput and realtime-factor line every second |
-| `ADSB_NTASKS=N` | Overrides the ispc task count |
-| `ADSB_PIN=0` | Disables the async/compute CPU split |
+| `ADSB_TIMING=1` | Logs per-stage timings for each block, plus a throughput and realtime-factor line every second; `0` turns it off |
+| `ADSB_NTASKS=N` | Overrides the demodulator's part count (`exec()`) |
 | `ADSB_WS_MAX_PENDING_BYTES=N` | Most published JSON one WebSocket client may have waiting before the oldest is dropped (default 16 MiB) |
-| `ADSB_TASKSYS_STATS=1` | Logs tasksys diagnostics at exit; see [tasksys.cpp](src/common/tasksys.cpp) |
-| `OMP_WAIT_POLICY`, `GOMP_SPINCOUNT` | If either is set, `adsb` keeps it instead of defaulting to a passive wait policy |
+
+## Profiling
+
+The apps carry [Tracy](https://github.com/wolfpld/tracy) trace points, built in only when coro is
+built with its `tracing=tracy` option:
+
+```sh
+conan install . -o 'coro/*:tracing=tracy' --build=missing
+cmake --preset conan-release
+cmake --build build/Release -j
+```
+
+The option can go under `[options]` in a Conan profile instead. Without it, the trace points
+compile to nothing. With it, nothing is recorded until a profiler connects, so a tracing build
+runs like any other.
+
+To record, run the Tracy profiler of the same version as the client (0.13.1, the version coro
+pins) and connect it to the running app. The timeline shows:
+
+- every poll of each coro task, under the task's name;
+- the demodulator's stages, the sink's handling of each block, and the SQLite, HDF5 and WebSocket
+  work;
+- the simulator's rendering and the VRT receive path;
+- plots of every drop and of the UDP send time.
+
+The trace points are listed in the source: search for `TRACE_`. `src/common/trace.h` has the
+macros, and [CLAUDE.md](CLAUDE.md#tracing) the rules for adding one.

@@ -1,7 +1,8 @@
-// Unit tests for vrt::Assembler (vrt_assembler.h). Packets are serialized by
-// hand here, independently of vita49_send.cpp's builders, per
-// doc/design/vita49-format.md.
+// Unit tests for vrt::Assembler (vrt/assembler.h). Packets are serialized by
+// hand here, independently of vrt/encode.h, per doc/design/vita49-format.md,
+// so the test checks the decoder against the spec rather than the encoder.
 
+#include <bit>
 #include <cmath>
 #include <complex>
 #include <cstdint>
@@ -11,7 +12,7 @@
 #include <stdexcept>
 #include <vector>
 
-#include "input/vrt_assembler.h"
+#include "vrt/assembler.h"
 
 namespace {
 
@@ -27,20 +28,25 @@ int g_failures = 0;
 
 using Bytes = std::vector<uint8_t>;
 
-// Minimal Sink (vrt_assembler.h) for tests: appends into a plain vector, with the same
-// size()/operator[] surface the tests already assert against.
+// Minimal Sink (vrt/assembler.h) for tests: collects the big-endian int16 components the Assembler appends
+// and reads them back as complex floats scaled to [-1, 1), the surface the tests assert against.
 struct Samples {
-    std::vector<std::complex<float>> data;
-    void append_zeros(size_t n) { data.insert(data.end(), n, std::complex<float>{}); }
+    std::vector<int16_t> wire;  // interleaved I/Q, as appended
+    void append_zeros(size_t n) { wire.insert(wire.end(), 2 * n, int16_t{0}); }
     template<typename Writer>
     void append_with(size_t n, Writer&& write) {
-        data.resize(data.size() + n);
-        // An array of std::complex<float> is addressable as its interleaved real/imaginary floats.
-        write(std::span<float>(reinterpret_cast<float*>(data.data() + data.size() - n), 2 * n), 0);
+        wire.resize(wire.size() + 2 * n);
+        write(std::span<int16_t>(wire).last(2 * n), 0);
     }
-    size_t size() const { return data.size(); }
-    std::complex<float>& operator[](size_t i) { return data[i]; }
-    const std::complex<float>& operator[](size_t i) const { return data[i]; }
+    size_t size() const { return wire.size() / 2; }
+    std::complex<float> operator[](size_t i) const {
+        auto component = [&](size_t k) {
+            const auto be = static_cast<uint16_t>(wire[k]);
+            const uint16_t host = std::endian::native == std::endian::big ? be : std::byteswap(be);
+            return static_cast<float>(static_cast<int16_t>(host)) / 32768.0f;
+        };
+        return {component(2 * i), component(2 * i + 1)};
+    }
 };
 
 void put32(Bytes& b, uint32_t v) {

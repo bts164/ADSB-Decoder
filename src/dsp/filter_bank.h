@@ -61,7 +61,7 @@ struct FilterDesign {
  * anti-alias filter; below it, the clamp to the input Nyquist makes it a plain interpolator.
  * @param design taps, phases, cutoff, window and pulse width
  * @param input_rate_hz input sample rate
- * @param output_rate_hz resampled rate (AdsbDemod::output_rate_hz())
+ * @param output_rate_hz resampled rate (demod_output_rate_hz())
  * @throws std::invalid_argument on non-positive taps, phases, rates or cutoff, a negative pulse width or
  * Kaiser beta, or a pulse longer than the filter
  */

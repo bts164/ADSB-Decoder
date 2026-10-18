@@ -24,13 +24,13 @@ struct RtlSdrTuning {
 };
 
 /**
- * RAII wrapper around a librtlsdr device handle -- see doc/guidelines.md CA.1 (RAII for all resources owned
+ * RAII wrapper around a librtlsdr device handle -- see coro's doc/guidelines.md CA.1 (RAII for all resources owned
  * by a coroutine frame): the owning coroutine suspends across co_await points, so the device handle must be
  * released by a destructor, not by an explicit close() call that a cancellation path could skip.
  *
  * read_async() streams from the device and survives it being unplugged: when the read ends without a stop
  * having been asked for, it closes the handle and reopens the device, at once and then after 1, 2, 4 and
- * every 8 seconds, until it is back.
+ * every 8 seconds, until it is back. A device that opens but rejects the rate or frequency counts as not back.
  *
  * Knows nothing about Ctrl+C. read_async() runs until the RtlSdr is closed or destroyed: the program's
  * top-level SIGINT handler drops whatever owns the stream, the stream's coroutine frame is destroyed, and
@@ -46,8 +46,10 @@ public:
     using OnReconnect = std::function<void(std::chrono::duration<double> outage)>;
 
     /**
-     * Opens the device, sets rate, frequency and gain, resets its buffer and logs the settings.
-     * @throws std::runtime_error if the device can't be opened
+     * Opens the device, sets rate, frequency and gain, resets its buffer and logs the settings in effect. A
+     * gain the device rejects, or one the tuner has no step for, is logged as a warning, and so is a rate the
+     * device rounds.
+     * @throws std::runtime_error if the device can't be opened, or rejects the rate or frequency
      */
     explicit RtlSdr(const RtlSdrTuning& tuning);
 
@@ -60,10 +62,11 @@ public:
      * Streams from the device until close(), calling `cb` on this thread with each buffer as
      * rtlsdr_read_async() does. Blocks, so call it on a coro::spawn_blocking thread. If the device goes away
      * it reconnects (see the class comment) and carries on with the same `cb`; no samples arrive meanwhile.
+     * Logs the buffers it reads with.
      * @param cb librtlsdr buffer callback
      * @param ctx passed to `cb`
      * @param buf_num librtlsdr async buffer count (0 = librtlsdr's default)
-     * @param buf_len librtlsdr async buffer length in bytes (0 = librtlsdr's default)
+     * @param buf_len librtlsdr async buffer length in bytes (0, or not a multiple of 512 = librtlsdr's default)
      * @param on_reconnect called before reading resumes, so the caller can account for the missing samples
      * @return the last rtlsdr_read_async() result
      */
@@ -74,6 +77,12 @@ public:
      * Stops read_async(), waits for it to return, then closes the device (idempotent). May block briefly.
      */
     void close();
+
+    /** The sample rate the device runs at, which can differ from the one asked for: librtlsdr rounds it. */
+    double sample_rate_hz() const { return m_rate_hz; }
+
+    /** The center frequency the device is tuned to. */
+    double center_freq_hz() const { return m_freq_hz; }
 
 private:
     struct Relay;
@@ -87,6 +96,8 @@ private:
     bool reconnect(std::unique_lock<std::mutex>& lock);
 
     const RtlSdrTuning m_tuning;
+    double m_rate_hz = 0;
+    double m_freq_hz = 0;
     std::mutex m_mutex;                 // guards m_dev and m_reading
     std::condition_variable m_cv;       // signals a stop request and the end of read_async()
     std::atomic<bool> m_stop = false;

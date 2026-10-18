@@ -3,14 +3,18 @@
 // and determinism.
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <iterator>
 #include <map>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#include <coro/runtime/runtime.h>
 
 #include "sim/adsb_sim.h"
 #include "decode/aircraft.h"
@@ -237,15 +241,36 @@ adsb_sim::Config scenario_config(size_t n) {
     return cfg;
 }
 
-std::vector<int16_t> generate_all(const adsb_sim::Config& cfg, size_t total, size_t chunk) {
+// Fills `out` with the simulator's next out.size()/2 samples, `chunk` at a time, one span per generate() call.
+void generate_into(coro::Runtime& rt, adsb_sim::Simulator& sim, std::span<int16_t> out, size_t chunk,
+                   std::endian order = std::endian::native) {
+    rt.block_on([](adsb_sim::Simulator& sim, std::span<int16_t> out, size_t chunk,
+                   std::endian order) -> coro::Coro<void> {
+        const size_t total = out.size() / 2;
+        for (size_t done = 0; done < total;) {
+            const size_t n = std::min(chunk, total - done);
+            const std::span<int16_t> piece[] = {out.subspan(2 * done, 2 * n)};
+            co_await sim.generate(piece, order);
+            done += n;
+        }
+    }(sim, out, chunk, order));
+}
+
+// The first `total` samples, generated `chunk` at a time, with each piece split into `render_threads`
+// parallel parts.
+std::vector<int16_t> generate_all_parallel(adsb_sim::Config cfg, unsigned render_threads, size_t total, size_t chunk,
+                                           std::endian order = std::endian::native) {
+    cfg.render_threads = render_threads;
     adsb_sim::Simulator sim(cfg);
     std::vector<int16_t> out(2 * total);
-    for (size_t done = 0; done < total;) {
-        const size_t n = std::min(chunk, total - done);
-        sim.generate(std::span(out).subspan(2 * done, 2 * n));
-        done += n;
-    }
+    coro::Runtime rt(render_threads);
+    generate_into(rt, sim, out, chunk, order);
     return out;
+}
+
+std::vector<int16_t> generate_all(const adsb_sim::Config& cfg, size_t total, size_t chunk,
+                                  std::endian order = std::endian::native) {
+    return generate_all_parallel(cfg, 1, total, chunk, order);
 }
 
 struct Slice {
@@ -483,6 +508,7 @@ void test_determinism() {
     CHECK(a == generate_all(cfg, kTotal, 360));
     CHECK(a == generate_all(cfg, kTotal, 1000));  // independent of chunking
     CHECK(a == generate_all(cfg, kTotal, 1));
+    CHECK(a == generate_all_parallel(cfg, 4, kTotal, 100'000));  // independent of the parts too
     int16_t peak = 0;
     for (int16_t v : a) peak = std::max<int16_t>(peak, static_cast<int16_t>(std::abs(v)));
     CHECK(peak > 8000);  // the comparison above must not be vacuous: a message is on the air
@@ -496,6 +522,7 @@ void test_determinism() {
         const auto x = generate_all(hi, total, 4096);
         CHECK(x == generate_all(hi, total, 65536));
         CHECK(x == generate_all(hi, total, 999));
+        CHECK(x == generate_all_parallel(hi, 4, total, 100'000));
         int16_t pk = 0;
         for (int16_t v : x) pk = std::max<int16_t>(pk, static_cast<int16_t>(std::abs(v)));
         CHECK(pk > 8000);
@@ -511,6 +538,78 @@ void test_determinism() {
     CHECK(throws_invalid([&] { adsb_sim::Simulator s(empty); }));
 }
 
+// skip() must leave the simulator exactly where generating and discarding the same samples would: with
+// the gap shorter than the decimation filter, across transmissions, and longer than a whole block.
+void test_skip() {
+    int16_t peak = 0;  // over everything compared after a skip, so the comparisons are not vacuous
+    for (uint32_t rate : {2'000'000u, 8'000'000u, 20'000'000u}) {
+        adsb_sim::Config cfg = scenario_config(5);
+        cfg.seed = 11;
+        cfg.sample_rate_hz = rate;
+        const size_t total = static_cast<size_t>(rate) * 6 / 10;
+        const auto full = generate_all(cfg, total, 4096);
+        for (size_t gap : {size_t{0}, size_t{1}, size_t{7}, size_t{rate / 1000}, size_t{rate / 10}}) {
+            const size_t first = total / 3;  // generated before the skip
+            adsb_sim::Simulator sim(cfg);
+            std::vector<int16_t> out(2 * total);
+            coro::Runtime rt(1);
+            generate_into(rt, sim, std::span(out).subspan(0, 2 * first), 4096);
+            sim.skip(gap);
+            const size_t rest = first + gap;
+            generate_into(rt, sim, std::span(out).subspan(2 * rest), 4096);
+            CHECK(std::equal(out.begin(), out.begin() + 2 * first, full.begin()));
+            CHECK(std::equal(out.begin() + 2 * rest, out.end(), full.begin() + 2 * rest));
+            for (size_t i = 2 * rest; i < out.size(); i++)
+                peak = std::max<int16_t>(peak, static_cast<int16_t>(std::abs(out[i])));
+        }
+    }
+    CHECK(peak > 8000);
+}
+
+// Big-endian output is the native output with each int16's bytes swapped, in one part and in several.
+void test_big_endian() {
+    adsb_sim::Config cfg = scenario_config(5);
+    cfg.seed = 3;
+    cfg.sample_rate_hz = 20'000'000;
+    const size_t total = 2'000'000;
+    auto native = generate_all(cfg, total, 65536);
+    for (int16_t& v : native) v = static_cast<int16_t>(std::byteswap(static_cast<uint16_t>(v)));
+    CHECK(native == generate_all(cfg, total, 65536, std::endian::big));
+    CHECK(native == generate_all_parallel(cfg, 4, total, 100'000, std::endian::big));
+}
+
+// Scattered spans get the same samples as one contiguous span would, however they are sized (empty, a single
+// sample, straddling the parallel parts and the block_samples() pieces), one part or several.
+void test_scatter() {
+    adsb_sim::Config cfg = scenario_config(5);
+    cfg.seed = 5;
+    cfg.sample_rate_hz = 20'000'000;
+    const size_t total = 2'000'000;
+    const auto full = generate_all(cfg, total, 65536);
+    for (unsigned threads : {1u, 4u}) {
+        cfg.render_threads = threads;
+        adsb_sim::Simulator sim(cfg);
+        std::vector<int16_t> out(2 * total);
+        constexpr size_t kSizes[] = {0, 1, 37, 4096, 0, 0, 12345, 100'003};
+        std::vector<std::span<int16_t>> spans;
+        for (size_t done = 0, i = 0; done < total; i++) {
+            const size_t n = std::min(kSizes[i % std::size(kSizes)], total - done);
+            spans.push_back(std::span(out).subspan(2 * done, 2 * n));
+            done += n;
+        }
+        // In calls of 1 to 13 spans.
+        coro::Runtime(threads).block_on([](adsb_sim::Simulator& sim,
+                                           std::span<const std::span<int16_t>> spans) -> coro::Coro<void> {
+            for (size_t i = 0; i < spans.size();) {
+                const size_t k = std::min<size_t>(spans.size() - i, 1 + i % 13);
+                co_await sim.generate(spans.subspan(i, k));
+                i += k;
+            }
+        }(sim, spans));
+        CHECK(out == full);
+    }
+}
+
 void test_noise_level() {
     // At 10 dB the noise is far above the pulses' duty-weighted power (~0.03%
     // duty) but still well inside int16 range, so the total RMS should match the
@@ -524,8 +623,6 @@ void test_noise_level() {
     const double expected = 0.5 * 32767.0 / std::sqrt(2.0 * std::pow(10.0, 1.0));
     CHECK(std::abs(rms_per_component / expected - 1.0) < 0.02);
 }
-
-}  // namespace
 
 // The noise is counter-based (src/sim/sim_kernels.ispc): a pure function of (seed, sample index), so it
 // must be Gaussian, white, and I/Q-independent. (That it does not depend on how calls are chunked --
@@ -564,6 +661,8 @@ void test_noise_statistics() {
     for (size_t lag : {0, 1, 2}) CHECK(std::abs(corr(i, q, lag)) < 0.006);
 }
 
+}  // namespace
+
 int main() {
     test_crc();
     test_encoders_crc_and_decode();
@@ -575,6 +674,9 @@ int main() {
     test_modulation_roundtrip();
     test_period_jitter();
     test_determinism();
+    test_skip();
+    test_big_endian();
+    test_scatter();
     test_noise_level();
     test_noise_statistics();
     std::printf(g_failures ? "%d FAILURE(S)\n" : "all passed\n", g_failures);

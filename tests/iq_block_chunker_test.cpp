@@ -23,6 +23,10 @@ int g_failures = 0;
 constexpr IqPadding kPad{2, 3};
 constexpr size_t kChunk = 4;
 
+// The chunker stores whatever format it is given unconverted, so one format covers its logic.
+using Format = iq::F32;
+using Chunker = IqBlockChunker<Format>;
+
 // `n` samples as interleaved I/Q floats, I counting up from `first` and Q zero.
 std::vector<float> samples(size_t first, size_t n) {
     std::vector<float> v(2 * n, 0.0f);
@@ -31,10 +35,12 @@ std::vector<float> samples(size_t first, size_t n) {
 }
 
 // Real samples [0, n) of a block, as a plain vector for comparison against samples(...).
-std::vector<float> real_of(const IqBlock& b) { return {b.iq().begin(), b.iq().end()}; }
+std::vector<float> real_of(const IqBlock& b) { return {b.iq<Format>().begin(), b.iq<Format>().end()}; }
 
 // Samples [first, first + n) of a block's real samples, as interleaved I/Q floats.
-std::span<const float> part(const IqBlock& b, size_t first, size_t n) { return b.iq().subspan(2 * first, 2 * n); }
+std::span<const float> part(const IqBlock& b, size_t first, size_t n) {
+    return b.iq<Format>().subspan(2 * first, 2 * n);
+}
 
 bool all_zero(std::span<const float> iq) {
     for (float f : iq) {
@@ -52,13 +58,13 @@ void check_well_formed_block(const IqBlock& b, size_t expect_n, uint64_t expect_
     const size_t lead = static_cast<size_t>(kPad.lead);
     const size_t trail = static_cast<size_t>(kPad.trail);
     CHECK(b.total() == lead + expect_n + trail);
-    CHECK(b.padded().size() == 2 * b.total());
-    CHECK(all_zero(b.padded().first(2 * lead)));
-    CHECK(all_zero(b.padded().last(2 * trail)));
+    CHECK(b.padded<Format>().size() == 2 * b.total());
+    CHECK(all_zero(b.padded<Format>().first(2 * lead)));
+    CHECK(all_zero(b.padded<Format>().last(2 * trail)));
 }
 
 void test_completes_one_block() {
-    IqBlockChunker c(kPad, kChunk);
+    Chunker c(kPad, kChunk);
     CHECK(c.ready() == 0);
     c.append(samples(100, kChunk));
     CHECK(c.ready() == 1);
@@ -71,7 +77,7 @@ void test_completes_one_block() {
 // A single append() spanning a block boundary must complete the first block and carry the rest
 // into the next, still in flight until it too fills.
 void test_append_crosses_block_boundary() {
-    IqBlockChunker c(kPad, kChunk);
+    Chunker c(kPad, kChunk);
     c.append(samples(0, 6));  // 4 complete block 0, 2 start block 1
     CHECK(c.ready() == 1);
     IqBlock b0 = c.pop();
@@ -88,7 +94,7 @@ void test_append_crosses_block_boundary() {
 
 // A single append() spanning multiple full blocks at once must queue all of them, in order.
 void test_append_spans_multiple_blocks() {
-    IqBlockChunker c(kPad, kChunk);
+    Chunker c(kPad, kChunk);
     c.append(samples(0, 9));  // 2 full blocks + 1 sample starting a third
     CHECK(c.ready() == 2);
     IqBlock b0 = c.pop();
@@ -101,18 +107,18 @@ void test_append_spans_multiple_blocks() {
 }
 
 void test_append_zeros_fills_real_region() {
-    IqBlockChunker c(kPad, kChunk);
+    Chunker c(kPad, kChunk);
     c.append_zeros(kChunk);
     CHECK(c.ready() == 1);
     IqBlock b = c.pop();
     check_well_formed_block(b, kChunk, 0);
-    CHECK(all_zero(b.iq()));
+    CHECK(all_zero(b.iq<Format>()));
 }
 
 // append_zeros() and append() must be able to jointly fill a single block (gap fill followed by
 // real samples arriving in the same drain() call).
 void test_mixed_zeros_then_samples_in_one_block() {
-    IqBlockChunker c(kPad, kChunk);
+    Chunker c(kPad, kChunk);
     c.append_zeros(2);
     c.append(samples(50, 2));
     CHECK(c.ready() == 1);
@@ -123,14 +129,14 @@ void test_mixed_zeros_then_samples_in_one_block() {
 }
 
 void test_zero_length_calls_are_noop() {
-    IqBlockChunker c(kPad, kChunk);
+    Chunker c(kPad, kChunk);
     c.append(std::span<const float>{});
     c.append_zeros(0);
     CHECK(c.ready() == 0);
 }
 
 void test_pop_on_empty_throws() {
-    IqBlockChunker c(kPad, kChunk);
+    Chunker c(kPad, kChunk);
     bool threw = false;
     try {
         c.pop();
@@ -143,7 +149,7 @@ void test_pop_on_empty_throws() {
 // flush() must queue a shrunk, correctly guard-padded block for a partially filled slot, with the
 // unfilled tail of the original chunk-sized allocation discarded (not exposed as extra samples).
 void test_flush_shrinks_partial_block() {
-    IqBlockChunker c(kPad, kChunk);
+    Chunker c(kPad, kChunk);
     c.append(samples(7, 3));  // 3 of 4 real samples filled
     CHECK(c.ready() == 0);
     c.flush();
@@ -156,7 +162,7 @@ void test_flush_shrinks_partial_block() {
 // flush() with nothing appended, or right after an exact multiple of chunk_samples, must not
 // queue a spurious empty block.
 void test_flush_noop_when_nothing_building() {
-    IqBlockChunker c(kPad, kChunk);
+    Chunker c(kPad, kChunk);
     c.flush();
     CHECK(c.ready() == 0);
 
@@ -169,7 +175,7 @@ void test_flush_noop_when_nothing_building() {
 // Block start indices must advance by chunk_samples per completed block, in order, across several
 // append() calls whose sizes don't line up with block boundaries.
 void test_start_indices_advance_in_order() {
-    IqBlockChunker c(kPad, kChunk);
+    Chunker c(kPad, kChunk);
     c.append(samples(0, 5));
     c.append(samples(5, 3));
     c.append(samples(8, 4));

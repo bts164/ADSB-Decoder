@@ -9,6 +9,8 @@
 
 #include <highfive/H5File.hpp>
 
+#include "common/trace.h"
+
 namespace {
 constexpr int kFormatVersion = 1;
 // Flushing at most this often keeps the file readable after Ctrl+C or a crash without an HDF5 flush per frame.
@@ -24,12 +26,12 @@ std::string payload_hex(unsigned __int128 p) {
 
 FrameRecorder::FrameRecorder(const std::string& path, const AdsbDemodParams& params, const FilterBank& filter,
                              const std::string& command_line, bool failed_only)
-    : file_(std::make_unique<HighFive::File>(path, HighFive::File::Overwrite)),
-      params_(params),
-      taps_(filter.taps),
-      failed_only_(failed_only),
-      next_flush_(std::chrono::steady_clock::now() + kFlushInterval) {
-    HighFive::File& f = *file_;
+    : m_file(std::make_unique<HighFive::File>(path, HighFive::File::Overwrite)),
+      m_params(params),
+      m_taps(filter.taps),
+      m_failed_only(failed_only),
+      m_next_flush(std::chrono::steady_clock::now() + kFlushInterval) {
+    HighFive::File& f = *m_file;
     f.createAttribute("format_version", kFormatVersion);
     f.createAttribute("command_line", command_line);
     f.createAttribute("sample_rate_hz", params.sample_rate_hz);
@@ -64,36 +66,37 @@ FrameRecorder::FrameRecorder(const std::string& path, const AdsbDemodParams& par
     f.flush();
 }
 
+FrameRecorder::FrameRecorder(FrameRecorder&&) noexcept = default;
 FrameRecorder::~FrameRecorder() = default;
 
-void FrameRecorder::record(const AdsbDemod& demod, const IqBlock& block, const AdsbFrame& fr,
+void FrameRecorder::record(const IqBlock& block, std::span<const float> y, float level, const AdsbFrame& fr,
                            const DecodedFrameView& v) {
-    if (failed_only_ && (v.crc_ok || !v.crc_checked)) return;
-    const AdsbDemodParams& p = params_;
+    if (m_failed_only && (v.crc_ok || !v.crc_checked)) return;
+    TRACE_ZONE("h5_record");
+    const AdsbDemodParams& p = m_params;
 
     // Envelope from 16 us before the preamble to 8 us past the frame's last sample, clipped to what exec()
     // computed; the IQ is exactly the samples those outputs' tap windows read.
-    std::span<const float> y = demod.last_envelope();
     const int pre = 16 * p.samples_per_symbol;
     const int post = 8 * p.samples_per_symbol;
     const int e0 = std::max(0, fr.output_index - pre);
     const int e1 = std::min(static_cast<int>(y.size()), fr.output_index + p.max_lookahead + post);
     auto base = [&](int m) { return (static_cast<int64_t>(m) * p.pos_step + p.pos_offset) >> p.pos_frac_bits; };
     const int64_t i0 = base(e0) - p.window_lead;
-    const int64_t i1 = base(e1 - 1) - p.window_lead + taps_;
+    const int64_t i1 = base(e1 - 1) - p.window_lead + m_taps;
     if (i0 < -block.lead || i1 > static_cast<int64_t>(block.n + block.trail()))
         throw std::logic_error("FrameRecorder: frame's IQ span outside the block");
 
     char name[32];
     std::snprintf(name, sizeof name, "%015llu", static_cast<unsigned long long>(fr.sample_index));
-    HighFive::Group g = file_->getGroup("frames").createGroup(name);
+    HighFive::Group g = m_file->getGroup("frames").createGroup(name);
     g.createAttribute("sample_index", fr.sample_index);
     g.createAttribute("block_start", block.start);
     g.createAttribute("block_n", static_cast<uint64_t>(block.n));
     g.createAttribute("output_index", fr.output_index);
     g.createAttribute("envelope_start", e0);
     g.createAttribute("iq_start", i0);
-    g.createAttribute("level", demod.last_level());
+    g.createAttribute("level", level);
     g.createAttribute("preamble_score", fr.preamble_score);
     g.createAttribute("confidence", fr.confidence);
     g.createAttribute("df", v.df);
@@ -106,9 +109,10 @@ void FrameRecorder::record(const AdsbDemod& demod, const IqBlock& block, const A
     g.createAttribute("payload_raw", payload_hex(fr.payload));
     g.createAttribute("payload", payload_hex(v.payload));
 
-    // The file's `iq` dataset is complex, so the block's I/Q float pairs are paired up here.
-    const std::span<const float> x =
-        block.padded().subspan(2 * static_cast<size_t>(block.lead + i0), 2 * static_cast<size_t>(i1 - i0));
+    // The file's `iq` dataset is complex floats scaled to [-1, 1] whatever format the block is in, so the
+    // samples are converted and their I/Q pairs paired up here.
+    std::vector<float> x(2 * static_cast<size_t>(i1 - i0));
+    block.to_float(static_cast<size_t>(block.lead + i0), x);
     std::vector<std::complex<float>> iq(x.size() / 2);
     for (size_t i = 0; i < iq.size(); i++) iq[i] = {x[2 * i], x[2 * i + 1]};
     g.createDataSet("iq", iq);
@@ -117,8 +121,8 @@ void FrameRecorder::record(const AdsbDemod& demod, const IqBlock& block, const A
     for (int i = 0; i < p.num_bits; i++) bits[static_cast<size_t>(i)] = static_cast<uint8_t>((fr.payload >> (p.num_bits - 1 - i)) & 1);
     g.createDataSet("bits", bits);
 
-    if (auto now = std::chrono::steady_clock::now(); now >= next_flush_) {
-        file_->flush();
-        next_flush_ = now + kFlushInterval;
+    if (auto now = std::chrono::steady_clock::now(); now >= m_next_flush) {
+        m_file->flush();
+        m_next_flush = now + kFlushInterval;
     }
 }

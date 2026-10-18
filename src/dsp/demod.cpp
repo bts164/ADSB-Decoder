@@ -1,17 +1,25 @@
 #include "dsp/demod.h"
-#include "common/cpu_layout.h"
 #include "common/log.h"
+#include "common/trace.h"
 
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <optional>
 #include <span>
+#include <string_view>
 #include <stdexcept>
 #include <thread>
+#include <vector>
 
+#include <coro/coro.h>
+#include <coro/coro_stream.h>
+#include <coro/runtime/runtime.h>
+#include <coro/task/parallel.h>
 #include <xtensor/xbuilder.hpp>
+#include <xtensor/xtensor.hpp>
 
 #include "kernels_ispc.h"
 #include "dsp/peak_select.h"
@@ -65,7 +73,94 @@ int64_t pos_offset(const FilterBank& filter) {
 // The offset that makes resample_center_index() the input sample nearest each output, for any tap count
 // (pos_offset for odd taps).
 int64_t index_offset(const FilterBank& filter) { return ispc::resample_pos_fixed(0.5 + 0.5 / filter.num_phases); }
-}  // namespace
+
+// The resampler kernel for blocks in format F (kernels.ispc: RESAMPLE_FORMAT), which computes one part's share.
+// This is the one place that pairs each of iq::Formats with its kernel; a format without a specialization here
+// fails to compile where exec() visits the block.
+template <class F>
+struct ResampleKernel;
+template <>
+struct ResampleKernel<iq::F32> {
+    static constexpr auto chunk = &ispc::resample_chunk_f32;
+};
+template <>
+struct ResampleKernel<iq::I16Be> {
+    static constexpr auto chunk = &ispc::resample_chunk_i16be;
+};
+
+// The samples are used directly, in the block's own format (interleaved real/imag, matching raw SDR I/Q
+// layout), by that format's kernel; the block's guard padding makes every index the kernels touch valid.
+// The resampler's tap window for output m reads samples [base - Mh, base - Mh + stride/2), so it takes a
+// pointer to sample -Mh. The kernel scales its outputs by 1 / full_scale, so y[] and the sum of squares
+// are the same as for input scaled to [-1, 1], whatever the format.
+template <class F>
+auto tap_window_base(IqView<F> v, int Mh) {
+    return v.padded.subspan(2 * static_cast<size_t>(v.lead - Mh)).data();
+}
+
+// demodulate()'s state (see demod.h): demodulates one block per exec() call, carrying the peak picker's
+// exclusion zone from each block to the next.
+class AdsbDemod {
+public:
+    // `filter` must outlive the demodulator. The thresholds are in units of the block RMS.
+    AdsbDemod(const FilterBank& filter, double sample_rate_hz, float preamble_score_min,
+              float slice_magnitude_min);
+
+    // See demod_padding().
+    static IqPadding padding(const FilterBank& filter, double sample_rate_hz);
+    // See demod_output_rate_hz().
+    static double output_rate_hz();
+
+    // Demodulates one block, which must outlive the returned coroutine: frames above both thresholds, in
+    // ascending sample order. One call at a time: every call reuses the same scratch buffers.
+    [[nodiscard]] coro::Coro<std::vector<AdsbFrame>> exec(const IqBlock& block);
+
+    // From the last exec(): each accepted preamble peak's stream sample index, before the slice threshold.
+    const xt::xtensor<uint64_t, 1>& last_candidates() const { return m_last_candidates; }
+    // From the last exec(): the resampled envelope, outputs [0, n_out).
+    std::span<const float> last_envelope() const { return {y_.data(), m_last_n_out}; }
+    // From the last exec(): the block RMS input level.
+    float last_level() const { return m_last_level; }
+
+    AdsbDemodParams params() const;
+
+private:
+    // What exec() works out for a block before the kernels run (see begin_block).
+    struct BlockPlan {
+        int first_allowed;          // first preamble position not excluded by the previous block's last pick
+        double outputs_per_block;   // resampled outputs per block sample count, for carrying the exclusion zone
+        int scan_n;                 // preamble positions this block owns: outputs [0, scan_n)
+        int n_out;                  // outputs to resample, a multiple of the widest gang
+    };
+    // Checks the block, carries the exclusion zone and sizes the scratch for the kernels; nullopt for an
+    // empty block, which has nothing to scan.
+    std::optional<BlockPlan> begin_block(const IqBlock& block);
+    // Everything after the kernels: the RMS level from their partial sums of squares, peak picking, bit
+    // slicing and the frames.
+    std::vector<AdsbFrame> finish_block(const IqBlock& block, const BlockPlan& plan, std::span<const float> sumsq);
+
+    // Scratch reused by every exec() call so none of them allocates or zero-fills; they only ever grow
+    // (see grow_scratch in demod.cpp), and each call uses the leading part.
+    xt::xtensor<float, 1> y_;               // resampled envelope, one per output sample
+    xt::xtensor<float, 1> m_preamble_score;  // per scanned position
+    xt::xtensor<uint64_t, 1> m_last_candidates;
+
+    size_t m_last_n_out = 0;
+    float m_last_level = 0;
+
+    const FilterBank& m_filter;
+    double m_sample_rate_hz;
+    IqPadding m_pad;       // padding(m_filter, sample rate)
+    int64_t m_pos_step;    // resample_block's fixed-point schedule, see demod.cpp constructor
+    int64_t m_pos_offset;
+    int64_t m_index_offset;  // for reporting each output's nearest input sample
+    float m_preamble_score_min;
+    float m_slice_magnitude_min;
+
+    // Exclusion zone carried to the next block (see exec): valid only for a block starting at m_next_start.
+    uint64_t m_next_start = 0;
+    int m_next_first_allowed = 0;  // first preamble position, in the next block's output samples, not excluded
+};
 
 double AdsbDemod::output_rate_hz() { return kS * 1e6; }
 
@@ -84,21 +179,21 @@ IqPadding AdsbDemod::padding(const FilterBank& filter, double sample_rate_hz) {
 
 AdsbDemod::AdsbDemod(const FilterBank& filter, double sample_rate_hz, float preamble_score_min,
                       float slice_magnitude_min)
-    : filter_(filter),
-      sample_rate_hz_(sample_rate_hz),
-      pad_(padding(filter, sample_rate_hz)),
-      preamble_score_min_(preamble_score_min),
-      slice_magnitude_min_(slice_magnitude_min) {
+    : m_filter(filter),
+      m_sample_rate_hz(sample_rate_hz),
+      m_pad(padding(filter, sample_rate_hz)),
+      m_preamble_score_min(preamble_score_min),
+      m_slice_magnitude_min(slice_magnitude_min) {
     // resample_block's schedule, in kernels.ispc's fixed point: output positions advance by ry/rx input samples,
     // offset by pos_offset() (see the derivation there).
-    pos_step_ = pos_step(sample_rate_hz);
-    pos_offset_ = pos_offset(filter);
-    index_offset_ = index_offset(filter);
+    m_pos_step = pos_step(sample_rate_hz);
+    m_pos_offset = pos_offset(filter);
+    m_index_offset = index_offset(filter);
 }
 
 AdsbDemodParams AdsbDemod::params() const {
     AdsbDemodParams p{};
-    p.sample_rate_hz = sample_rate_hz_;
+    p.sample_rate_hz = m_sample_rate_hz;
     p.output_rate_hz = output_rate_hz();
     p.samples_per_symbol = kS;
     p.num_bits = kNumBits;
@@ -107,26 +202,33 @@ AdsbDemodParams AdsbDemod::params() const {
     p.bit_offset = 8 * kS;
     p.exclusion_radius = kExclusionRadius;
     p.max_lookahead = kMaxLookahead;
-    p.preamble_score_min = preamble_score_min_;
-    p.slice_magnitude_min = slice_magnitude_min_;
+    p.preamble_score_min = m_preamble_score_min;
+    p.slice_magnitude_min = m_slice_magnitude_min;
     p.pos_frac_bits = kPosFracBits;
-    p.pos_step = pos_step_;
-    p.pos_offset = pos_offset_;
-    p.index_offset = index_offset_;
-    p.window_lead = window_lead(filter_);
+    p.pos_step = m_pos_step;
+    p.pos_offset = m_pos_offset;
+    p.index_offset = m_index_offset;
+    p.window_lead = window_lead(m_filter);
     return p;
 }
 
-namespace {
-// Stage timing, gated by ADSB_TIMING=1 -- ad hoc profiling to attribute
-// runtime across stages (see README-adjacent discussion: pipeline-level
-// task-parallel speedup on resample_block alone was ~2x despite 12 hw
-// threads, which is consistent with either Amdahl's law (resample_block
-// being a smaller fraction of total time than assumed) or genuine memory-
-// bandwidth saturation from concurrent streaming reads -- this timing is
-// how we tell those two apart empirically instead of guessing).
+// ADSB_TIMING, set to anything but 0 (as for run_demod_loop's report): read once, at the first block, and logged then.
+bool stage_timing_enabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("ADSB_TIMING");
+        if (!env) return false;
+        const bool on = std::string_view(env) != "0";
+        LOGF(INFO, "ADSB_TIMING=%s: %s", env, on ? "logging the demodulator's stage times for every block"
+                                                 : "the demodulator's stage times are off");
+        return on;
+    }();
+    return enabled;
+}
+
+// Wall time per stage of each block, with ADSB_TIMING set. Tells a stage that doesn't scale with the part
+// count because it is a small share of the block (Amdahl) from one that is memory-bandwidth bound.
 struct StageTimer {
-    bool enabled = std::getenv("ADSB_TIMING") != nullptr;
+    bool enabled = stage_timing_enabled();
     std::chrono::steady_clock::time_point t = std::chrono::steady_clock::now();
     void mark(const char* label) {
         if (!enabled) return;
@@ -135,43 +237,30 @@ struct StageTimer {
         t = now;
     }
 };
-}  // namespace
 
-std::vector<AdsbFrame> AdsbDemod::exec(const IqBlock& block) {
-    StageTimer timer;
-    last_candidates_.resize({0});
-    last_n_out_ = 0;
-    last_level_ = 0;
-    const int Np = filter_.num_phases;
-    const int Mh = window_lead(filter_);
+std::optional<AdsbDemod::BlockPlan> AdsbDemod::begin_block(const IqBlock& block) {
+    m_last_candidates.resize({0});
+    m_last_n_out = 0;
+    m_last_level = 0;
     const size_t n = block.n;
 
-    // ispc has no way to query hardware thread count itself, so the task
-    // count for resample_block's and preamble_scan's launches (see
-    // kernels.ispc) is chosen here. ADSB_NTASKS overrides it, for isolating
-    // a kernel's own single- vs multi-thread scaling (see StageTimer
-    // comment above).
-    static const unsigned hw_threads = [] {
-        if (const char* env = std::getenv("ADSB_NTASKS")) return static_cast<unsigned>(std::atoi(env));
-        return adsb::cpu_layout::compute_cpu_count();
-    }();
-
     // kernels.ispc's fixed-point output positions (resample_pos_fixed) cover blocks up to 2^27 samples.
-    if (n >= (size_t{1} << 27)) throw std::length_error("AdsbDemod::exec: block too large");
-    if (block.lead < pad_.lead || block.trail() < static_cast<size_t>(pad_.trail))
-        throw std::invalid_argument("AdsbDemod::exec: block has less guard padding than AdsbDemod::padding()");
+    if (n >= (size_t{1} << 27)) throw std::length_error("demodulate: block too large");
+    if (block.lead < m_pad.lead || block.trail() < static_cast<size_t>(m_pad.trail))
+        throw std::invalid_argument("demodulate: block has less guard padding than demod_padding()");
 
+    BlockPlan plan;
     // The exclusion zone from the previous block's last accepted preamble only applies if this block continues
     // straight on from it.
-    const int first_allowed = block.start == next_start_ ? next_first_allowed_ : 0;
-    next_start_ = block.start + n;
-    if (n == 0) return {};
+    plan.first_allowed = block.start == m_next_start ? m_next_first_allowed : 0;
+    m_next_start = block.start + n;
+    if (n == 0) return std::nullopt;
     // Output k sits at input sample (k * step + offset) / 2^36, and the next block's output m at
     // n + (m * step + offset) / 2^36, so k corresponds to the next block's m = k - outputs_per_block.
-    const double outputs_per_block =
-        static_cast<double>(n) * static_cast<double>(int64_t{1} << kPosFracBits) / static_cast<double>(pos_step_);
-    // Unless a pick below reaches further, a carried zone longer than this block carries on into the next.
-    next_first_allowed_ = std::max(0, static_cast<int>(std::ceil(first_allowed - outputs_per_block)));
+    plan.outputs_per_block =
+        static_cast<double>(n) * static_cast<double>(int64_t{1} << kPosFracBits) / static_cast<double>(m_pos_step);
+    // Unless a pick in finish_block reaches further, a carried zone longer than this block carries on into the next.
+    m_next_first_allowed = std::max(0, static_cast<int>(std::ceil(plan.first_allowed - plan.outputs_per_block)));
 
     // --- 1+2. Resample + envelope, batch-parallel (see kernels.ispc: resample_block). This block owns the
     // preamble positions whose center sample is one of its own: outputs [0, scan_n), scan_n being the first
@@ -180,38 +269,33 @@ std::vector<AdsbFrame> AdsbDemod::exec(const IqBlock& block) {
     // it, so the resampled range runs past the block's end into the trailing padding, which padding() sizes
     // for exactly that. Rounding n_out up to whole kOutputBatch batches lets resample_block run without any
     // partial-batch bounds checks; the few extra outputs also read only padding.
-    const int64_t first_past = (static_cast<int64_t>(n) << kPosFracBits) - pos_offset_;
-    const int scan_n = static_cast<int>((first_past + pos_step_ - 1) / pos_step_);
-    const int n_out = (scan_n + kMaxLookahead + kOutputBatch - 1) / kOutputBatch * kOutputBatch;
+    const int64_t first_past = (static_cast<int64_t>(n) << kPosFracBits) - m_pos_offset;
+    plan.scan_n = static_cast<int>((first_past + m_pos_step - 1) / m_pos_step);
+    plan.n_out = (plan.scan_n + kMaxLookahead + kOutputBatch - 1) / kOutputBatch * kOutputBatch;
 
-    // `x` is used directly (interleaved real/imag, matching raw SDR I/Q layout); the block's guard padding
-    // makes every index the kernels touch valid. The resampler's tap window for output m reads samples
-    // [base - Mh, base - Mh + stride/2), so it takes a pointer to sample -Mh.
-    const float* xf = block.iq().data();
-    const float* xf_resample = block.padded().subspan(2 * static_cast<size_t>(block.lead - Mh)).data();
-    grow_scratch(y_, static_cast<size_t>(n_out));  // every element is written by the kernel
-    float* const y = y_.data();
-    xt::xtensor<float, 1> partial = xt::zeros<float>({static_cast<size_t>(hw_threads)});
-    ispc::resample_block(xf_resample, filter_.kernel_coeffs.data(), filter_.kernel_stride, Np, pos_step_, pos_offset_,
-                          n_out, y, xf, static_cast<int>(n), partial.data(), static_cast<int>(hw_threads));
-    timer.mark("resample_block");
-    last_n_out_ = static_cast<size_t>(n_out);
+    grow_scratch(y_, static_cast<size_t>(plan.n_out));               // every element is written by the resampler
+    grow_scratch(m_preamble_score, static_cast<size_t>(plan.scan_n));  // and by the preamble correlation
+    m_last_n_out = static_cast<size_t>(plan.n_out);
+    return plan;
+}
+
+std::vector<AdsbFrame> AdsbDemod::finish_block(const IqBlock& block, const BlockPlan& plan,
+                                               std::span<const float> sumsq_partial) {
+    StageTimer timer;
+    const float* const y = y_.data();
+    const size_t n = block.n;
+    const int scan_n = plan.scan_n;
 
     // --- RMS normalization, per block, from this block's own samples only (not the padding). resample_block
     // sums the squares as it goes, but y[] stays unnormalized: everything downstream (preamble scores, slice
     // magnitudes) is linear in y, so comparing y/rms against a threshold is the same as comparing y against
     // threshold*rms, which scales two numbers instead of every y.
     float sumsq = 0.0f;
-    for (float p : partial) sumsq += p;
+    for (float p : sumsq_partial) sumsq += p;
     float rms = std::sqrt(sumsq / static_cast<float>(n));
     const float level = rms > 0 ? rms : 1.0f;
     const float inv_level = static_cast<float>(1.0 / level);
-    last_level_ = level;
-
-    // --- 3. Preamble correlation at every owned position (see kernels.ispc: preamble_scan).
-    grow_scratch(preamble_score_, static_cast<size_t>(scan_n));  // fully written by the kernel
-    ispc::preamble_scan(y, scan_n, kS / 2, kPreamblePattern, preamble_score_.data(), static_cast<int>(hw_threads));
-    timer.mark("preamble_scan");
+    m_last_level = level;
 
     // --- 4. Host-side peak selection: every output position gets a preamble
     // score, so one real preamble produces a cluster
@@ -223,28 +307,33 @@ std::vector<AdsbFrame> AdsbDemod::exec(const IqBlock& block) {
     // and discard everything within kExclusionRadius of it (a real frame
     // occupies that span whether or not it later validates, so nothing there
     // is an independent detection). Repeat until no candidates remain. The
-    // result depends only on preamble_score_[], so accepted candidates are all
+    // result depends only on m_preamble_score[], so accepted candidates are all
     // sliced together below. Positions before first_allowed are still inside
     // the previous block's last pick's zone; dropping them from the scan is the
     // same as having them excluded.
-    const int scan_from = std::min(first_allowed, scan_n);
-    const xt::xtensor<int, 1> candidates =
-        select_preamble_peaks(std::span<const float>(preamble_score_.data(), static_cast<size_t>(scan_n))
-                                  .subspan(static_cast<size_t>(scan_from)),
-                              preamble_score_min_ * level, kExclusionRadius) +
-        scan_from;
-    timer.mark("peak-picking");
+    auto candidates = [&]() {
+        TRACE_ZONE("select_preamble_peaks");
+        const int scan_from = std::min(plan.first_allowed, scan_n);
+        const xt::xtensor<int, 1> candidates =
+            select_preamble_peaks(std::span<const float>(m_preamble_score.data(), static_cast<size_t>(scan_n))
+                                    .subspan(static_cast<size_t>(scan_from)),
+                                m_preamble_score_min * level, kExclusionRadius) +
+            scan_from;
+        timer.mark("peak-picking");
+        if (candidates.size() == 0) return candidates;  // no candidates, nothing to carry into the next block
+
+        // Carry the last pick's zone into the next block: it may accept its m only past k + kExclusionRadius.
+        m_next_first_allowed = std::max(
+            0, static_cast<int>(std::floor(candidates.back() + kExclusionRadius - plan.outputs_per_block)) + 1);
+
+        m_last_candidates.resize({candidates.size()});
+        for (size_t c = 0; c < candidates.size(); c++) {
+            m_last_candidates(c) =
+                block.start + static_cast<uint64_t>(ispc::resample_center_index(candidates(c), m_pos_step, m_index_offset));
+        }
+        return candidates;
+    }();
     if (candidates.size() == 0) return {};
-
-    // Carry the last pick's zone into the next block: it may accept its m only past k + kExclusionRadius.
-    next_first_allowed_ =
-        std::max(0, static_cast<int>(std::floor(candidates.back() + kExclusionRadius - outputs_per_block)) + 1);
-
-    last_candidates_.resize({candidates.size()});
-    for (size_t c = 0; c < candidates.size(); c++) {
-        last_candidates_(c) =
-            block.start + static_cast<uint64_t>(ispc::resample_center_index(candidates(c), pos_step_, index_offset_));
-    }
 
     const xt::xtensor<int, 1> starts = candidates + 8 * kS;
 
@@ -259,20 +348,108 @@ std::vector<AdsbFrame> AdsbDemod::exec(const IqBlock& block) {
     timer.mark("slice_scan");
 
     std::vector<AdsbFrame> results;
+    TRACE_ZONE("assemble_frames");
     for (size_t c = 0; c < candidates.size(); c++) {
-        if (mag(c) <= slice_magnitude_min_ * level) continue;
+        if (mag(c) <= m_slice_magnitude_min * level) continue;
         unsigned __int128 payload = 0;
         for (int i = 0; i < kNumBits; i++) {
             payload = (payload << 1) | bits(c, static_cast<size_t>(i));
         }
         AdsbFrame f;
-        f.sample_index = last_candidates_(c);
+        f.sample_index = m_last_candidates(c);
         f.num_bits = kNumBits;
         f.payload = payload;
         f.confidence = mag(c) * inv_level;  // normalized, as if y were y/rms
         f.output_index = candidates(c);
-        f.preamble_score = preamble_score_(static_cast<size_t>(candidates(c))) * inv_level;
+        f.preamble_score = m_preamble_score(static_cast<size_t>(candidates(c))) * inv_level;
         results.push_back(f);
     }
     return results;
+}
+
+coro::Coro<std::vector<AdsbFrame>> AdsbDemod::exec(const IqBlock& block) {
+    std::optional<BlockPlan> plan;
+    {
+        TRACE_ZONE("demod_begin");
+        plan = begin_block(block);
+    }
+    if (!plan) co_return std::vector<AdsbFrame>{};
+
+    // One part per worker, so that every worker that is idle takes one. ADSB_NTASKS overrides it, for
+    // isolating the kernels' own single- vs multi-thread scaling (see StageTimer). resample_chunk needs at
+    // most n_out parts; preamble_chunk gives any parts past scan_n nothing to do.
+    static const size_t ntasks_override = [] {
+        const char* env = std::getenv("ADSB_NTASKS");
+        if (!env) return size_t{0};
+        char* end = nullptr;
+        const unsigned long n = std::strtoul(env, &end, 10);
+        if (end == env || *end != '\0' || n == 0) {
+            LOGF(WARNING, "ignoring ADSB_NTASKS=%s: not a positive part count; the demodulator uses one part per "
+                 "worker", env);
+            return size_t{0};
+        }
+        LOGF(INFO, "ADSB_NTASKS=%s: the demodulator splits each block into %lu parts instead of one per worker "
+             "(%zu)", env, n, coro::worker_count());
+        return static_cast<size_t>(n);
+    }();
+    const size_t k = std::clamp(ntasks_override ? ntasks_override : coro::worker_count(), size_t{1},
+                                static_cast<size_t>(plan->n_out));
+    std::vector<float> sumsq(k, 0.0f);  // each part's sum of squares of the block's samples
+    StageTimer timer;
+    // Each part resamples its share of the outputs, then, once every part has written its share, correlates
+    // the preamble over its share of the positions, which reads up to 15 * kS/2 outputs past its own range.
+    co_await coro::parallel(k, [&](coro::TeamMember part) -> coro::Coro<void> {
+        const int index = static_cast<int>(part.rank());
+        const int count = static_cast<int>(part.size());
+        block.visit([&]<class F>(IqView<F> v) {
+            TRACE_ZONE("resample_chunk");
+            ResampleKernel<F>::chunk(tap_window_base(v, window_lead(m_filter)), m_filter.kernel_coeffs.data(),
+                                     m_filter.kernel_stride, m_filter.num_phases, m_pos_step, m_pos_offset, plan->n_out,
+                                     y_.data(), v.iq().data(), static_cast<int>(block.n), 1.0f / F::full_scale,
+                                     sumsq.data(), index, count);
+        });
+        co_await part.sync();
+        TRACE_ZONE("preamble_chunk");
+        ispc::preamble_chunk(y_.data(), plan->scan_n, kS / 2, kPreamblePattern, m_preamble_score.data(), index,
+                             count);
+    });
+    timer.mark("resample_block + preamble_scan");
+
+    TRACE_ZONE("demod_finish");
+    co_return finish_block(block, *plan, sumsq);
+}
+
+// One block's DemodBlock, with a snapshot of it when `snapshot` is set and it has frames.
+coro::Coro<DemodBlock> demod_block(AdsbDemod& demod, IqBlock block, bool snapshot) {
+    DemodBlock out{.n = block.n, .frames = co_await demod.exec(block), .candidates = {}, .snapshot = std::nullopt};
+    out.candidates.assign(demod.last_candidates().begin(), demod.last_candidates().end());
+    if (snapshot && !out.frames.empty()) {
+        const std::span<const float> envelope = demod.last_envelope();
+        out.snapshot = DemodSnapshot{std::move(block), {envelope.begin(), envelope.end()}, demod.last_level()};
+    }
+    co_return out;
+}
+
+}  // namespace
+
+IqPadding demod_padding(const FilterBank& filter, double sample_rate_hz) {
+    return AdsbDemod::padding(filter, sample_rate_hz);
+}
+
+double demod_output_rate_hz() { return AdsbDemod::output_rate_hz(); }
+
+AdsbDemodParams demod_params(const FilterBank& filter, double sample_rate_hz, float preamble_score_min,
+                             float slice_magnitude_min) {
+    return AdsbDemod(filter, sample_rate_hz, preamble_score_min, slice_magnitude_min).params();
+}
+
+coro::CoroStream<DemodBlock> demodulate(coro::CoroStream<IqBlock> in, FilterBank filter, double sample_rate_hz,
+                                        float preamble_score_min, float slice_magnitude_min, bool snapshots) {
+    AdsbDemod demod(filter, sample_rate_hz, preamble_score_min, slice_magnitude_min);
+    BlockStitcher stitcher;
+    while (auto block = co_await coro::next(in)) {
+        if (auto ready = stitcher.push(std::move(*block)))
+            co_yield co_await demod_block(demod, std::move(*ready), snapshots);
+    }
+    if (auto last = stitcher.flush()) co_yield co_await demod_block(demod, std::move(*last), snapshots);
 }

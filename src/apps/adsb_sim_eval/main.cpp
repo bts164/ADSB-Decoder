@@ -1,5 +1,5 @@
 // Scores the demodulator against the simulator's ground truth: runs adsb_sim (see adsb_sim.h) in-process,
-// feeds its IQ through a BlockStitcher and AdsbDemod block by block exactly as `adsb` does (pipeline.h), and
+// feeds its IQ through demodulate() block by block exactly as `adsb` does (pipeline.h), and
 // matches the preamble candidates and output frames against the transmissions the simulator actually sent.
 //
 // A candidate or frame matches the transmission whose start is nearest, if that is within --tolerance-us.
@@ -18,9 +18,13 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include <argparse/argparse.hpp>
+#include <coro/coro.h>
+#include <coro/coro_stream.h>
+#include <coro/runtime/runtime.h>
 
 #include "sim/adsb_sim.h"
 #include "dsp/demod.h"
@@ -30,7 +34,7 @@
 
 namespace {
 
-// Longest Mode S transmission: 8 us preamble + 112 bits at 1 us. AdsbDemod needs this much of the block
+// Longest Mode S transmission: 8 us preamble + 112 bits at 1 us. demodulate() needs this much of the block
 // after a preamble to slice it, whatever the frame's length.
 constexpr double kLongFrameUs = 8.0 + 112.0;
 
@@ -75,13 +79,32 @@ long nearest(const std::vector<Truth>& truth, double idx, double tol) {
 
 double pct(size_t a, size_t b) { return b ? 100.0 * static_cast<double>(a) / static_cast<double>(b) : 0.0; }
 
+
+// The simulated signal, `total` samples in blocks of `block`, as float blocks scaled to [-1, 1): the scale the
+// demod gives the vita49 source's int16 samples.
+coro::CoroStream<IqBlock> sim_blocks(adsb_sim::Simulator& sim, IqPadding pad, size_t block, uint64_t total) {
+    std::vector<int16_t> iq(2 * block);
+    for (uint64_t done = 0; done < total;) {
+        const size_t n = static_cast<size_t>(std::min<uint64_t>(block, total - done));
+        const std::span<int16_t> spans[] = {std::span(iq.data(), 2 * n)};
+        co_await sim.generate(spans);
+        IqBlock b = IqBlock::uninitialized<iq::F32>(pad, n, done);
+        const std::span<float> out = b.iq<iq::F32>();
+        for (size_t i = 0; i < out.size(); i++) out[i] = iq[i] / 32768.0f;
+        done += n;
+        co_yield std::move(b);
+    }
+}
 }  // namespace
 
 int main(int argc, char** argv) {
     argparse::ArgumentParser program("adsb_sim_eval");
     program.add_description("Runs the ADS-B simulator into the demodulator and reports detection statistics "
                             "against the simulator's ground truth.");
-    add_filter_options(program);
+    program.add_epilog("Environment variables, for profiling (each is logged when set):\n"
+                       "  ADSB_TIMING=1  log the demodulator's stage times for every block (0: off)\n"
+                       "  ADSB_NTASKS=N  split each block's kernels into N parts instead of one per runtime worker");
+    FilterOptions::add_options(program);
     program.add_argument("--scenario").required().help("simulator scenario JSON (see scenarios/boston.json)");
     program.add_argument("--rate").scan<'g', double>().default_value(2.4e6).help("sample rate in Hz");
     program.add_argument("--duration").scan<'g', double>().default_value(60.0).help("seconds of signal");
@@ -93,7 +116,7 @@ int main(int argc, char** argv) {
     program.add_argument("--slice-mag-min").scan<'g', float>().default_value(2.0f * 56.0f).help(
         "bit-slice magnitude threshold (as adsb)");
     program.add_argument("--block").scan<'u', unsigned>().default_value(128u * 1024u).help(
-        "samples per AdsbDemod::exec() block (default: the file/vita49/rtlsdr sources' 131072)");
+        "samples per demodulated block (default: the file/vita49/rtlsdr sources' 131072)");
     program.add_argument("--tolerance-us").scan<'g', double>().default_value(3.0).help(
         "max distance between a candidate and a transmission's start to count as the same frame");
     try {
@@ -113,7 +136,7 @@ int main(int argc, char** argv) {
     FilterBank filter;
     try {
         cfg.aircraft = adsb_sim::load_scenario(program.get<std::string>("--scenario"));
-        filter = make_filter(program, rate);
+        filter = FilterOptions::from_options(program).make(rate);
     } catch (const std::exception& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;
@@ -123,29 +146,22 @@ int main(int argc, char** argv) {
     cfg.snr_db = program.get<double>("--snr-db");
     cfg.record_transmissions = true;
     adsb_sim::Simulator sim(cfg);
-    AdsbDemod demod(filter, rate, program.get<float>("--preamble-min"), program.get<float>("--slice-mag-min"));
+    const float preamble_min = program.get<float>("--preamble-min");
+    const float slice_mag_min = program.get<float>("--slice-mag-min");
 
-    // Same int16 -> float scaling as the vita49 source (vrt_assembler.cpp).
-    const IqPadding pad = AdsbDemod::padding(filter, rate);
-    std::vector<int16_t> iq(2 * block);
     std::vector<uint64_t> candidates;
     std::vector<AdsbFrame> frames;
-    BlockStitcher stitcher;
-    auto process = [&](const IqBlock& b) {
-        std::vector<AdsbFrame> out = demod.exec(b);
-        frames.insert(frames.end(), out.begin(), out.end());
-        candidates.insert(candidates.end(), demod.last_candidates().begin(), demod.last_candidates().end());
-    };
-    for (uint64_t done = 0; done < total;) {
-        const size_t n = static_cast<size_t>(std::min<uint64_t>(block, total - done));
-        sim.generate(std::span(iq.data(), 2 * n));
-        IqBlock b = IqBlock::uninitialized(pad, n, done);
-        const std::span<float> out = b.iq();
-        for (size_t i = 0; i < out.size(); i++) out[i] = iq[i] / 32768.0f;
-        if (auto ready = stitcher.push(std::move(b))) process(*ready);
-        done += n;
-    }
-    if (auto last = stitcher.flush()) process(*last);
+    // One worker per hardware thread, which demodulate() splits each block across. The sim renders on it too,
+    // with its default of one render thread.
+    coro::Runtime rt;
+    rt.block_on([&]() -> coro::Coro<void> {
+        auto blocks = demodulate(sim_blocks(sim, demod_padding(filter, rate), block, total), filter, rate,
+                                 preamble_min, slice_mag_min);
+        while (auto b = co_await coro::next(blocks)) {
+            frames.insert(frames.end(), b->frames.begin(), b->frames.end());
+            candidates.insert(candidates.end(), b->candidates.begin(), b->candidates.end());
+        }
+    }());
 
     // Ground truth: every transmission that ends inside the generated signal.
     std::vector<Truth> truth;
@@ -177,8 +193,9 @@ int main(int argc, char** argv) {
     }
 
     size_t false_frames = 0, false_frames_crc = 0;
+    std::unordered_set<uint32_t> known_icaos;
     for (const AdsbFrame& f : frames) {
-        const DecodedFrameView v = compute_frame_view(f, rate);
+        const DecodedFrameView v = compute_frame_view(f, rate, known_icaos);
         const long i = nearest(truth, static_cast<double>(f.sample_index), tol);
         if (i < 0 || truth[i].output) {
             false_frames++;

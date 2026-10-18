@@ -55,15 +55,21 @@ endif()
 
 # Compiles one .ispc file into an object + generated header in the calling
 # directory's binary dir; `target` gets both (the header dir PRIVATE, since
-# only that library's own .cpp includes it).
+# only that library's own .cpp includes it). Any further arguments are extra
+# ispc flags for this file only.
 function(adsb_add_ispc target src)
     get_filename_component(name ${src} NAME_WE)
     set(obj ${CMAKE_CURRENT_BINARY_DIR}/${name}_ispc.o)
     set(hdr ${CMAKE_CURRENT_BINARY_DIR}/${name}_ispc.h)
+    set(dep ${CMAKE_CURRENT_BINARY_DIR}/${name}_ispc.d)
+    # Headers are included as "dir/name.h" from src/, as in C++ (e.g. common/kernel_trace.h); the depfile
+    # rebuilds the object when one changes.
     add_custom_command(
         OUTPUT ${obj} ${hdr}
-        COMMAND ${ISPC_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/${src} -O2 --pic ${ISPC_TARGET_FLAG} -o ${obj} -h ${hdr}
+        COMMAND ${ISPC_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/${src} -O2 --pic -g ${ISPC_TARGET_FLAG} ${ARGN}
+                -I${PROJECT_SOURCE_DIR}/src -o ${obj} -h ${hdr} -M -MF ${dep} -MT ${obj}
         DEPENDS ${src}
+        DEPFILE ${dep}
         COMMENT "ispc: compiling ${src}"
     )
     target_sources(${target} PRIVATE ${obj} ${hdr})

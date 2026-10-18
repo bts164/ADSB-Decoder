@@ -16,10 +16,10 @@
 #include <coro/sync/timeout.h>
 #include <coro/sync/when.h>
 #include <coro/task/join_set.h>
-#include <coro/task/spawn_blocking.h>
 #include <nlohmann/json.hpp>
 
 #include "common/log.h"
+#include "common/trace.h"
 #include "output/aircraft_history.h"
 
 namespace {
@@ -47,6 +47,8 @@ size_t max_pending_bytes_from_env() {
         LOGF(WARNING, "ignoring ADSB_WS_MAX_PENDING_BYTES=%s: not a positive byte count", env);
         return kDefaultMaxPendingBytes;
     }
+    LOGF(INFO, "ADSB_WS_MAX_PENDING_BYTES=%s: a WebSocket client may have up to %llu bytes of updates waiting "
+         "(default %zu)", env, n, kDefaultMaxPendingBytes);
     return static_cast<size_t>(n);
 }
 
@@ -57,12 +59,13 @@ coro::Coro<void> send_or_skip(coro::WsStream& ws, const std::string& msg) {
 }
 
 // Answers the client's requests by queuing replies for send_updates(): `{"type":"seek","t":<unix s>}` gets
-// aircraft_history_snapshot(t) and `{"type":"aircraft_history","icao":"<hex>","t":<unix s, optional>}` gets
-// aircraft_history_aircraft(icao, t), and `{"type":"activity","from":<unix s, optional>}` gets
-// aircraft_history_activity(from), and `{"type":"heatmap","west":...,"south":...,"east":...,"north":...,
-// "width":...,"height":...,"t0":...,"t1":...}` (times optional) gets aircraft_history_heatmap(). Runs until the
+// history.snapshot(t) and `{"type":"aircraft_history","icao":"<hex>","t":<unix s, optional>}` gets
+// history.aircraft(icao, t), and `{"type":"activity","from":<unix s, optional>}` gets history.activity(from),
+// and `{"type":"heatmap","west":...,"south":...,"east":...,"north":...,"width":...,"height":...,"t0":...,
+// "t1":...}` (times optional) gets history.heatmap(). Without a history there is no reply. Runs until the
 // client disconnects, when receive() throws.
-coro::Coro<void> read_requests(coro::WsStream& ws, coro::MpscSender<std::string> replies) {
+coro::Coro<void> read_requests(coro::WsStream& ws, coro::MpscSender<std::string> replies,
+                               std::optional<AircraftHistory>& history) {
     for (;;) {
         auto msg = co_await ws.receive();
         if (!msg.is_text) continue;
@@ -71,16 +74,16 @@ coro::Coro<void> read_requests(coro::WsStream& ws, coro::MpscSender<std::string>
         std::optional<std::string> reply;
         if (type == "seek" && req["t"].is_number()) {
             const double t = req["t"].get<double>();
-            reply = co_await coro::spawn_blocking([t] { return aircraft_history_snapshot(t); });
+            if (history) reply = co_await history->snapshot(t);
         } else if (type == "aircraft_history" && req["icao"].is_string()) {
             std::string icao = req["icao"].get<std::string>();
             std::optional<double> t;
             if (req["t"].is_number()) t = req["t"].get<double>();
-            reply = co_await coro::spawn_blocking([icao, t] { return aircraft_history_aircraft(icao, t); });
+            if (history) reply = co_await history->aircraft(std::move(icao), t);
         } else if (type == "activity") {
             std::optional<double> from;
             if (req["from"].is_number()) from = req["from"].get<double>();
-            reply = co_await coro::spawn_blocking([from] { return aircraft_history_activity(from); });
+            if (history) reply = co_await history->activity(from);
         } else if (type == "heatmap" && req["west"].is_number() && req["south"].is_number() &&
                    req["east"].is_number() && req["north"].is_number() && req["width"].is_number_integer() &&
                    req["height"].is_number_integer()) {
@@ -89,7 +92,7 @@ coro::Coro<void> read_requests(coro::WsStream& ws, coro::MpscSender<std::string>
                                 std::nullopt, std::nullopt};
             if (req["t0"].is_number()) heat.t0 = req["t0"].get<double>();
             if (req["t1"].is_number()) heat.t1 = req["t1"].get<double>();
-            reply = co_await coro::spawn_blocking([heat] { return aircraft_history_heatmap(heat); });
+            if (history) reply = co_await history->heatmap(heat);
         } else {
             LOGF(WARNING, "ignoring websocket client message: %s", msg.as_text());
             continue;
@@ -114,6 +117,7 @@ coro::Coro<void> collect_messages(coro::BroadcastReceiver<std::string> rx, Pendi
         auto r = co_await rx.recv();
         if (!r) {
             if (r.error().kind != coro::BroadcastRecvError::Kind::Lagged) co_return;
+            TRACE_MESSAGE("websocket client lagged");
             LOGF(WARNING, "websocket client lagged");
             continue;
         }
@@ -125,9 +129,11 @@ coro::Coro<void> collect_messages(coro::BroadcastReceiver<std::string> rx, Pendi
             pending.parts.pop_front();
             ++dropped;
         }
-        if (dropped > 0)
+        if (dropped > 0) {
+            TRACE_PLOT("ws updates dropped", static_cast<int64_t>(dropped));
             LOGF(WARNING, "websocket client is over %u pending bytes: dropped %u update(s)",
                  settings.max_pending_bytes, dropped);
+        }
     }
 }
 
@@ -149,30 +155,36 @@ coro::Coro<void> send_updates(coro::WsStream& ws, Pending& pending, coro::MpscRe
         if (pending.parts.empty()) continue;
         // Taken out of `pending` before the send suspends: collect_messages() keeps adding during it.
         std::string msg;
-        msg.reserve(pending.bytes + pending.parts.size() + 1);
-        char sep = '[';
-        for (const std::string& part : pending.parts) {
-            msg += sep;
-            msg += part;
-            sep = ',';
+        {
+            TRACE_ZONE_VALUE("ws_join_update", pending.bytes);
+            msg.reserve(pending.bytes + pending.parts.size() + 1);
+            char sep = '[';
+            for (const std::string& part : pending.parts) {
+                msg += sep;
+                msg += part;
+                sep = ',';
+            }
+            msg += ']';
+            pending.parts.clear();
+            pending.bytes = 0;
         }
-        msg += ']';
-        pending.parts.clear();
-        pending.bytes = 0;
         co_await send_or_skip(ws, msg);
     }
 }
 
-coro::Coro<void> handle_client(coro::WsStream ws, coro::BroadcastReceiver<std::string> rx, Settings settings) {
+// `history` is the client's own handle: a handle is for one task at a time.
+coro::Coro<void> handle_client(coro::WsStream ws, coro::BroadcastReceiver<std::string> rx, Settings settings,
+                               std::optional<AircraftHistory> history) {
     try {
         // Backfill this one client with the latest history snapshot before it joins the live broadcast --
         // a per-connection send, not a broadcast, so late joiners don't replay history at everyone else.
-        if (auto snapshot = co_await coro::spawn_blocking([] { return aircraft_history_snapshot(std::nullopt); }))
-            co_await send_or_skip(ws, *snapshot);
+        if (history) {
+            if (auto snapshot = co_await history->snapshot(std::nullopt)) co_await send_or_skip(ws, *snapshot);
+        }
 
         Pending pending;
         auto [replies_tx, replies_rx] = coro::mpsc_channel<std::string>(4);
-        co_await coro::join(read_requests(ws, std::move(replies_tx)),
+        co_await coro::join(read_requests(ws, std::move(replies_tx), history),
                             collect_messages(std::move(rx), pending, settings),
                             send_updates(ws, pending, std::move(replies_rx), settings));
     } catch (const std::exception& e) {
@@ -180,9 +192,12 @@ coro::Coro<void> handle_client(coro::WsStream ws, coro::BroadcastReceiver<std::s
     }
 }
 
-coro::Coro<void> run(uint16_t port, coro::BroadcastReceiver<std::string> rx, Settings settings) {
+coro::Coro<void> run(uint16_t port, coro::BroadcastReceiver<std::string> rx, Settings settings,
+                     std::optional<AircraftHistory> history) {
     coro::WsListener listener = co_await coro::WsListener::bind("0.0.0.0", port);
-    LOGF(INFO, "websocket listening on port %u", port);
+    LOGF(INFO, "websocket listening on port %u: an update every %g s, up to %zu bytes waiting per client, %s", port,
+         std::chrono::duration<double>(settings.update_interval).count(), settings.max_pending_bytes,
+         history ? "history queries answered" : "no history");
     // Runs until the task is cancelled: Ctrl+C is handled in main(), and ~Runtime cancels and drains this
     // task (see ws_publisher_init()). JoinSet's destructor then cancels and drains any remaining clients.
     coro::JoinSet<void> clients;
@@ -197,7 +212,11 @@ coro::Coro<void> run(uint16_t port, coro::BroadcastReceiver<std::string> rx, Set
                 coro::when(!clients.empty(), [&] { return coro::next(clients); }));
             if (result.index() == 0) {
                 auto &ws = std::get<0>(result).value;
-                clients.spawn(handle_client(std::move(ws), rx.resubscribe(), settings));
+                std::optional<AircraftHistory> client_history;
+                if (history) client_history = history->clone();
+                clients.build_task(handle_client(std::move(ws), rx.resubscribe(), settings, std::move(client_history)))
+                    .name("ws_client")
+                    .spawn();
                 LOGF(INFO, "websocket client connected");
             } else {
                 LOGF(INFO, "websocket client disconnected");
@@ -211,7 +230,8 @@ coro::Coro<void> run(uint16_t port, coro::BroadcastReceiver<std::string> rx, Set
 
 }  // namespace
 
-void ws_publisher_init(uint16_t port, std::chrono::nanoseconds update_interval) {
+void ws_publisher_init(uint16_t port, std::chrono::nanoseconds update_interval,
+                       std::optional<AircraftHistory> history) {
     auto channel = coro::broadcast_channel<std::string>(64);
     g_tx = std::move(channel.first);
     // Detached, not kept as a member/global: run() loops forever (accepting
@@ -221,10 +241,18 @@ void ws_publisher_init(uint16_t port, std::chrono::nanoseconds update_interval) 
     // which runs after main()'s coro::Runtime is already gone. Runtime's own
     // destructor is what actually cancels and drains this task, while the
     // runtime is still alive to do so.
-    coro::spawn(run(port, std::move(channel.second), Settings{update_interval, max_pending_bytes_from_env()}))
+    coro::build_task()
+        .name("ws_accept")
+        .spawn(run(port, std::move(channel.second), Settings{update_interval, max_pending_bytes_from_env()},
+                   std::move(history)))
         .detach();
 }
 
 void ws_publisher_publish(std::string json_objects) {
     if (g_tx) g_tx->send(std::move(json_objects));
+}
+
+std::optional<coro::BroadcastSender<std::string>> ws_publisher_sender() {
+    if (!g_tx) return std::nullopt;
+    return g_tx->clone();
 }

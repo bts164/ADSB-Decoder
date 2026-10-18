@@ -4,6 +4,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <absl/strings/str_format.h>
@@ -23,7 +24,7 @@
  * version, NACp, SIL). Out of the other replies: altitude from DF0/4/16/20, squawk from DF5/21, flight
  * status (on ground, alert, SPI) from DF4/5/20/21, vertical status from DF0/16, capability (on ground) from
  * DF11, and the Comm-B registers BDS 2,0, 4,0, 5,0 and 6,0 from the MB field of DF20/21 (see infer_bds()).
- * Keeps one running AircraftState per ICAO address in aircraft_table().
+ * AircraftTracker keeps one running AircraftState per ICAO address.
  *
  * Not decoded: surface and GNSS positions, other Comm-B registers, ACAS advisories, and Gillham (Q=0) or
  * metric altitudes, which are left unset.
@@ -94,10 +95,25 @@ struct AircraftState {
 };
 
 /**
- * The table of every aircraft seen so far, keyed by ICAO address. Not thread-safe; only the demod
- * thread's handle_frame() (pipeline.cpp) uses it.
+ * Every aircraft seen so far in one stream, and the addresses frame validation checks short replies against.
+ * One per stream, used from one task at a time.
  */
-std::unordered_map<uint32_t, AircraftState>& aircraft_table();
+class AircraftTracker {
+public:
+    /** Validates `f` (compute_frame_view()) against the addresses confirmed so far, adding any it confirms. */
+    DecodedFrameView view(const AdsbFrame& f, double rate_hz) { return compute_frame_view(f, rate_hz, m_known_icaos); }
+    /** The aircraft with address `icao`, or nullptr if none has been seen. */
+    const AircraftState* find(uint32_t icao) const;
+    /** The aircraft with address `icao`, added if it hasn't been seen. */
+    AircraftState& aircraft(uint32_t icao);
+
+private:
+    // Confirmed by a CRC-valid DF11/17/18, whose AA field is the address in the clear. Short replies, whose AP
+    // field is the address XOR the parity, are valid only for one of these: adsb_detect.jl's two-tier scheme,
+    // built up as frames arrive, since a stream has no whole batch to scan first.
+    std::unordered_set<uint32_t> m_known_icaos;
+    std::unordered_map<uint32_t, AircraftState> m_table;
+};
 
 /**
  * Decodes the ME field of a CRC-valid DF17/18 frame, dispatching on its type code, into `ac`.

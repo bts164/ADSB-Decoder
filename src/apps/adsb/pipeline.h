@@ -1,25 +1,21 @@
 #pragma once
 
-#include <chrono>
-#include <concepts>
 #include <cstdint>
-#include <cstdlib>
-#include <iostream>
-#include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
-#include <nlohmann/json.hpp>
+#include <argparse/argparse.hpp>
 
-#include <coro/stream.h>
+#include <coro/coro.h>
+#include <coro/coro_stream.h>
 
+#include "decode/aircraft.h"
 #include "decode/frame_decode.h"
 #include "dsp/demod.h"
 #include "dsp/filter_bank.h"
 #include "dsp/iq_block.h"
-#include "dsp/spectrum.h"
-#include "output/frame_recorder.h"
-#include "output/ws_publisher.h"
+#include "output/aircraft_history.h"
 
 /**
  * @file
@@ -27,21 +23,26 @@
  */
 
 /**
- * Handles one demodulated frame: validates it (compute_frame_view), logs it, adds it with its
+ * Handles one demodulated frame: validates it (AircraftTracker::view), logs it, adds it with its
  * frame_summary() to `out`, and for a frame with a confirmed address updates its AircraftState: decoded fields
  * (update_aircraft_from_frame), and
- * message count, signal level and last-seen time from any DF. The aircraft is added to `out` and recorded when a
- * decoded field changed, or at most once a second for the rest; it's logged only for the former.
+ * message count, signal level and last-seen time from any DF. The aircraft is added to `out` and
+ * `history_rows` when a decoded field changed, or at most once a second for the rest; it's logged only for
+ * the former.
  *
  * The log lines are verbose ones, off by default: aircraft changes at --verbosity 1, every frame at 2.
- * @param f frame from AdsbDemod::exec()
+ * @param tracker the stream's aircraft, updated with this frame
+ * @param f frame from demodulate()
  * @param rate_hz input sample rate, for the frame's stream time
  * @param start_unix_s wall-clock time of stream sample 0 (Unix seconds), for AircraftState::last_seen_unix_s
  * @param out JSON to publish for this frame's block, appended to: comma-separated objects, as
  *     ws_publisher_publish() takes
+ * @param history_rows aircraft updates to record for this frame's block, appended to; nullptr when there is
+ *     no history
  * @return the validated frame
  */
-DecodedFrameView handle_frame(const AdsbFrame& f, double rate_hz, double start_unix_s, std::string& out);
+DecodedFrameView handle_frame(AircraftTracker& tracker, const AdsbFrame& f, double rate_hz, double start_unix_s,
+                              std::string& out, std::vector<HistoryRow>* history_rows);
 
 /** run_demod_loop's optional HDF5 debug recording (FrameRecorder). */
 struct DebugRecordOptions {
@@ -50,26 +51,45 @@ struct DebugRecordOptions {
     std::string command_line;
 };
 
+/** run_demod_loop's settings that come from the command line, the same for every source. */
+struct DemodLoopParams {
+    float preamble_min;    /**< demodulate() preamble threshold */
+    float slice_mag_min;   /**< demodulate() slice-magnitude threshold */
+    bool enable_spectrum;  /**< publish spectrum frames */
+    DebugRecordOptions debug;
+
+    /** Adds the thresholds, --spectrum and --debug-h5*. */
+    static void add_options(argparse::ArgumentParser& program);
+    /** @param command_line the whole command line, recorded in the --debug-h5 file */
+    static DemodLoopParams from_options(const argparse::ArgumentParser& program, std::string command_line);
+};
+
 /**
- * Runs every IqBlock from `stream` through a BlockStitcher, AdsbDemod and handle_frame() until the stream
- * ends, publishing each block's frames and aircraft in one ws_publisher_publish(), with a spectrum frame at
- * most every kSpectrumInterval when `enable_spectrum` is set. The stitcher holds each block until the next
- * arrives, so frames come out one block late.
+ * Demodulates every IqBlock from `stream` until it ends, through a chain of stream nodes:
  *
- * Runs on a coro::spawn_blocking thread, since it pulls blocks with coro::blocking_next. That call is where
- * a cancelled task is unwound (coro::BlockingCancelled), which is how Ctrl+C stops it. Logs the frame count
- * however it ends. With `ADSB_TIMING` set, logs throughput and realtime factor every kStatusReportInterval.
- * @param filter polyphase filter bank for the AdsbDemod
+ * 1. With `enable_spectrum`, a tap that publishes a spectrum frame from at most one block every
+ *    kSpectrumInterval, on a sender of its own (ws_publisher_sender()).
+ * 2. demodulate(), in a task of its own with a buffered output, so the next blocks demodulate while this one's
+ *    frames are handled. It holds each block until the next arrives, so frames come out one block late.
+ * 3. This task, the sink: handle_frame() on each frame, in order, then one ws_publisher_publish() of the
+ *    block's frames and aircraft, and with a `history`, one AircraftHistory::insert() of its aircraft.
+ *
+ * With a debug path, the sink also sends each block that has frames, with its envelope and validated frames,
+ * to a FrameRecorder task over a channel. Each of those holds its block, so the demod task's buffer is
+ * shorter then.
+ *
+ * A task on the runtime: demodulate() splits each block's kernels across the runtime's workers, so it needs a
+ * multi-threaded runtime to run them in parallel. Cancelling the task (Ctrl+C) drops it, and the nodes' tasks
+ * with it, at its next co_await. Logs the frame count however it ends. With `ADSB_TIMING` set, logs
+ * throughput and realtime factor every kStatusReportInterval.
+ * @param filter polyphase filter bank for demodulate()
  * @param rate_hz input sample rate
- * @param preamble_min AdsbDemod preamble threshold
- * @param slice_mag_min AdsbDemod slice-magnitude threshold
- * @param stream any coro::Stream of IqBlock (every `adsb` source), padded to AdsbDemod::padding()
  * @param freq_hz center frequency, for labelling spectrum frames
- * @param enable_spectrum publish spectrum frames
- * @param debug HDF5 debug recording, if its path is set
+ * @param stream IQ blocks from any `adsb` source, padded to demod_padding()
+ * @param params the thresholds, the spectrum and the HDF5 debug recording, if its path is set
+ * @param history where the aircraft updates are recorded, if anywhere
  * @return total number of frames decoded
  */
-template<coro::Stream S>
-    requires std::same_as<typename S::ItemType, IqBlock>
-uint64_t run_demod_loop(FilterBank filter, double rate_hz, float preamble_min, float slice_mag_min, S stream,
-                         double freq_hz, bool enable_spectrum, const DebugRecordOptions& debug);
+[[nodiscard]] coro::Coro<uint64_t> run_demod_loop(FilterBank filter, double rate_hz, double freq_hz,
+                                                  coro::CoroStream<IqBlock> stream, DemodLoopParams params,
+                                                  std::optional<AircraftHistory> history);

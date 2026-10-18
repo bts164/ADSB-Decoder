@@ -217,7 +217,7 @@ Data packets rather than one packet per block.
 
 ## Receiver (`adsb vita49`)
 
-`src/input/vita49_stream.cpp` (socket + task plumbing) and `src/input/vrt_assembler.cpp`
+`src/input/vita49_stream.cpp` (socket + task plumbing) and `src/vrt/assembler.cpp`
 (pure packet-to-sample logic, unit-tested by `tests/vita49_stream_test.cpp`)
 implement the source described in the introduction.
 
@@ -231,9 +231,10 @@ flowchart LR
 ```
 
 Subcommand options: `--port` (required), `--bind`, `--stream-id`,
-`--idle-timeout`, e.g. `adsb --rate 2.4e6 vita49 --port 4991`. The sample
-rate comes from the global `--rate` (default 2.4e6), since the resampling
-filter and block padding are built for it before the stream starts.
+`--idle-timeout`, `--rate` (required) and `--freq`, e.g.
+`adsb vita49 --port 4991 --rate 2.4e6`. The sample rate comes from `--rate`,
+since the resampling filter and block padding are built for it before the
+stream starts. `--freq` only labels the spectrum frames.
 
 Assembler rules:
 - Packets are validated strictly (length, no class ID / trailer, TSI=UTC,
@@ -252,7 +253,7 @@ Assembler rules:
 - The stream ends on Ctrl+C or after `--idle-timeout` s of silence.
 
 Blocks carry their stream sample index, so the `BlockStitcher` in
-`run_demod_loop` joins consecutive blocks and frames that straddle a block
+`demodulate()` joins consecutive blocks and frames that straddle a block
 boundary still decode. Blocks dropped because the channel was full leave a gap,
 and the stitcher does not join blocks across it.
 

@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <span>
 
+#include <argparse/argparse.hpp>
 #include <rtl-sdr.h>
 
 #include <coro/coro.h>
@@ -13,6 +14,7 @@
 #include <coro/task/spawn_blocking.h>
 
 #include "common/log.h"
+#include "common/trace.h"
 #include "dsp/iq_block.h"
 #include "input/rtlsdr_device.h"
 
@@ -29,16 +31,17 @@ void rtlsdr_stream_cb(unsigned char* buf, uint32_t len, void* ctx_ptr) {
     auto* ctx = static_cast<StreamCallbackCtx*>(ctx_ptr);
     const size_t n = len / 2;  // interleaved uint8 I/Q pairs
     if (n == 0) return;
+    TRACE_ZONE_VALUE("rtlsdr_convert", n);
 
-    IqBlock block = IqBlock::uninitialized(ctx->pad, n, ctx->next_start);
+    IqBlock block = IqBlock::uninitialized<iq::F32>(ctx->pad, n, ctx->next_start);
     ctx->next_start += n;
     // librtlsdr delivers unsigned 8-bit offset-binary samples (128 ==
-    // zero) -- recenter to signed. AdsbDemod::exec's per-block RMS
+    // zero) -- recenter to signed. The demodulator's per-block RMS
     // normalization (see demod.cpp) makes the exact input scale
     // otherwise unimportant. Both are interleaved I/Q, so it is one
     // output float per input byte.
     const std::span<const unsigned char> in(buf, 2 * n);
-    const std::span<float> out = block.iq();
+    const std::span<float> out = block.iq<iq::F32>();
     for (size_t i = 0; i < out.size(); i++) out[i] = (static_cast<float>(in[i]) - 127.5f) / 127.5f;
 
     if (!ctx->tx.try_send(std::move(block))) {
@@ -47,13 +50,14 @@ void rtlsdr_stream_cb(unsigned char* buf, uint32_t len, void* ctx_ptr) {
         // librtlsdr's USB callback thread and desync its internal transfer
         // resubmission, losing far more data than one dropped block does.
         ctx->dropped++;
+        TRACE_PLOT("rtlsdr blocks dropped", static_cast<int64_t>(ctx->dropped));
         LOGF_EVERY_N_SEC(WARNING, 1, "compute thread falling behind, %u block(s) dropped so far", ctx->dropped);
     }
 }
 
 }  // namespace
 
-// Streams raw IQ blocks off `device_index`: librtlsdr's own event-handling
+// Streams raw IQ blocks off `radio`: librtlsdr's own event-handling
 // thread (inside RtlSdr::read_async, which blocks until the RtlSdr is destroyed, reconnecting
 // if the device is unplugged -- see rtlsdr_device.h) delivers raw uint8 I/Q buffers via
 // callback; the callback converts each buffer to a padded float I/Q
@@ -65,17 +69,19 @@ void rtlsdr_stream_cb(unsigned char* buf, uint32_t len, void* ctx_ptr) {
 // the read returns, for any reason, which is exactly when the
 // channel should close and let this generator's loop (and any consumer
 // draining it) see exhaustion instead of hanging forever.
-coro::CoroStream<IqBlock> rtlsdr_iq_stream(int device_index, double rate_hz, double freq_hz, double gain_db,
-                                            IqPadding pad, std::optional<uint32_t> buf_num,
-                                            std::optional<uint32_t> buf_len) {
-    RtlSdr radio({device_index, rate_hz, freq_hz, gain_db});
+coro::CoroStream<IqBlock> rtlsdr_iq_stream(std::unique_ptr<RtlSdr> radio, IqPadding pad,
+                                            std::optional<uint32_t> buf_num, std::optional<uint32_t> buf_len) {
+    // A parameter, so it is destroyed after read_handle and the channel, as a local declared first would be:
+    // ~RtlSdr stops the read that read_handle's thread is in.
+    RtlSdr& device = *radio;
+    const double rate_hz = device.sample_rate_hz();
 
     auto channel = coro::mpsc_channel<IqBlock>(4);
     coro::MpscSender<IqBlock> tx = std::move(channel.first);
     coro::MpscReceiver<IqBlock> rx = std::move(channel.second);
 
     auto read_handle = coro::spawn_blocking(
-        [&radio, tx = std::move(tx), pad, buf_num, buf_len, rate_hz]() mutable {
+        [&device, tx = std::move(tx), pad, buf_num, buf_len, rate_hz]() mutable {
             StreamCallbackCtx cb_ctx{std::move(tx), pad};
             // The samples missed while the device was gone still count, so stream time keeps pace with the
             // wall clock and the blocks either side of the outage aren't stitched together.
@@ -83,7 +89,7 @@ coro::CoroStream<IqBlock> rtlsdr_iq_stream(int device_index, double rate_hz, dou
                 cb_ctx.next_start += static_cast<uint64_t>(std::llround(outage.count() * rate_hz));
             };
             // librtlsdr takes 0 to mean its own default.
-            return radio.read_async(rtlsdr_stream_cb, &cb_ctx, buf_num.value_or(0), buf_len.value_or(0),
+            return device.read_async(rtlsdr_stream_cb, &cb_ctx, buf_num.value_or(0), buf_len.value_or(0),
                                     skip_outage);
             // cb_ctx -- and the sender it owns -- destructs here, closing the channel.
         });
@@ -94,4 +100,33 @@ coro::CoroStream<IqBlock> rtlsdr_iq_stream(int device_index, double rate_hz, dou
 
     int rc = co_await read_handle;
     LOGF(INFO, "rtl-sdr read thread ended (rc=%d)", rc);
+}
+
+void RtlSdrStreamParams::add_options(argparse::ArgumentParser& cmd) {
+    cmd.add_description("Stream from a live RTL-SDR.");
+    cmd.add_argument("--device").scan<'d', int>().default_value(0).help("RTL-SDR device index");
+    cmd.add_argument("--gain").scan<'g', double>().default_value(-1.0).help(
+        "tuner gain in dB, or negative for auto gain");
+    cmd.add_argument("--buf-num").scan<'u', uint32_t>().help(
+        "number of librtlsdr async transfer buffers in flight (default: librtlsdr's, 15)");
+    cmd.add_argument("--buf-len").scan<'u', uint32_t>().help(
+        "librtlsdr async transfer buffer length in bytes, multiple of 512 (default: librtlsdr's, "
+        "16*32*512 = 262144 bytes, i.e. 131072 IQ sample pairs, ~54.6 ms at 2.4 Msps)");
+    cmd.add_argument("--rate").scan<'g', double>().default_value(2.4e6).help("sample rate in Hz");
+    cmd.add_argument("--freq").scan<'g', double>().default_value(1090e6).help("center frequency in Hz to tune to");
+}
+
+RtlSdrStreamParams RtlSdrStreamParams::from_options(const argparse::ArgumentParser& /*program*/,
+                                                    const argparse::ArgumentParser& cmd) {
+    return {
+        .tuning =
+            {
+                .device_index = cmd.get<int>("--device"),
+                .rate_hz = cmd.get<double>("--rate"),
+                .freq_hz = cmd.get<double>("--freq"),
+                .gain_db = cmd.get<double>("--gain"),
+            },
+        .buf_num = cmd.present<uint32_t>("--buf-num"),
+        .buf_len = cmd.present<uint32_t>("--buf-len"),
+    };
 }

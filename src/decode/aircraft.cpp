@@ -3,15 +3,20 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <numbers>
 #include <utility>
 
 #include <nlohmann/json.hpp>
 
-#include "common/constants.h"
+const AircraftState* AircraftTracker::find(uint32_t icao) const {
+    const auto it = m_table.find(icao);
+    return it == m_table.end() ? nullptr : &it->second;
+}
 
-std::unordered_map<uint32_t, AircraftState>& aircraft_table() {
-    static std::unordered_map<uint32_t, AircraftState> table;
-    return table;
+AircraftState& AircraftTracker::aircraft(uint32_t icao) {
+    AircraftState& ac = m_table[icao];
+    ac.icao = icao;
+    return ac;
 }
 
 namespace {
@@ -73,11 +78,11 @@ int cpr_nl(double lat) {
     if (lat == 87.0 || lat == -87.0) return 2;
     if (std::abs(lat) > 87.0) return 1;
     constexpr double kNz = 15.0;
-    double a = 1 - std::cos(kPi / (2 * kNz));
-    double b = std::cos(kPi / 180.0 * std::abs(lat));
+    double a = 1 - std::cos(std::numbers::pi / (2 * kNz));
+    double b = std::cos(std::numbers::pi / 180.0 * std::abs(lat));
     double val = 1 - a / (b * b);
     val = std::clamp(val, -1.0, 1.0);
-    return static_cast<int>(std::floor(2 * kPi / std::acos(val)));
+    return static_cast<int>(std::floor(2 * std::numbers::pi / std::acos(val)));
 }
 
 // Global CPR decode: resolves an unambiguous lat/lon from one even and one
@@ -197,7 +202,7 @@ void handle_ground_velocity(AircraftState& ac, uint64_t me56, int scale, bool& c
         int vx = static_cast<int>(ew_raw - 1) * scale * (ew_sign ? -1 : 1);
         int vy = static_cast<int>(ns_raw - 1) * scale * (ns_sign ? -1 : 1);
         double speed = std::sqrt(static_cast<double>(vx) * vx + static_cast<double>(vy) * vy);
-        double track = std::atan2(static_cast<double>(vx), static_cast<double>(vy)) * 180.0 / kPi;
+        double track = std::atan2(static_cast<double>(vx), static_cast<double>(vy)) * 180.0 / std::numbers::pi;
         if (track < 0) track += 360;
         if (!ac.ground_speed_kt || std::abs(*ac.ground_speed_kt - speed) > 0.05) {
             ac.ground_speed_kt = speed;

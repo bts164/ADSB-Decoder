@@ -3,7 +3,6 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
-#include <unordered_set>
 
 #include <nlohmann/json.hpp>
 
@@ -32,19 +31,6 @@ unsigned __int128 mode_s_crc(unsigned __int128 m) {
     return m;
 }
 
-// Frames confirmed by a CRC-valid DF11/17/18 (whose AA field is the ICAO
-// address in the clear) accumulate here, so later short replies (DF0/4/5/16/
-// 20/21, whose AP field is ICAO XOR parity rather than a plain ICAO) can be
-// validated against a previously-seen address -- same two-tier scheme as
-// adsb_detect.jl's known_icaos, but built up online as frames arrive rather
-// than in a separate first pass, since streaming mode has no "whole batch"
-// to pre-scan. A function-local static (rather than a variable threaded
-// through both call sites) since only compute_frame_view ever touches it.
-std::unordered_set<uint32_t>& known_icaos() {
-    static std::unordered_set<uint32_t> icaos;
-    return icaos;
-}
-
 // Single-bit error correction for 112-bit DF17/18: the CRC is linear, so a frame with bit i flipped
 // leaves remainder mode_s_crc(1 << (111 - i)) -- distinct for every i -- and looking the remainder up in
 // this table names the bit to flip back. The 5 DF bits are left out: flipping one changes the DF, so a
@@ -64,7 +50,7 @@ int single_bit_error(unsigned __int128 syndrome) {
 
 }  // namespace
 
-DecodedFrameView compute_frame_view(const AdsbFrame& f, double rate_hz) {
+DecodedFrameView compute_frame_view(const AdsbFrame& f, double rate_hz, std::unordered_set<uint32_t>& known_icaos) {
     uint64_t idx = f.sample_index;
 
     unsigned df = static_cast<unsigned>((f.payload >> 107) & 0x1F);
@@ -87,7 +73,7 @@ DecodedFrameView compute_frame_view(const AdsbFrame& f, double rate_hz) {
         if (crc_ok) {
             icao = aa_field;
             icao_known = true;
-            known_icaos().insert(icao);
+            known_icaos.insert(icao);
         }
     } else if (df == 17 || df == 18) {
         crc_ok = crc_val == 0;
@@ -102,13 +88,13 @@ DecodedFrameView compute_frame_view(const AdsbFrame& f, double rate_hz) {
         if (crc_ok) {
             icao = aa_field;
             icao_known = true;
-            known_icaos().insert(icao);
+            known_icaos.insert(icao);
         }
     } else if (df == 0 || df == 4 || df == 5 || df == 16 || df == 20 || df == 21 || df >= 24) {
         // AP field is ICAO XOR parity, not a plain address -- crc_val
         // *is* the ICAO here when it matches a previously confirmed one.
         uint32_t candidate = static_cast<uint32_t>(crc_val & 0xFFFFFF);
-        crc_ok = known_icaos().count(candidate) > 0;
+        crc_ok = known_icaos.contains(candidate);
         if (crc_ok) {
             icao = candidate;
             icao_known = true;

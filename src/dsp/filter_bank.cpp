@@ -6,14 +6,13 @@
 #include <cstdio>
 #include <fstream>
 #include <map>
+#include <numbers>
 #include <numeric>
 #include <sstream>
 #include <stdexcept>
 #include <xtensor/xbuilder.hpp>
 #include <xtensor/xmanipulation.hpp>
 #include <xtensor/xview.hpp>
-
-#include "common/constants.h"
 
 namespace {
 
@@ -67,9 +66,9 @@ double window_at(const FilterDesign& d, int k, int n) {
     if (n == 1) return 1.0;
     const double x = static_cast<double>(k) / (n - 1);
     switch (d.window) {
-        case FilterWindow::hann: return 0.5 * (1 - std::cos(2 * kPi * x));
-        case FilterWindow::hamming: return 0.54 - 0.46 * std::cos(2 * kPi * x);
-        case FilterWindow::blackman: return 0.42 - 0.5 * std::cos(2 * kPi * x) + 0.08 * std::cos(4 * kPi * x);
+        case FilterWindow::hann: return 0.5 * (1 - std::cos(2 * std::numbers::pi * x));
+        case FilterWindow::hamming: return 0.54 - 0.46 * std::cos(2 * std::numbers::pi * x);
+        case FilterWindow::blackman: return 0.42 - 0.5 * std::cos(2 * std::numbers::pi * x) + 0.08 * std::cos(4 * std::numbers::pi * x);
         case FilterWindow::kaiser: {
             const double r = 2 * x - 1;
             return std::cyl_bessel_i(0.0, d.kaiser_beta * std::sqrt(std::max(0.0, 1 - r * r))) /
@@ -121,7 +120,7 @@ FilterBank design_filter_bank(const FilterDesign& d, double input_rate_hz, doubl
     xt::xtensor<double, 1> lp = xt::empty<double>(std::array<size_t, 1>{static_cast<size_t>(n_lp)});
     for (int k = 0; k < n_lp; k++) {
         const double t = w * (k - (n_lp - 1) / 2.0);
-        const double sinc = t == 0 ? 1.0 : std::sin(kPi * t) / (kPi * t);
+        const double sinc = t == 0 ? 1.0 : std::sin(std::numbers::pi * t) / (std::numbers::pi * t);
         lp(static_cast<size_t>(k)) = w * sinc * window_at(d, k, n_lp);
     }
     xt::xtensor<double, 1> h = xt::zeros<double>({static_cast<size_t>(n)});

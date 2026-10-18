@@ -29,28 +29,28 @@ public:
      * @param level least severe message to write
      * @throws std::runtime_error if the file can't be opened
      */
-    FileLogSink(const std::string& path, absl::LogSeverityAtLeast level) : level_(level) {
-        file_ = std::fopen(path.c_str(), "a");
-        if (file_ == nullptr)
+    FileLogSink(const std::string& path, absl::LogSeverityAtLeast level) : m_level(level) {
+        m_file = std::fopen(path.c_str(), "a");
+        if (m_file == nullptr)
             throw std::runtime_error("cannot open log file " + path + ": " + std::strerror(errno));
         // Line buffered: each message is on disk when its statement returns, so the file is complete after
         // a crash and can be followed with `tail -f`.
-        std::setvbuf(file_, nullptr, _IOLBF, 0);
+        std::setvbuf(m_file, nullptr, _IOLBF, 0);
     }
-    ~FileLogSink() override { std::fclose(file_); }
+    ~FileLogSink() override { std::fclose(m_file); }
     FileLogSink(const FileLogSink&) = delete;
     FileLogSink& operator=(const FileLogSink&) = delete;
 
     // Called from whichever thread logs, possibly several at once. One fwrite per message keeps them from
     // interleaving: stdio locks the stream for the length of each call.
     void Send(const absl::LogEntry& entry) override {
-        if (entry.log_severity() < level_) return;
+        if (entry.log_severity() < m_level) return;
         const auto line = entry.text_message_with_prefix_and_newline();
-        std::fwrite(line.data(), 1, line.size(), file_);
+        std::fwrite(line.data(), 1, line.size(), m_file);
     }
-    void Flush() override { std::fflush(file_); }
+    void Flush() override { std::fflush(m_file); }
 
 private:
-    std::FILE* file_;
-    absl::LogSeverityAtLeast level_;
+    std::FILE* m_file;
+    absl::LogSeverityAtLeast m_level;
 };

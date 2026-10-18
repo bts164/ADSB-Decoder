@@ -6,14 +6,18 @@
 // `omp parallel for` before returning, so ISPCSync only frees ISPCAlloc memory.
 //
 // Team size = compute CPU count (see cpu_layout.h); the team's threads inherit
-// the launching (demod) thread's compute affinity mask. Tasks are handed to
+// the launching thread's affinity mask. Tasks are handed to
 // threads per OMP_SCHEDULE (libgomp default dynamic,1: each thread grabs the
 // next task when it finishes one), so launching more tasks than threads load
-// balances. adsb defaults OMP_WAIT_POLICY to passive (see main.cpp: libgomp's
-// default spin between launches burned ~5 cores on live input); override with
-// OMP_WAIT_POLICY / GOMP_SPINCOUNT. Each non-OpenMP thread that launches gets
+// balances. Nothing sets OMP_WAIT_POLICY: libgomp's default spins between
+// launches, which burned ~5 cores on live input, so a program that launches
+// per block should start with OMP_WAIT_POLICY=passive (it is read once, before
+// the first parallel region). Each non-OpenMP thread that launches gets
 // its own team, and a launch from inside a task runs its tasks on a single
 // thread (no nested parallelism).
+//
+// When the build has Tracy (TRACY_ENABLE, which comes with a coro built with tracing=tracy), each launch is
+// traced, and each task is named for its kernel (common/kernel_trace.h): see the `trace` namespace below.
 #include <omp.h>
 #if defined(__SANITIZE_THREAD__)
 #include <sanitizer/tsan_interface.h>
@@ -29,10 +33,21 @@
 #include <vector>
 
 #include "common/cpu_layout.h"
+#include "common/kernel_trace.h"
 #include "common/log.h"
 
+#ifdef TRACY_ENABLE
+#include <cstdio>
+#include <iterator>
+#include <optional>
+
+#include <tracy/Tracy.hpp>
+#endif
+
 namespace {
-// ADSB_TASKSYS_STATS=1: per-kernel launch/sync timing, logged at exit.
+// ADSB_TASKSYS_STATS=1: per-kernel launch/sync timing, logged at exit. No app launches ispc tasks now, so it is
+// in no app's --help or README section; an app that does again should list it in both, and log it. It is read
+// during static initialization, before logging starts, so logging it needs it read lazily first.
 struct Stats { long n=0; double span=0, wake=0, wake_n=0, tail=0, busy=0, first=0, ntasks=0, endspread=0; };
 inline int64_t now_ns(){ return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 const bool g_stats = std::getenv("ADSB_TASKSYS_STATS") != nullptr;
@@ -80,6 +95,101 @@ int team_size() {
 #define ADSB_TSAN_CHECKED
 #endif
 
+// Tracy zones for a launch. On the launching thread's row, `launch` spans the whole parallel region, fork to
+// join. On each team thread's row, `omp task` is one task, and `omp idle` is everything between that thread's
+// part of one launch and its part of the next: the wait at the join barrier, the sleep or spin between
+// launches, and the wake-up. So a team thread's start-up latency is the gap from the start of `launch` to the
+// end of its `omp idle`.
+//
+// libgomp has no hooks for any of this. `omp idle` works because a zone only has to begin and end on the same
+// thread, and nothing else opens a zone on a team thread between launches: the thread opens it as the last
+// thing it does in one region and closes it as the first thing it does in the next. The launching thread has
+// no idle zone; it is thread 0 of its own team and goes back to its caller.
+//
+// Inside `omp task`, a zone named for the kernel says what the task was: the task opens it by calling
+// adsb_trace_kernel() (common/kernel_trace.h), and its TaskZone closes it when the task function returns. Each
+// kernel has a location of its own, so Tracy's statistics and Find Zone keep the kernels apart. A launch from
+// inside a task runs its tasks on the same thread (see the top of this file), nested in the outer task's zones:
+// each TaskZone keeps the one it replaces in t_kernel and puts it back.
+namespace trace {
+#ifdef TRACY_ENABLE
+
+thread_local std::optional<tracy::ScopedZone> t_idle;
+thread_local bool t_named = false;
+
+constexpr tracy::SourceLocationData kLaunch{"launch", "ISPCLaunch", __FILE__, __LINE__, 0};
+constexpr tracy::SourceLocationData kTask{"omp task", "run_task", __FILE__, __LINE__, 0};
+constexpr tracy::SourceLocationData kIdle{"omp idle", "run_tasks", __FILE__, __LINE__, 0};
+
+// Indexed by the IDs in common/kernel_trace.h. The location is the kernel's task in its ispc file; no line.
+constexpr tracy::SourceLocationData kKernels[] = {
+    {"resample (f32)", "resample_task_f32", "dsp/kernels.ispc", 0, 0},
+    {"resample (i16be)", "resample_task_i16be", "dsp/kernels.ispc", 0, 0},
+    {"preamble", "preamble_task", "dsp/kernels.ispc", 0, 0},
+};
+static_assert(std::size(kKernels) == ADSB_KERNEL_COUNT, "a kernel in common/kernel_trace.h has no name here");
+
+// The running task's kernel zone, which adsb_trace_kernel() opens; null outside a task.
+thread_local std::optional<tracy::ScopedZone> *t_kernel = nullptr;
+
+struct LaunchZone {
+    explicit LaunchZone(int task_count) : zone(&kLaunch) { zone.Value(static_cast<uint64_t>(task_count)); }
+    tracy::ScopedZone zone;
+};
+
+struct TaskZone {
+    TaskZone() : zone(&kTask), outer(t_kernel) { t_kernel = &kernel; }
+    ~TaskZone() {
+        kernel.reset();  // before `zone`, which it is inside
+        t_kernel = outer;
+    }
+    TaskZone(const TaskZone &) = delete;
+    TaskZone &operator=(const TaskZone &) = delete;
+
+    tracy::ScopedZone zone;
+    std::optional<tracy::ScopedZone> kernel;
+    std::optional<tracy::ScopedZone> *outer;  // an enclosing task's kernel zone, if this one is nested in it
+};
+
+// Opens the running task's kernel zone; ignored outside a task, and if the task has already opened one.
+void kernel_zone(int kernel) {
+    if (t_kernel == nullptr || t_kernel->has_value() || kernel < 0 || kernel >= ADSB_KERNEL_COUNT) return;
+    t_kernel->emplace(&kKernels[kernel]);
+}
+
+// First thing a thread does in a parallel region.
+ADSB_TSAN_CHECKED void region_begin() {
+    const int thread = omp_get_thread_num();
+    if (thread == 0) return;
+    t_idle.reset();
+    if (!t_named) {
+        char name[32];
+        std::snprintf(name, sizeof(name), "omp-%d", thread);
+        tracy::SetThreadName(name);
+        t_named = true;
+    }
+}
+
+// Last thing a thread does in a parallel region, before the barrier that ends it.
+ADSB_TSAN_CHECKED void region_end() {
+    if (omp_get_thread_num() != 0) t_idle.emplace(&kIdle);
+}
+
+#else
+
+struct LaunchZone {
+    explicit LaunchZone(int) {}
+};
+struct TaskZone {
+    TaskZone() {}
+};
+inline void region_begin() {}
+inline void region_end() {}
+inline void kernel_zone(int) {}
+
+#endif
+}  // namespace trace
+
 // One ISPCLaunch call.
 struct Launch {
     TaskFuncPtr func;
@@ -98,6 +208,7 @@ struct LaunchTimes {
 // Kept out of run_tasks() so that it is checked by ThreadSanitizer as usual.
 ADSB_TSAN_CHECKED void run_task(const Launch &launch, LaunchTimes &times, int index) {
     const int thread_index = omp_get_thread_num();
+    trace::TaskZone zone;
     int64_t t0 = 0;
     if (g_stats) {
         t0 = now_ns();
@@ -127,12 +238,14 @@ ADSB_TSAN_UNCHECKED void run_tasks(const Launch &launch, LaunchTimes &times, int
 #pragma omp parallel num_threads(threads)
     {
         ADSB_TSAN_ACQUIRE(&forked);
+        trace::region_begin();
 // nowait: the end of the region is the one barrier, as in a combined `parallel for`.
 #pragma omp for schedule(runtime) nowait
         for (int index = 0; index < launch.task_count; index++) {
             run_task(launch, times, index);
         }
         ADSB_TSAN_RELEASE(&joined);
+        trace::region_end();
     }
     ADSB_TSAN_ACQUIRE(&joined);
 }
@@ -140,6 +253,8 @@ ADSB_TSAN_UNCHECKED void run_tasks(const Launch &launch, LaunchTimes &times, int
 }  // namespace
 
 extern "C" {
+
+void adsb_trace_kernel(int kernel) { trace::kernel_zone(kernel); }
 
 void *ISPCAlloc(void **handlePtr, int64_t size, int32_t alignment) {
     TaskGroup *group = group_of(handlePtr);
@@ -156,7 +271,10 @@ void ISPCLaunch(void **handlePtr, void *f, void *data, int count0, int count1, i
     const int task_count = launch.task_count;
     const int64_t launch_ns = launch.launch_ns;
     LaunchTimes times;
-    run_tasks(launch, times, std::min(task_count, team_size()));
+    {
+        trace::LaunchZone zone(task_count);
+        run_tasks(launch, times, std::min(task_count, team_size()));
+    }
     auto &[first_start, last_end, busy, wake_sum, first_end, wake_n] = times;
 
     if (g_stats) {

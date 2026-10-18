@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -8,6 +9,8 @@
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include <coro/coro.h>
 
 /**
  * @file
@@ -145,9 +148,10 @@ struct Config {
     bool record_transmissions = false;
 
     /**
-     * Threads the noise and quantization stage may use (>= 1); it is nearly all of the render time at output
-     * rates of 16 MHz and up. The output does not depend on it. More than one only pays off when generate()
-     * is called with at least a few thousand samples per thread: see Simulator::block_samples().
+     * Threads the noise and quantization stage may use (>= 1): coro::parallel() parts in generate(). It is
+     * nearly all of the render time at output rates of 16 MHz and up. The output does not depend on it. More
+     * than one only pays off when generate() is called with at least a few thousand samples per thread: see
+     * Simulator::block_samples().
      */
     unsigned render_threads = 1;
 };
@@ -169,10 +173,24 @@ public:
     Simulator& operator=(const Simulator&) = delete;
 
     /**
-     * Fills `iq` with the next iq.size()/2 complex samples as interleaved int16 I,Q (host byte order).
-     * The size must be even.
+     * Fills the spans of `iq`, in order, with the next complex samples as interleaved int16 I,Q, each in byte
+     * order `order` (std::endian::big for a wire format, at no extra cost). They get the same samples as one
+     * span of their total size would, so a caller can render straight into scattered buffers such as packet
+     * payloads. Each span's size must be even and its data 4-byte aligned (an I,Q pair is one 32-bit store).
+     * The decimation filter and the noise stage run as one coro::parallel() call of up to
+     * Config::render_threads parts per block_samples(), so with more than one this belongs on a multi-threaded
+     * runtime. Only one call at a time; `iq`, the buffers it points to and the simulator must outlive the
+     * returned coroutine.
      */
-    void generate(std::span<int16_t> iq);
+    [[nodiscard]] coro::Coro<void> generate(std::span<const std::span<int16_t>> iq,
+                                            std::endian order = std::endian::native);
+
+    /**
+     * Moves past the next `n` samples without rendering them: the samples generated after it are the same as
+     * if those `n` had been generated and discarded, at a tiny fraction of the cost. For dropping samples a
+     * caller has fallen too far behind to deliver. Not while a generate() is in progress.
+     */
+    void skip(uint64_t n);
 
     /**
      * The most samples generate() renders in one piece (a longer call is rendered as several): the call size
@@ -180,10 +198,17 @@ public:
      */
     size_t block_samples() const;
 
+    /** Render rate / output rate in effect: Config::oversample, or the automatic choice when that is 0. */
+    unsigned oversample() const;
+
+    /** Taps of the receiver's anti-alias filter, at the render rate; 0 when it isn't applied (oversample() 1). */
+    size_t rx_filter_taps() const;
+
     /**
      * Transmissions recorded since the last call (Config::record_transmissions), in no particular order.
      * A transmission is recorded as soon as generate() first renders any part of it, so the last few may
-     * extend past the samples generated so far.
+     * extend past the samples generated so far. Transmissions in samples passed over by skip() are recorded
+     * too.
      */
     std::vector<Transmission> take_transmissions();
 

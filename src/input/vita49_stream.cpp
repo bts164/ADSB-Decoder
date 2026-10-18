@@ -11,6 +11,7 @@
 #include <string>
 #include <system_error>
 
+#include <argparse/argparse.hpp>
 #include <coro/coro.h>
 #include <coro/io/udp_socket.h>
 #include <coro/runtime/runtime.h>
@@ -20,14 +21,18 @@
 #include <xtensor/xtensor.hpp>
 
 #include "common/log.h"
+#include "common/trace.h"
 #include "input/iq_block_chunker.h"
-#include "input/vrt_assembler.h"
+#include "vrt/assembler.h"
 
 namespace {
 
 constexpr size_t kMaxDatagramBytes = 65536;
 constexpr auto kPollInterval = std::chrono::milliseconds(250);  // how often to look at the idle state
-constexpr size_t kChannelBlocks = 8;
+constexpr size_t kChannelBlocks = (64*1024*1024) / (Vita49StreamParams::kChunkSamples * sizeof(int16_t) * 2);  // 64 MiB of blocks, enough for 1 s at 12 MHz
+// Recycled block buffers kept for reuse: one for each block the channel holds, plus the few held outside it (the
+// chunker's, the stitcher's, the demodulator's). A buffer beyond that is just freed.
+constexpr size_t kPoolBuffers = kChannelBlocks + 8;
 constexpr auto kStatusInterval = std::chrono::seconds(2);
 // How far below real time a window may run before it counts as slow: packets arrive in bursts, so a window
 // edge can fall mid-burst.
@@ -168,11 +173,10 @@ std::string InputStatus::describe() const {
 
 namespace {
 
-// Binds the socket and reads datagrams until the idle timeout, or until it is
-// cancelled because vita49_iq_stream() was dropped (Ctrl+C is handled in
-// main(), not here), cutting the assembled sample stream into guard-padded
-// IqBlocks. Owns `tx`, so the channel closes (ending the consumer's stream)
-// when this returns or throws.
+// Binds the socket and reads datagrams until the idle timeout, or until it is cancelled because
+// vita49_iq_stream() was dropped (Ctrl+C is handled in main(), not here), cutting the assembled sample stream
+// into guard-padded IqBlocks. Owns `tx`, so the channel closes (ending the consumer's stream) when this returns
+// or throws.
 coro::Coro<void> receive_loop(Vita49Options opts, coro::MpscSender<IqBlock> tx, IqPadding pad,
                               uint32_t chunk_samples) {
     auto sock = co_await coro::UdpSocket::bind(opts.bind_host, opts.port);
@@ -181,10 +185,16 @@ coro::Coro<void> receive_loop(Vita49Options opts, coro::MpscSender<IqBlock> tx, 
     LOGF(INFO, "listening for VRT/UDP on %s:%u at %g Hz (Ctrl+C to stop)", opts.bind_host, opts.port,
          opts.sample_rate_hz);
 
-    // Reordered, gap-filled samples land here (Assembler::drain() appends; see vrt_assembler.h's
+    // Reordered, gap-filled samples land here (Assembler::drain() appends; see vrt/assembler.h's
     // Sink concept), building chunk_samples-sized IqBlocks directly in place -- a completed block is
-    // moved straight out via pop() with no copy from an intermediate accumulator.
-    IqBlockChunker chunker(pad, chunk_samples);
+    // moved straight out via pop() with no copy from an intermediate accumulator. The blocks hold the
+    // packets' big-endian int16 as received; the resampler reads that format directly. Each block's buffer
+    // comes back through the pool when the consumer (or send_ready(), for a dropped block) is done with it, so
+    // in steady state no block allocates, and none page-faults as its fresh memory is first written.
+    auto [free_tx, free_rx] = coro::mpsc_channel<iq::SamplesVariant>(kPoolBuffers);
+    IqBlockChunker<iq::I16Be> chunker(pad, chunk_samples,
+                                      std::make_shared<coro::MpscSender<iq::SamplesVariant>>(std::move(free_tx)),
+                                      std::move(free_rx));
     uint64_t dropped_blocks = 0;
     InputMonitor monitor(opts.sample_rate_hz, opts.port);
     // Reported however the loop ends: on the idle timeout, or when this task is cancelled (the frame is
@@ -196,18 +206,39 @@ coro::Coro<void> receive_loop(Vita49Options opts, coro::MpscSender<IqBlock> tx, 
         ~Report() { report(assembler.stats(), dropped_blocks, monitor.total(assembler.stats())); }
     } final_report{assembler, dropped_blocks, monitor};
     auto send_ready = [&] {
+        TRACE_ZONE("vrt_send_ready");
         while (chunker.ready() > 0) {
             IqBlock block = chunker.pop();
             const size_t n = block.n;
             // Never block here: stalling would leave the socket unread and the kernel would drop packets anyway.
             if (!tx.try_send(std::move(block))) {
+                TRACE_MESSAGE("vrt block dropped: demodulator behind");
                 dropped_blocks++;
+                TRACE_PLOT("vrt blocks dropped", static_cast<int64_t>(dropped_blocks));
                 monitor.on_dropped(n);
             }
         }
     };
     bool was_ok = true;
+    // The kernel's drops (socket receive buffer full) per kPollInterval, plotted to line them up with the
+    // zones. Read here rather than on the tick: each select() polls recv first, so while this loop is behind
+    // and a datagram is always waiting, the tick never wins.
+    std::optional<uint64_t> plotted_kernel_drops;
+    std::chrono::steady_clock::time_point next_kernel_plot{};
     auto check_status = [&](std::chrono::steady_clock::time_point now) {
+        TRACE_ZONE("vrt_check_status");
+        if constexpr (trace::kEnabled) {
+            if (now >= next_kernel_plot) {
+                next_kernel_plot = now + kPollInterval;
+                if (const auto drops = kernel_udp_drops(opts.port)) {
+                    if (plotted_kernel_drops) {
+                        TRACE_PLOT("vrt kernel drops per 250 ms",
+                                   static_cast<int64_t>(*drops - *plotted_kernel_drops));
+                    }
+                    plotted_kernel_drops = drops;
+                }
+            }
+        }
         const auto status = monitor.poll(now, assembler.stats());
         if (!status) return;
         if (!status->ok()) {
@@ -219,8 +250,14 @@ coro::Coro<void> receive_loop(Vita49Options opts, coro::MpscSender<IqBlock> tx, 
         if (opts.on_status) opts.on_status(*status);
     };
     auto drain = [&](bool flush) {
-        assembler.drain(chunker, flush);
-        if (flush) chunker.flush();
+        {
+            TRACE_ZONE("Assembler::drain");
+            assembler.drain(chunker, flush);
+        }
+        if (flush) {
+            TRACE_ZONE("IqBlockChunker::flush");
+            chunker.flush();
+        }
         send_ready();
     };
 
@@ -242,7 +279,10 @@ coro::Coro<void> receive_loop(Vita49Options opts, coro::MpscSender<IqBlock> tx, 
     bool received = false;
     for (;;) {
         auto r = co_await coro::select(coro::ref(recv), coro::ref(tick));
+        // Zones from here to the end of the iteration only: none may span the co_await above. What a
+        // "task poll" zone of this task holds outside them is the select() and the recv syscalls.
         if (r.index() == 1) {
+            TRACE_ZONE("vrt_tick");
             tick = coro::sleep_for(kPollInterval);
             check_status(std::chrono::steady_clock::now());
             if (received && idle_timeout_s > 0 &&
@@ -252,17 +292,24 @@ coro::Coro<void> receive_loop(Vita49Options opts, coro::MpscSender<IqBlock> tx, 
             }
             continue;
         }
+        TRACE_ZONE("vrt_datagrams");
         auto& [n, buf, from, seg] = std::get<0>(r).value;
         bool data = false;
-        for (size_t off = 0; off < n; off += seg) {
-            data |= assembler.push(std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(buf.data()) + off,
-                                                            std::min(seg, n - off))) == vrt::Assembler::Kind::Data;
+        {
+            TRACE_ZONE("vrt_push_segments");
+            for (size_t off = 0; off < n; off += seg) {
+                data |= assembler.push(std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(buf.data()) + off,
+                                                                std::min(seg, n - off))) == vrt::Assembler::Kind::Data;
+            }
         }
         recv = sock.recv_segments_from(std::move(buf));
         if (data) {
             last_rx = std::chrono::steady_clock::now();
             received = true;
-            monitor.on_data(last_rx);
+            {
+                TRACE_ZONE("vrt_monitor_on_data");
+                monitor.on_data(last_rx);
+            }
             drain(false);
             check_status(last_rx);
         }
@@ -277,10 +324,42 @@ coro::CoroStream<IqBlock> vita49_iq_stream(Vita49Options opts, IqPadding pad, ui
     coro::MpscSender<IqBlock> tx = std::move(channel.first);
     coro::MpscReceiver<IqBlock> rx = std::move(channel.second);
 
-    auto receiver = coro::spawn(receive_loop(std::move(opts), std::move(tx), pad, chunk_samples));
+    auto task = coro::build_task()
+        .name("vita49_receive")
+        .spawn(receive_loop(std::move(opts), std::move(tx), pad, chunk_samples));
 
     while (auto block = co_await coro::next(rx)) {
         co_yield std::move(*block);
     }
-    co_await receiver;  // rethrows a receive_loop failure (a failed bind, or a sample-rate mismatch)
+    co_await task;  // rethrows a receive_loop failure (a failed bind, or a sample-rate mismatch)
+}
+
+void Vita49StreamParams::add_options(argparse::ArgumentParser& cmd) {
+    cmd.add_description("Receive a live VITA-49/VRT IQ stream over UDP (as sent by vita49_send).");
+    cmd.add_argument("--port").scan<'u', unsigned>().required().help("UDP port to receive VRT packets on");
+    cmd.add_argument("--bind").default_value(std::string("0.0.0.0")).help("address to bind");
+    cmd.add_argument("--stream-id").scan<'u', unsigned>().help(
+        "only accept this VRT stream id (default: the first one seen)");
+    cmd.add_argument("--idle-timeout").scan<'g', double>().default_value(2.0).help(
+        "stop after this many seconds without packets, once the first has arrived (0 = never)");
+    cmd.add_argument("--rate").scan<'g', double>().required().help(
+        "the sender's sample rate in Hz; an IF Context packet that gives a different one ends the stream");
+    cmd.add_argument("--freq").scan<'g', double>().default_value(1090e6).help(
+        "center frequency in Hz, used to label published spectrum frames");
+}
+
+Vita49StreamParams Vita49StreamParams::from_options(const argparse::ArgumentParser& /*program*/,
+                                                    const argparse::ArgumentParser& cmd) {
+    return {
+        .receiver =
+            {
+                .bind_host = cmd.get<std::string>("--bind"),
+                .port = static_cast<uint16_t>(cmd.get<unsigned>("--port")),
+                .sample_rate_hz = cmd.get<double>("--rate"),
+                .stream_id = cmd.present<unsigned>("--stream-id"),
+                .idle_timeout_s = cmd.get<double>("--idle-timeout"),
+                .on_status = {},
+            },
+        .freq_hz = cmd.get<double>("--freq"),
+    };
 }

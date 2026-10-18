@@ -10,6 +10,10 @@
 
 #include "dsp/iq_block.h"
 
+namespace argparse {
+class ArgumentParser;
+}
+
 /**
  * @file
  * `adsb vita49` source: receives a VITA-49 (VRT) IQ stream over UDP.
@@ -69,12 +73,22 @@ struct Vita49Options {
  * much was lost in transit or dropped. One that isn't ok() is printed to stderr as a warning, since the
  * decoded output alone gives no sign of it (a slow sender's timestamps still form a gap-free stream).
  * @param opts socket and stream settings
- * @param pad guard padding to allocate around each block (AdsbDemod::padding())
+ * @param pad guard padding to allocate around each block (demod_padding())
  * @param chunk_samples samples per block; the last block may be shorter
  * @throws std::runtime_error (when the stream is consumed) if the bind fails or the stream's IF Context
  *         packets advertise a different sample rate
  */
 coro::CoroStream<IqBlock> vita49_iq_stream(Vita49Options opts, IqPadding pad, uint32_t chunk_samples);
 
-/** Default block size, the same as kFileStreamChunkSamples. */
-constexpr uint32_t kVita49StreamChunkSamples = 128 * 1024;
+/** `adsb vita49`'s options. */
+struct Vita49StreamParams {
+    Vita49Options receiver;  /**< its on_status is for the caller to set */
+    double freq_hz;          /**< labels the published spectrum frames */
+
+    static void add_options(argparse::ArgumentParser& cmd);
+    static Vita49StreamParams from_options(const argparse::ArgumentParser& program,
+                                          const argparse::ArgumentParser& cmd);
+
+    /** Block size for vita49_iq_stream(), the same as FileStreamParams::kChunkSamples. */
+    static constexpr uint32_t kChunkSamples = 128 * 1024;
+};

@@ -5,6 +5,7 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -12,11 +13,13 @@
 
 #include <xtensor/xtensor.hpp>
 
+#include "vrt/format.h"
+
 /**
  * @file
  * Reorder and gap-fill logic for the VITA-49 (VRT) IQ stream vita49_send emits
- * (doc/design/vita49-format.md). Pure logic with no I/O, so it is unit-testable; vita49_stream.h wraps it
- * in a UDP source.
+ * (doc/design/vita49-format.md). Pure logic with no I/O, so it is unit-testable; input/vita49_stream.h wraps
+ * it in a UDP source.
  */
 
 namespace vrt {
@@ -24,16 +27,17 @@ namespace vrt {
 /**
  * What Assembler::drain() appends reordered, gap-filled samples into. Kept abstract (rather than a
  * concrete buffer type) so Assembler stays decoupled from buffer management: production code
- * (vita49_stream.cpp) drains into an IqBlockChunker (iq_block_chunker.h), which builds guard-padded
+ * (input/vita49_stream.cpp) drains into an IqBlockChunker (input/iq_block_chunker.h), which builds guard-padded
  * IqBlocks directly with no intermediate copy, while tests can drain into a trivial growable buffer.
  *
  * append_with(n, write) appends `n` samples by calling write(dst, offset), possibly several times, to
- * have the samples starting at `offset` of them written straight into `dst`, the interleaved I/Q floats
- * of dst.size() / 2 samples: Assembler converts each packet's big-endian int16 payload directly into
- * the sink's storage, with no intermediate buffer.
+ * have the samples starting at `offset` of them written straight into `dst`, the interleaved I/Q
+ * components of dst.size() / 2 samples. The components are int16 exactly as the packet carries them,
+ * big-endian (iq::I16Be in dsp/iq_format.h): Assembler copies each payload into the sink's storage
+ * unconverted, and whoever reads the samples does the byte swap.
  */
 template<typename S>
-concept Sink = requires(S& s, size_t n, void (*write)(std::span<float> dst, size_t offset)) {
+concept Sink = requires(S& s, size_t n, void (*write)(std::span<int16_t> dst, size_t offset)) {
     s.append_zeros(n);
     s.append_with(n, write);
 };
@@ -95,7 +99,7 @@ public:
 
     /**
      * Appends the samples of every packet that has left the reorder window (all of them if `flush`) to
-     * `out`, scaled to [-1, 1), in timestamp order, with gaps zero-filled.
+     * `out`, as received (big-endian int16), in timestamp order, with gaps zero-filled.
      */
     template<Sink S>
     void drain(S& out, bool flush);
@@ -103,21 +107,23 @@ public:
     const Stats& stats() const { return m_stats; }
 
 private:
-    struct Timestamp {
-        uint64_t sec;
-        uint64_t ps;
-    };
+    // One queued data packet. Its payload stays in m_payloads and only this small record sits in the
+    // m_pending heap: every heap operation moves a few of these, and at several hundred thousand packets
+    // a second moving the payload's xtensor (its shape and strides, besides the buffer pointer) with each
+    // one was a measurable share of the receive thread.
     struct Pending {
         Timestamp ts;
         uint64_t seq;
-        xt::xtensor<uint8_t, 1> payload;  // interleaved I, Q as received: big-endian int16
+        uint32_t slot;  // index of the packet's payload in m_payloads
     };
     template<Sink S>
     void write(const Pending& p, S& out);
-    // Heap order for m_pending (earliest timestamp on top).
-    static bool later(const Pending& a, const Pending& b);
-
-    static constexpr int64_t kPsPerSec = 1'000'000'000'000;
+    // Heap order for m_pending (earliest timestamp on top). Defined here so the heap algorithms inline it.
+    static bool later(const Pending& a, const Pending& b) {
+        if (a.ts.sec != b.ts.sec) return a.ts.sec > b.ts.sec;
+        if (a.ts.ps != b.ts.ps) return a.ts.ps > b.ts.ps;
+        return a.seq > b.seq;
+    }
 
     Options m_opts;
     std::optional<double> m_rate_hz;
@@ -129,19 +135,21 @@ private:
     int64_t m_base_index = 0;
     int64_t m_next_index = 0;  // index of the next sample to emit
     Stats m_stats;
-    // Payload buffers of packets already written, reused by push() so steady state allocates nothing
-    // per packet. Holds at most the largest number of packets ever pending at once.
-    std::vector<xt::xtensor<uint8_t, 1>> m_spare;
+    // Payload of each pending packet, at Pending::slot: interleaved I, Q as received (big-endian int16).
+    // A slot's buffer is reused by later packets, so steady state allocates nothing per packet. Grows to
+    // the largest number of packets ever pending at once.
+    std::vector<xt::xtensor<uint8_t, 1>> m_payloads;
+    std::vector<uint32_t> m_free_slots;  // slots of m_payloads no pending packet uses
 };
 
 template<Sink S>
 void Assembler::drain(S& out, bool flush) {
     while (!m_pending.empty() && (flush || m_pending.size() > m_opts.reorder_window)) {
         std::pop_heap(m_pending.begin(), m_pending.end(), later);
-        Pending p = std::move(m_pending.back());
+        const Pending p = m_pending.back();
         m_pending.pop_back();
         write(p, out);
-        m_spare.push_back(std::move(p.payload));
+        m_free_slots.push_back(p.slot);
     }
 }
 
@@ -149,17 +157,19 @@ template<Sink S>
 void Assembler::write(const Pending& p, S& out) {
     const auto rate = static_cast<int64_t>(std::llround(*m_rate_hz));
     const auto max_gap = static_cast<__int128>(m_opts.max_gap_s * static_cast<double>(rate));
-    const size_t n = p.payload.size() / 4;
+    const xt::xtensor<uint8_t, 1>& bytes = m_payloads[p.slot];
+    const size_t n = bytes.size() / 4;
 
     if (!m_base_ts) {
         m_base_ts = p.ts;
         m_base_index = m_next_index;
     }
     auto index_of = [&](const Timestamp& ts) {
+        constexpr auto kPs = static_cast<__int128>(kPsPerSec);
         const __int128 dsec = static_cast<__int128>(ts.sec) - static_cast<__int128>(m_base_ts->sec);
-        const __int128 dps = dsec * kPsPerSec + (static_cast<__int128>(ts.ps) - static_cast<__int128>(m_base_ts->ps));
-        const __int128 num = dps * rate + kPsPerSec / 2;
-        const __int128 whole = num >= 0 ? num / kPsPerSec : -((-num + kPsPerSec - 1) / kPsPerSec);  // floor
+        const __int128 dps = dsec * kPs + (static_cast<__int128>(ts.ps) - static_cast<__int128>(m_base_ts->ps));
+        const __int128 num = dps * rate + kPs / 2;
+        const __int128 whole = num >= 0 ? num / kPs : -((-num + kPs - 1) / kPs);  // floor
         return static_cast<__int128>(m_base_index) + whole;
     };
 
@@ -181,20 +191,12 @@ void Assembler::write(const Pending& p, S& out) {
         m_next_index += gap;
     }
 
-    // Byte-swap, convert and scale in one pass, straight into the sink.
-    const std::span<const uint8_t> payload(p.payload.data(), p.payload.size());
-    out.append_with(n, [payload](std::span<float> dst, size_t offset) {
-        constexpr float kScale = 1.0f / 32768.0f;
-        // Two payload bytes per float written; checked once here, then the loop runs on a raw pointer.
-        if (4 * offset > payload.size() || 2 * dst.size() > payload.size() - 4 * offset)
+    // The payload goes into the sink as it is: one copy, with the conversion left to the resampler.
+    const std::span<const uint8_t> payload(bytes.data(), bytes.size());
+    out.append_with(n, [payload](std::span<int16_t> dst, size_t offset) {
+        if (4 * offset > payload.size() || dst.size_bytes() > payload.size() - 4 * offset)
             throw std::out_of_range("vrt::Assembler: sink asked for samples past the packet's payload");
-        const uint8_t* s = payload.data() + 4 * offset;
-        for (size_t i = 0; i < dst.size(); i += 2, s += 4) {
-            const auto re = static_cast<int16_t>((uint16_t{s[0]} << 8) | s[1]);
-            const auto im = static_cast<int16_t>((uint16_t{s[2]} << 8) | s[3]);
-            dst[i] = static_cast<float>(re) * kScale;
-            dst[i + 1] = static_cast<float>(im) * kScale;
-        }
+        std::memcpy(dst.data(), payload.data() + 4 * offset, dst.size_bytes());
     });
     m_next_index += static_cast<int64_t>(n);
     m_stats.samples_received += n;

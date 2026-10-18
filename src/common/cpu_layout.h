@@ -8,6 +8,9 @@
  * packet handling. The remaining "compute" CPUs run the demod thread and the OpenMP team it creates for
  * ispc tasks, which inherits its mask. Compute threads are only restricted to a mask, not pinned
  * one-to-one, so the OS can still balance them around other load. `ADSB_PIN=0` disables the split.
+ *
+ * No app uses this now, so `ADSB_PIN` is in no app's `--help` or README section. An app that uses it again
+ * should list it in both, and log it where it is read.
  */
 
 namespace adsb::cpu_layout {

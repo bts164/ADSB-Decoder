@@ -14,16 +14,18 @@
         }                                                                    \
     } while (0)
 
+namespace {
+
 using V = std::vector<int>;
 
-static V pick(const std::vector<float>& s, float min, int r) {
+V pick(const std::vector<float>& s, float min, int r) {
     const auto picks = select_preamble_peaks(s, min, r);
     return V(picks.begin(), picks.end());
 }
 
 // A weak ripple ahead of the true peak (the failure mode that motivated this)
 // must not win, however close to the threshold crossing it is.
-static void test_ripple_before_peak() {
+void test_ripple_before_peak() {
     std::vector<float> s(200, 0.f);
     s[50] = 8;  // ripple, crosses threshold first
     s[92] = 48; // true peak
@@ -34,7 +36,7 @@ static void test_ripple_before_peak() {
     CHECK(pick(s, 5, 100) == V{92});
 }
 
-static void test_separate_frames() {
+void test_separate_frames() {
     std::vector<float> s(1000, 0.f);
     s[100] = 10;
     s[500] = 30;
@@ -51,7 +53,7 @@ static void test_separate_frames() {
 
 // The strongest wins even when weaker neighbours are on both sides and a
 // chain (a excludes b, b would have excluded c) is involved.
-static void test_greedy_chain() {
+void test_greedy_chain() {
     std::vector<float> s(400, 0.f);
     s[100] = 10;
     s[180] = 30;
@@ -62,7 +64,7 @@ static void test_greedy_chain() {
     CHECK(pick(s, 5, 70) == (V{100, 180, 260}));
 }
 
-static void test_threshold_ties_edges() {
+void test_threshold_ties_edges() {
     std::vector<float> s(50, 0.f);
     CHECK(pick(s, 1, 10).empty());
     s[0] = 3;
@@ -73,6 +75,8 @@ static void test_threshold_ties_edges() {
     CHECK(pick(s, 3, 10) == (V{0, 49}));  // 0 and 5 tie: lower index wins, 5 excluded
     CHECK(select_preamble_peaks({}, 1, 10).size() == 0);
 }
+
+}  // namespace
 
 int main() {
     test_ripple_before_peak();

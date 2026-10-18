@@ -1,5 +1,7 @@
 // Tests for BlockStitcher: each block's guard padding is filled from its neighbors, as if the stream were one
 // array, but only across contiguous blocks.
+#include <bit>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
@@ -14,25 +16,29 @@
         }                                                                    \
     } while (0)
 
+namespace {
+
 constexpr IqPadding kPad{3, 4};
 
-// A block of n samples whose values are their stream indices (+1, so 0 means "padding left zero").
-static IqBlock ramp(size_t n, uint64_t start) {
-    IqBlock b = IqBlock::zeroed(kPad, n, start);
-    for (size_t i = 0; i < n; i++) b.iq()[2 * i] = static_cast<float>(start + i + 1);
+// A block of n samples in format F whose values are their stream indices (+1, so 0 means "padding left zero").
+template<class F = iq::F32>
+IqBlock ramp(size_t n, uint64_t start) {
+    IqBlock b = IqBlock::zeroed<F>(kPad, n, start);
+    for (size_t i = 0; i < n; i++) b.iq<F>()[2 * i] = static_cast<typename F::Sample>(start + i + 1);
     return b;
 }
 
 // The whole buffer, lead through trail, as the stream values it holds (0 where the padding stayed zero).
-static std::vector<int> contents(const IqBlock& b) {
+template<class F = iq::F32>
+std::vector<int> contents(const IqBlock& b) {
     std::vector<int> v;
-    for (size_t i = 0; i < b.total(); i++) v.push_back(static_cast<int>(b.samples(i, 0)));
+    for (size_t i = 0; i < b.total(); i++) v.push_back(static_cast<int>(b.padded<F>()[2 * i]));
     return v;
 }
 
 using V = std::vector<int>;
 
-static void test_contiguous() {
+void test_contiguous() {
     BlockStitcher st;
     CHECK(!st.push(ramp(5, 0)));
     auto a = st.push(ramp(5, 5));
@@ -47,7 +53,7 @@ static void test_contiguous() {
 
 // A block shorter than the lead: the next block's lead reaches back through it into the one before, and it
 // fills only part of the previous block's trail.
-static void test_short_block() {
+void test_short_block() {
     BlockStitcher st;
     st.push(ramp(6, 0));
     auto a = st.push(ramp(2, 6));
@@ -59,7 +65,7 @@ static void test_short_block() {
 }
 
 // A gap (e.g. a dropped block) leaves the padding on both sides of it zero.
-static void test_gap() {
+void test_gap() {
     BlockStitcher st;
     st.push(ramp(5, 0));
     auto a = st.push(ramp(5, 10));
@@ -68,9 +74,54 @@ static void test_gap() {
     CHECK(contents(*b) == (V{0, 0, 0, 11, 12, 13, 14, 15, 0, 0, 0, 0}));
 }
 
+// Blocks are stitched in whatever format they hold, as raw stored values with no conversion.
+void test_other_format() {
+    BlockStitcher st;
+    st.push(ramp<iq::I16Be>(5, 0));
+    auto a = st.push(ramp<iq::I16Be>(5, 5));
+    CHECK(a && a->holds<iq::I16Be>());
+    CHECK(contents<iq::I16Be>(*a) == (V{0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9}));
+    auto b = st.flush();
+    CHECK(contents<iq::I16Be>(*b) == (V{3, 4, 5, 6, 7, 8, 9, 10, 0, 0, 0, 0}));
+}
+
+// A change of format between contiguous blocks is treated like a gap.
+void test_format_change() {
+    BlockStitcher st;
+    st.push(ramp<iq::F32>(5, 0));
+    auto a = st.push(ramp<iq::I16Be>(5, 5));
+    CHECK(contents<iq::F32>(*a) == (V{0, 0, 0, 1, 2, 3, 4, 5, 0, 0, 0, 0}));
+    auto b = st.flush();
+    CHECK(contents<iq::I16Be>(*b) == (V{0, 0, 0, 6, 7, 8, 9, 10, 0, 0, 0, 0}));
+}
+
+// to_float() gives every format's samples scaled to [-1, 1]; I16Be's are stored byte-swapped.
+void test_to_float() {
+    IqBlock f = IqBlock::zeroed<iq::F32>(kPad, 2, 0);
+    f.iq<iq::F32>()[0] = 0.25f;
+    f.iq<iq::F32>()[3] = -0.5f;
+    IqBlock w = IqBlock::zeroed<iq::I16Be>(kPad, 2, 0);
+    // 0.25 and -0.5 of full scale are 0x2000 and 0xC000, whose bytes swapped are 0x0020 and 0x00C0.
+    w.iq<iq::I16Be>()[0] = std::endian::native == std::endian::little ? int16_t{0x0020} : int16_t{0x2000};
+    w.iq<iq::I16Be>()[3] = std::endian::native == std::endian::little ? int16_t{0x00C0} : static_cast<int16_t>(0xC000);
+    for (const IqBlock* b : {&f, &w}) {
+        std::vector<float> out(2 * b->total());
+        b->to_float(0, out);
+        std::vector<float> want(out.size(), 0.0f);
+        want[2 * kPad.lead] = 0.25f;
+        want[2 * kPad.lead + 3] = -0.5f;
+        CHECK(out == want);
+    }
+}
+
+}  // namespace
+
 int main() {
     test_contiguous();
     test_short_block();
     test_gap();
+    test_other_format();
+    test_format_change();
+    test_to_float();
     std::puts("block_stitcher_test: all passed");
 }

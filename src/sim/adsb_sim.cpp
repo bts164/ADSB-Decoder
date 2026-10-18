@@ -4,19 +4,24 @@
 #include <bit>
 #include <cassert>
 #include <cmath>
+#include <cstdint>
 #include <fstream>
+#include <numbers>
 #include <set>
 #include <span>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
+#include <coro/task/parallel.h>
 #include <nlohmann/json.hpp>
 #include <xtensor/xmath.hpp>
 #include <xtensor/xtensor.hpp>
 
-#include "common/constants.h"
+#include "common/trace.h"
+
 #include "sim_kernels_ispc.h"
 
 namespace adsb_sim {
@@ -58,9 +63,9 @@ int cpr_nl(double lat) {
     if (lat == 0) return 59;
     if (lat == 87.0) return 2;
     if (lat > 87.0) return 1;
-    const double a = 1 - std::cos(kPi / 30.0);
-    const double b = std::cos(kPi / 180.0 * lat);
-    return static_cast<int>(std::floor(2 * kPi / std::acos(1 - a / (b * b))));
+    const double a = 1 - std::cos(std::numbers::pi / 30.0);
+    const double b = std::cos(std::numbers::pi / 180.0 * lat);
+    return static_cast<int>(std::floor(2 * std::numbers::pi / std::acos(1 - a / (b * b))));
 }
 
 // --- Deterministic RNG --------------------------------------------------
@@ -101,7 +106,7 @@ public:
     // One complex Gaussian sample, each of I and Q ~ N(0, sigma^2) (Box-Muller).
     void gaussian_pair(double sigma, double& i, double& q) {
         const double r = sigma * std::sqrt(-2.0 * std::log(1.0 - uniform()));
-        const double theta = 2.0 * kPi * uniform();
+        const double theta = 2.0 * std::numbers::pi * uniform();
         i = r * std::cos(theta);
         q = r * std::sin(theta);
     }
@@ -125,13 +130,13 @@ struct Kinematics {
 };
 
 Kinematics kinematics_at(const AircraftSpec& a, double t_s) {
-    const double track = a.track_deg * kPi / 180.0;
+    const double track = a.track_deg * std::numbers::pi / 180.0;
     const double east_kt = a.ground_speed_kt * std::sin(track);
     const double north_kt = a.ground_speed_kt * std::cos(track);
     // 1 kt = 1 nmi/h and 1 nmi = 1 arcminute of latitude.
     const double deg_per_s_per_kt = 1.0 / (kSecondsPerHour * kArcminPerDegree);
     const double lat = a.lat_deg + north_kt * t_s * deg_per_s_per_kt;
-    const double lon = a.lon_deg + east_kt * t_s * deg_per_s_per_kt / std::cos(a.lat_deg * kPi / 180.0);
+    const double lon = a.lon_deg + east_kt * t_s * deg_per_s_per_kt / std::cos(a.lat_deg * std::numbers::pi / 180.0);
     const int alt = std::clamp(a.alt_ft + static_cast<int>(std::lround(a.vrate_fpm * t_s / 60.0)), -1000, kMaxAltFt);
     return {lat, lon, alt, east_kt, north_kt};
 }
@@ -159,6 +164,8 @@ constexpr uint64_t kChipsPerSecond = 2'000'000;  // 0.5 us chips
 constexpr unsigned kMaxChips = kPreambleChips + 2 * 112;
 // generate() renders at most this many output samples at a time, per render thread.
 constexpr size_t kSubBlockSamples = 32768;
+// A generate() part is worth its wake-up only with at least this many samples to do (~13 us of work).
+constexpr size_t kMinPartSamples = 8192;
 constexpr double kBaseAmplitude = 0.5 * 32767.0;  // strongest aircraft, int16 counts
 
 constexpr uint32_t kMinSampleRateHz = 2'000'000;  // one 0.5 us PPM chip must span >= 1 sample
@@ -353,7 +360,7 @@ xt::xtensor<double, 1> design_lowpass(unsigned half, double cutoff) {
     double sum = 0;
     for (int m = -static_cast<int>(half); m <= static_cast<int>(half); m++) {
         const double x = 2.0 * cutoff * m;
-        const double sinc = m == 0 ? 1.0 : std::sin(kPi * x) / (kPi * x);
+        const double sinc = m == 0 ? 1.0 : std::sin(std::numbers::pi * x) / (std::numbers::pi * x);
         const double r = static_cast<double>(m) / half;
         const double window = bessel_i0(kKaiserBeta * std::sqrt(std::max(0.0, 1.0 - r * r))) / i0_beta;
         taps[m + half] = 2.0 * cutoff * sinc * window;
@@ -406,7 +413,7 @@ struct Simulator::Impl {
     xt::xtensor<float, 1> xi, xq;   // render-rate window
     xt::xtensor<uint8_t, 1> dirty;  // per output sample: window contains signal
     xt::xtensor<float, 1> si, sq;   // FIR output per output sample (only used when half_taps > 0)
-    // [from, to] index ranges of xi/xq the current block's pulses were added to: all that generate_block has
+    // [from, to] index ranges of xi/xq the current block's pulses were added to: all that end_block has
     // to clear afterwards. Pulses are sparse, so this is far less than zeroing the whole window per block.
     std::vector<std::pair<size_t, size_t>> touched;
     uint64_t noise_key;          // see sim_kernels.ispc: noise is a pure function of (key, sample index)
@@ -414,9 +421,25 @@ struct Simulator::Impl {
     uint64_t next_sample = 0;
 
     size_t block_samples;  // generate() renders at most this many output samples at a time
+    std::vector<size_t> span_starts;  // generate()'s: where each span starts, in samples from the call's start
     int render_threads;
 
-    void generate_block(std::span<int16_t> iq);  // iq.size() <= 2 * block_samples
+    // One piece of generate(), n <= block_samples output samples from next_sample on, in
+    // three steps: begin_block renders the transmissions into xi/xq; filter_range (outputs [first, last),
+    // any split) leaves the signal at the output rate in signal_i/signal_q, for the noise stage to add to;
+    // end_block clears up and moves on to the next piece.
+    void begin_block(size_t n);
+    void filter_range(size_t first, size_t last);
+    void end_block(size_t n);
+    // The transmission-list half of begin_block and end_block, shared with skip(): admit_tx creates every
+    // transmission a window ending at render sample `hi` can reach; retire_tx drops those no window from
+    // output sample `s1` on can reach.
+    void admit_tx(int64_t hi);
+    void retire_tx(uint64_t s1);
+    // The signal per output sample: the render buffer itself at render rate == output rate, else its
+    // anti-alias-filtered, decimated version (left zero where the window has no pulse).
+    const float* signal_i() const { return half_taps ? si.data() : xi.data(); }
+    const float* signal_q() const { return half_taps ? sq.data() : xq.data(); }
 
     explicit Impl(const Config& c) : cfg(c) {
         if (cfg.sample_rate_hz < kMinSampleRateHz)
@@ -439,7 +462,7 @@ struct Simulator::Impl {
         render_threads = static_cast<int>(cfg.render_threads);
         block_samples = kSubBlockSamples * cfg.render_threads;
         const size_t max_window = (block_samples - 1) * oversample + 2 * half_taps + 1;
-        // Zero between blocks: generate_block clears what it wrote (see `touched`).
+        // Zero between blocks: end_block clears what it wrote (see `touched`).
         xi = xt::zeros<float>({max_window});
         xq = xt::zeros<float>({max_window});
         dirty = xt::xtensor<uint8_t, 1>::from_shape({block_samples});
@@ -460,7 +483,7 @@ struct Simulator::Impl {
         phase_sin = xt::xtensor<double, 1>::from_shape({aircraft.size()});
         Rng phase_rng(cfg.seed, 1);
         for (size_t a = 0; a < aircraft.size(); a++) {
-            const double phase = 2.0 * kPi * phase_rng.uniform();
+            const double phase = 2.0 * std::numbers::pi * phase_rng.uniform();
             phase_cos[a] = std::cos(phase);
             phase_sin[a] = std::sin(phase);
             for (const auto& sched : kSchedules) {
@@ -573,25 +596,62 @@ Simulator::~Simulator() = default;
 std::vector<Transmission> Simulator::take_transmissions() { return std::exchange(m_impl->recorded, {}); }
 
 size_t Simulator::block_samples() const { return m_impl->block_samples; }
+unsigned Simulator::oversample() const { return m_impl->oversample; }
+size_t Simulator::rx_filter_taps() const { return m_impl->taps.size(); }
 
-void Simulator::generate(std::span<int16_t> iq) {
-    // Work in cache-sized pieces: the render buffers are two floats per sample, so an unbounded call
-    // would stream tens of MB through memory several times (measured: ~335 Msps at 2M samples per call
-    // vs ~480 Msps in pieces). The output is chunk-independent, so this changes nothing but speed. A piece
-    // is one cache-sized share per render thread: the threads split the noise stage, a fork-join per piece
-    // (see sim_kernels.ispc), which costs a wake-up that a larger piece spreads over more samples.
-    assert(iq.size() % 2 == 0);
-    const size_t n = iq.size() / 2;
+static_assert(std::endian::native == std::endian::little, "sim_finish_range packs (I, Q) int16 pairs little-endian");
+
+// Works in cache-sized pieces: the render buffers are two floats per sample, so an unbounded call would
+// stream tens of MB through memory several times (measured: ~335 Msps at 2M samples per call vs ~480 Msps in
+// pieces). The output is chunk-independent, so this changes nothing but speed. A piece is one cache-sized
+// share per render thread: the threads split the noise stage, a fork-join per piece, which costs a wake-up
+// that a larger piece spreads over more samples.
+coro::Coro<void> Simulator::generate(std::span<const std::span<int16_t>> iq, std::endian order) {
+    Impl& d = *m_impl;
+    const bool big_endian = order == std::endian::big;
+    const auto sigma = static_cast<float>(d.noise_sigma);
+    std::vector<size_t>& starts = d.span_starts;
+    starts.clear();
+    size_t n = 0;
+    for (const std::span<int16_t> s : iq) {
+        assert(s.size() % 2 == 0 && reinterpret_cast<uintptr_t>(s.data()) % alignof(int32_t) == 0);
+        starts.push_back(n);
+        n += s.size() / 2;
+    }
     for (size_t done = 0; done < n;) {
-        const size_t len = std::min(n - done, m_impl->block_samples);
-        m_impl->generate_block(iq.subspan(2 * done, 2 * len));
+        const size_t len = std::min(n - done, d.block_samples);
+        d.begin_block(len);
+        // A part per render thread, each with at least kMinPartSamples to do, in multiples of 16 (a cache line
+        // of output, where the spans are aligned to one). Every output sample is independent from here on, so
+        // each part filters its own share too.
+        const size_t parts = std::clamp(len / kMinPartSamples, size_t{1}, static_cast<size_t>(d.render_threads));
+        const size_t chunk = ((len + parts - 1) / parts + 15) & ~size_t{15};
+        co_await coro::parallel(parts, [&](coro::TeamMember part) -> coro::Coro<void> {
+            TRACE_ZONE("sim_render_part");
+            const size_t lo = std::min(len, part.rank() * chunk);
+            const size_t hi = std::min(len, lo + chunk);
+            d.filter_range(lo, hi);
+            // The part's samples go to the span holding sample done + lo (the last to start at or before it;
+            // any empty spans before it start there too) and on through the spans after it.
+            size_t j = static_cast<size_t>(std::upper_bound(starts.begin(), starts.end(), done + lo) - starts.begin());
+            j--;
+            for (size_t k = lo; k < hi; j++) {
+                const size_t end = std::min(hi, starts[j] + iq[j].size() / 2 - done);
+                if (end == k) continue;  // an empty span
+                int32_t* out = reinterpret_cast<int32_t*>(iq[j].data()) + (done + k - starts[j]);
+                ispc::sim_finish_range(d.signal_i(), d.signal_q(), d.next_sample, d.noise_key, sigma,
+                                       static_cast<int>(k), static_cast<int>(end), big_endian, out);
+                k = end;
+            }
+            co_return;
+        });
+        d.end_block(len);
         done += len;
     }
 }
 
-void Simulator::Impl::generate_block(std::span<int16_t> iq) {
+void Simulator::Impl::begin_block(size_t n) {
     Impl& d = *this;
-    const size_t n = iq.size() / 2;
     const uint64_t s0 = d.next_sample;
     const uint64_t s1 = s0 + n;
     const int64_t N = d.oversample, M = d.half_taps;
@@ -602,60 +662,55 @@ void Simulator::Impl::generate_block(std::span<int16_t> iq) {
     const int64_t lo = static_cast<int64_t>(s0) * N - M;
     const int64_t hi = static_cast<int64_t>(s1 - 1) * N + M;
 
-    // Every transmission is created in the first call whose window can reach it, so ordering new ones by
-    // (start, emitter) keeps `active` -- and thus the float summation order at overlaps -- independent of
-    // the chunking.
-    std::vector<Tx> fresh;
-    for (size_t i = 0; i < d.emitters.size(); i++) {
-        while (static_cast<double>(d.emitters[i].next_start) * d.oversample - d.lead_h <= static_cast<double>(hi))
-            fresh.push_back(d.make_tx(i));
+    {
+        TRACE_ZONE("sim_admit_tx");
+        d.admit_tx(hi);
     }
-    std::sort(fresh.begin(), fresh.end(), [&](const auto& a, const auto& b) {
-        return a.start != b.start ? a.start < b.start : a.emitter < b.emitter;
-    });
-    d.active.insert(d.active.end(), std::make_move_iterator(fresh.begin()), std::make_move_iterator(fresh.end()));
 
     const auto window = static_cast<size_t>(hi - lo + 1);
     if (window > d.xi.size() || window > d.xq.size() || n > d.dirty.size())
         throw std::logic_error("Simulator: block larger than the render buffers");
-    std::fill_n(d.dirty.data(), n, uint8_t{0});
-    for (const auto& tx : d.active) d.add_tx(tx, lo, hi, n);
-
-    // Signal per output sample: the render buffer itself at render rate == output rate, else its
-    // anti-alias-filtered, decimated version (skipped, i.e. left zero, where the window has no pulse).
-    const float* sig_i = d.xi.data();
-    const float* sig_q = d.xq.data();
-    if (M != 0) {
-        float* out_i = d.si.data();
-        float* out_q = d.sq.data();
-        const float* tap = d.taps.data();
-        const size_t num_taps = d.taps.size();
-        const uint8_t* dirty = d.dirty.data();
-        // The loops below index raw pointers: output k reads render samples [k * N, k * N + num_taps), and
-        // xi/xq hold `window` of them (checked against their sizes above).
-        if (n > d.si.size() || n > d.sq.size() || (n > 0 && (n - 1) * static_cast<size_t>(N) + num_taps > window))
-            throw std::logic_error("Simulator: decimation filter would read or write past its buffers");
-        for (size_t k = 0; k < n; k++) {
-            if (!dirty[k]) {
-                out_i[k] = out_q[k] = 0.0f;
-                continue;
-            }
-            float acc_i = 0.0f, acc_q = 0.0f;
-            const float* pi = d.xi.data() + k * N;
-            const float* pq = d.xq.data() + k * N;
-            for (size_t j = 0; j < num_taps; j++) {
-                acc_i += tap[j] * pi[j];
-                acc_q += tap[j] * pq[j];
-            }
-            out_i[k] = acc_i;
-            out_q[k] = acc_q;
-        }
-        sig_i = d.si.data();
-        sig_q = d.sq.data();
+    {
+        TRACE_ZONE("sim_add_tx");  // sequential, before generate()'s parallel parts
+        std::fill_n(d.dirty.data(), n, uint8_t{0});
+        for (const auto& tx : d.active) d.add_tx(tx, lo, hi, n);
     }
-    static_assert(std::endian::native == std::endian::little, "sim_finish packs (I, Q) int16 pairs little-endian");
-    ispc::sim_finish(sig_i, sig_q, s0, d.noise_key, static_cast<float>(d.noise_sigma), static_cast<int>(n),
-                     reinterpret_cast<int32_t*>(iq.data()), d.render_threads);
+
+    // filter_range() indexes raw pointers: output k reads render samples [k * N, k * N + num_taps), and
+    // xi/xq hold `window` of them (checked against their sizes above).
+    if (M != 0 && (n > d.si.size() || n > d.sq.size() || (n > 0 && (n - 1) * static_cast<size_t>(N) + d.taps.size() > window)))
+        throw std::logic_error("Simulator: decimation filter would read or write past its buffers");
+}
+
+void Simulator::Impl::filter_range(size_t first, size_t last) {
+    if (half_taps == 0) return;
+    const size_t N = oversample;
+    float* out_i = si.data();
+    float* out_q = sq.data();
+    const float* tap = taps.data();
+    const size_t num_taps = taps.size();
+    const uint8_t* dirty_k = dirty.data();
+    for (size_t k = first; k < last; k++) {
+        if (!dirty_k[k]) {
+            out_i[k] = out_q[k] = 0.0f;
+            continue;
+        }
+        float acc_i = 0.0f, acc_q = 0.0f;
+        const float* pi = xi.data() + k * N;
+        const float* pq = xq.data() + k * N;
+        for (size_t j = 0; j < num_taps; j++) {
+            acc_i += tap[j] * pi[j];
+            acc_q += tap[j] * pq[j];
+        }
+        out_i[k] = acc_i;
+        out_q[k] = acc_q;
+    }
+}
+
+void Simulator::Impl::end_block(size_t n) {
+    TRACE_ZONE("sim_end_block");
+    Impl& d = *this;
+    const uint64_t s1 = d.next_sample + n;
 
     // Leave xi/xq all zero for the next block.
     for (const auto& [from, to] : d.touched) {
@@ -664,9 +719,43 @@ void Simulator::Impl::generate_block(std::span<int16_t> iq) {
     }
     d.touched.clear();
 
+    d.retire_tx(s1);
+    d.next_sample = s1;
+}
+
+void Simulator::Impl::admit_tx(int64_t hi) {
+    // Every transmission is created in the first call whose window can reach it, so ordering new ones by
+    // (start, emitter) keeps `active` -- and thus the float summation order at overlaps -- independent of
+    // the chunking.
+    std::vector<Tx> fresh;
+    for (size_t i = 0; i < emitters.size(); i++) {
+        while (static_cast<double>(emitters[i].next_start) * oversample - lead_h <= static_cast<double>(hi))
+            fresh.push_back(make_tx(i));
+    }
+    std::sort(fresh.begin(), fresh.end(), [&](const auto& a, const auto& b) {
+        return a.start != b.start ? a.start < b.start : a.emitter < b.emitter;
+    });
+    active.insert(active.end(), std::make_move_iterator(fresh.begin()), std::make_move_iterator(fresh.end()));
+}
+
+void Simulator::Impl::retire_tx(uint64_t s1) {
     // Keep a transmission until no later output sample's window can reach it.
+    const int64_t N = oversample, M = half_taps;
     const double next_lo = static_cast<double>(static_cast<int64_t>(s1) * N - M);
-    std::erase_if(d.active, [next_lo](const auto& tx) { return tx.support_end < next_lo; });
+    std::erase_if(active, [next_lo](const auto& tx) { return tx.support_end < next_lo; });
+}
+
+void Simulator::skip(uint64_t n) {
+    if (n == 0) return;
+    TRACE_ZONE("sim_skip");
+    Impl& d = *m_impl;
+    // What a block ending at the last skipped sample would leave behind, without rendering it. Each emitter
+    // still draws every transmission in the gap, in order, so its random stream stays in step; the window is
+    // re-rendered from the transmission list and the noise is a function of the sample index, so nothing
+    // else carries over.
+    const uint64_t s1 = d.next_sample + n;
+    d.admit_tx(static_cast<int64_t>(s1 - 1) * d.oversample + d.half_taps);
+    d.retire_tx(s1);
     d.next_sample = s1;
 }
 

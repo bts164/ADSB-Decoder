@@ -191,7 +191,7 @@ const categoryNames = {
 const emergencySquawks = {'7500': 'Hijack', '7600': 'Radio failure', '7700': 'Emergency'};
 
 /// The sky at one time, from the backend's history db (--history-db; see
-/// src/output/aircraft_history.h: aircraft_history_snapshot): every
+/// src/output/aircraft_history.h: AircraftHistory::snapshot): every
 /// aircraft updated in the ten minutes before `timeS`, with its state as of
 /// `timeS` and its track over those minutes.
 class AircraftSnapshot {

@@ -5,9 +5,9 @@ target_link_libraries(adsb_sim_test PRIVATE adsb_sim adsb_decode)
 target_compile_definitions(adsb_sim_test PRIVATE ADSB_SIM_SCENARIO_DIR="${PROJECT_SOURCE_DIR}/scenarios")
 add_test(NAME adsb_sim_test COMMAND adsb_sim_test)
 
-# vrt_assembler (the reorder/gap-fill core of `adsb vita49` input) tests.
+# vrt::Assembler (the reorder/gap-fill core of `adsb vita49` input) tests.
 add_executable(vita49_stream_test vita49_stream_test.cpp)
-target_link_libraries(vita49_stream_test PRIVATE adsb_input)
+target_link_libraries(vita49_stream_test PRIVATE adsb_vrt)
 add_test(NAME vita49_stream_test COMMAND vita49_stream_test)
 
 # IqBlockChunker (the accumulator backing vita49_stream's reorder-to-chunk pipeline) tests.
