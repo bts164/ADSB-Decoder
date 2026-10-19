@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:collection';
-import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
@@ -8,8 +7,10 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
-import 'package:web_socket_channel/web_socket_channel.dart';
 
+// Prefixed: the generated Error would hide dart:core's.
+import '../api/adsb/api/v1/api.pb.dart' as api;
+import '../api_client.dart';
 import '../lazy_table.dart';
 import '../models.dart';
 import '../painters.dart';
@@ -46,8 +47,12 @@ class _FrameTablePageState extends State<FrameTablePage> {
   // socket only, and "localhost" can resolve to ::1 first on Linux, which
   // fails to connect instead of falling back to the v4 address.
   final _urlController = TextEditingController(text: 'ws://127.0.0.1:8765');
-  WebSocketChannel? _channel;
-  StreamSubscription? _sub;
+  ApiClient? _client;
+  StreamSubscription<api.Update>? _updates;
+  // The spectrum call, in progress while the spectrum pane is shown and connected.
+  StreamSubscription<api.SpectrumRow>? _spectrum;
+  // Whether the last server connected to answers the spectrum call; the toggle is shown only if it does.
+  bool _spectrumAvailable = false;
   bool _connected = false;
   String? _error;
 
@@ -124,9 +129,9 @@ class _FrameTablePageState extends State<FrameTablePage> {
   // Every flush, for the "last seen" ago-labels, which advance even with no new data.
   final _clockTick = _Changed();
 
-  // History scrubbing, with the backend's --history-db. On connect the
-  // backend sends one snapshot of the recent sky, which backfills the live
-  // state and turns the scrubber on; after that it sends one per seek.
+  // History scrubbing, with the backend's --history-db. On connect a
+  // snapshot of the recent sky backfills the live state and turns the
+  // scrubber on; after that, each seek asks for one.
   bool _backfilled = false;
   // Span the scrubber covers (Unix s): the db's first update to the newest,
   // live ones included. Null without a history db.
@@ -224,7 +229,7 @@ class _FrameTablePageState extends State<FrameTablePage> {
 
   // Spectrum snapshots arrive far slower than frames (backend throttles to
   // one every 150ms regardless of sample rate -- see kSpectrumInterval in
-  // main.cpp), so unlike frames/aircraft these go straight into their own
+  // pipeline.cpp), so unlike frames/aircraft these go straight into their own
   // ValueNotifier on arrival instead of through the once-a-second
   // _flushUpdates batch: only the waterfall widget listening to it repaints,
   // not the whole page, and at ~7Hz that's cheap either way.
@@ -252,8 +257,9 @@ class _FrameTablePageState extends State<FrameTablePage> {
     _uiUpdateTimer?.cancel();
     _activityTimer?.cancel();
     _heatmapDebounce?.cancel();
-    _sub?.cancel();
-    _channel?.sink.close();
+    _updates?.cancel();
+    _spectrum?.cancel();
+    _client?.close();
     _urlController.dispose();
     _searchController.dispose();
     _spectrumHistory.dispose();
@@ -315,10 +321,9 @@ class _FrameTablePageState extends State<FrameTablePage> {
     _framesChanged.notify();
     _aircraftChanged.notify();
     setState(() => _error = null);
-    final channel = WebSocketChannel.connect(Uri.parse(url));
-    _channel = channel;
+    final ApiClient client;
     try {
-      await channel.ready;
+      client = await ApiClient.connect(Uri.parse(url));
     } catch (e) {
       setState(() {
         _error = '$e';
@@ -326,39 +331,51 @@ class _FrameTablePageState extends State<FrameTablePage> {
       });
       return;
     }
-    _sub = channel.stream.listen(
-      (event) {
-        // A periodic update is a list of messages; the snapshot and each
-        // reply to a request is one message on its own.
-        final Object? decoded;
-        try {
-          decoded = jsonDecode(event as String);
-        } catch (e, st) {
-          debugPrint('dropped ws message: $e\n$st');
-          return;
-        }
-        for (final item in decoded is List ? decoded : [decoded]) {
-          try {
-            _onMessage(item as Map<String, dynamic>);
-          } catch (e, st) {
-            // Skip the message rather than tearing down the connection (or
-            // losing the rest of its update), but say why: a handler that
-            // throws here fails silently otherwise.
-            debugPrint('dropped ws message: $e\n$st');
-          }
-        }
-      },
-      onError: (e) => _disconnect(error: '$e'),
-      onDone: _disconnect,
-      cancelOnError: true,
-    );
+    _client = client;
+    setState(() => _connected = true);
+    try {
+      final info = await client.serverInfo();
+      if (!identical(client, _client)) return;
+      setState(() {
+        _spectrumAvailable = info.spectrum;
+        if (!info.spectrum) _showSpectrum = false;
+      });
+      if (_showSpectrum) _startSpectrum();
+      // The subscription reports a disconnect, and the server never ends it.
+      _updates = client.subscribe(api.SubscribeRequest()).listen(
+        _onUpdate,
+        onError: (Object e) => _disconnect(error: '$e'),
+        onDone: _disconnect,
+        cancelOnError: true,
+      );
+      // Subscribed first so nothing is missed in between. The updates wait in the buffers until the flush
+      // timer starts, so they apply on top of the backfill.
+      if (info.history) _onSnapshot(AircraftSnapshot.fromProto(await client.snapshot(api.SnapshotRequest())));
+    } on ApiException catch (e) {
+      if (identical(client, _client)) _disconnect(error: '$e');
+      return;
+    }
+    if (!identical(client, _client)) return;
     _uiUpdateTimer = Timer.periodic(_uiUpdateInterval, (_) => _flushUpdates());
     _activityTimer = Timer.periodic(_activityPollInterval, (_) {
       _requestActivity();
       // A live heatmap grows with the history; a scrubbed one doesn't change.
       if (_snapshot == null) _requestHeatmap();
     });
-    setState(() => _connected = true);
+  }
+
+  /// Makes a call on this connection. Null if it failed, or if the connection has changed since: the
+  /// subscription reports a disconnect, and any other failure is printed here.
+  Future<T?> _ask<T>(Future<T> Function(ApiClient client) call) async {
+    final client = _client;
+    if (client == null) return null;
+    try {
+      final reply = await call(client);
+      return identical(client, _client) ? reply : null;
+    } on ApiException catch (e) {
+      if (e.code != null) debugPrint('$e');
+      return null;
+    }
   }
 
   /// Merges buffered frames/aircraft into the displayed state, trims the
@@ -485,38 +502,54 @@ class _FrameTablePageState extends State<FrameTablePage> {
     return DateTime.now().difference(t).inMilliseconds / 1000;
   }
 
-  /// Applies a snapshot from the backend. The first, sent on connect before
-  /// any live message, backfills the live aircraft and trails; the rest
-  /// answer seeks and are shown while scrubbing.
-  // Handles one message from the backend. Frames/aircraft can arrive at
-  // rates far higher than the UI can (or should) redraw at, so they are just
-  // buffered here -- _flushUpdates, on a timer, is what actually triggers a
-  // rebuild.
-  void _onMessage(Map<String, dynamic> json) {
-    switch (json['type']) {
-      case 'frame':
-        _pendingFrames.add(FrameRecord.fromJson(json));
-      case 'aircraft':
-        final ac = AircraftRecord.fromJson(json);
-        _pendingAircraft[ac.icao] = ac;
-      case 'snapshot':
-        _onSnapshot(AircraftSnapshot.fromJson(json));
-      case 'aircraft_history':
-        _onAircraftHistory(json);
-      case 'heatmap':
-        _onHeatmap(json);
-      case 'input_status':
-        _inputStatus.value = InputStatus.fromJson(json);
-      case 'activity':
-        _onActivity(json);
-      case 'spectrum':
-        final rows = [..._spectrumHistory.value, SpectrumFrame.fromJson(json)];
-        if (rows.length > _maxSpectrumRows) {
-          rows.removeRange(0, rows.length - _maxSpectrumRows);
-        }
-        _spectrumHistory.value = rows;
+  // Handles one live update. Frames/aircraft can arrive at rates far higher
+  // than the UI can (or should) redraw at, so they are just buffered here --
+  // _flushUpdates, on a timer, is what actually triggers a rebuild.
+  void _onUpdate(api.Update update) {
+    _pendingFrames.addAll(update.frames.map(FrameRecord.fromProto));
+    for (final a in update.aircraft) {
+      final ac = AircraftRecord.fromProto(a);
+      _pendingAircraft[ac.icao] = ac;
     }
+    if (update.hasInputStatus()) _inputStatus.value = InputStatus.fromProto(update.inputStatus);
   }
+
+  // The server computes the spectrum only while a spectrum call is in progress, so the call follows the pane.
+  void _setShowSpectrum(bool show) {
+    setState(() => _showSpectrum = show);
+    show ? _startSpectrum() : _stopSpectrum();
+  }
+
+  void _startSpectrum() {
+    final client = _client;
+    if (client == null || _spectrum != null) return;
+    _spectrum = client.spectrum(api.SpectrumRequest()).listen(
+      _onSpectrumRow,
+      // The subscription reports a disconnect; any other failure is printed here.
+      onError: (Object e) {
+        if (e is ApiException && e.code != null) debugPrint('$e');
+        _spectrum = null;
+      },
+      onDone: () => _spectrum = null,
+      cancelOnError: true,
+    );
+  }
+
+  void _stopSpectrum() {
+    _spectrum?.cancel();
+    _spectrum = null;
+  }
+
+  void _onSpectrumRow(api.SpectrumRow row) {
+    final rows = [..._spectrumHistory.value, SpectrumFrame.fromProto(row)];
+    if (rows.length > _maxSpectrumRows) {
+      rows.removeRange(0, rows.length - _maxSpectrumRows);
+    }
+    _spectrumHistory.value = rows;
+  }
+
+  /// Applies a snapshot. The first, on connect, backfills the live aircraft
+  /// and trails; the rest answer seeks and are shown while scrubbing.
 
   void _onSnapshot(AircraftSnapshot s) {
     if (s.startS != null) {
@@ -535,17 +568,11 @@ class _FrameTablePageState extends State<FrameTablePage> {
             now.subtract(Duration(milliseconds: ((s.timeS - a.lastSeenUnixS) * 1000).round()));
         _latestTimeS = math.max(_latestTimeS, a.lastSeenUnixS);
       }
-    } else {
-      _seekInFlight = false;
-      // Ignore a reply that lands after going back to live.
-      if (_scrubTimeS != null) {
-        _snapshot = s;
-        _requestSelectedHistory();
-        _scheduleHeatmap();
-      }
-      final queued = _queuedSeekS;
-      _queuedSeekS = null;
-      if (queued != null) _seek(queued);
+    } else if (_scrubTimeS != null) {
+      // Not after going back to live.
+      _snapshot = s;
+      _requestSelectedHistory();
+      _scheduleHeatmap();
     }
     _sortedAircraftCache = null;
     _aircraftChanged.notify();
@@ -560,10 +587,11 @@ class _FrameTablePageState extends State<FrameTablePage> {
     _uiUpdateTimer = null;
     _activityTimer?.cancel();
     _activityTimer = null;
-    _sub?.cancel();
-    _channel?.sink.close();
-    _sub = null;
-    _channel = null;
+    _updates?.cancel();
+    _stopSpectrum();
+    _client?.close();
+    _updates = null;
+    _client = null;
     _seekInFlight = false;
     _queuedSeekS = null;
     _heatmapInFlight = false;
@@ -656,13 +684,15 @@ class _FrameTablePageState extends State<FrameTablePage> {
                 onSelected: (v) => setState(() => _showFrames = v),
               ),
             ),
-            const SizedBox(width: 6),
-            _dockToggle(
-              icon: Icons.waterfall_chart,
-              label: 'Spectrum',
-              selected: _showSpectrum,
-              onSelected: (v) => setState(() => _showSpectrum = v),
-            ),
+            if (_spectrumAvailable) ...[
+              const SizedBox(width: 6),
+              _dockToggle(
+                icon: Icons.waterfall_chart,
+                label: 'Spectrum',
+                selected: _showSpectrum,
+                onSelected: _setShowSpectrum,
+              ),
+            ],
             const SizedBox(width: 12),
             ValueListenableBuilder(
               valueListenable: _inputStatus,
@@ -794,7 +824,7 @@ class _FrameTablePageState extends State<FrameTablePage> {
                     flex: 2,
                     child: _buildDockSection(
                       title: const Text('Spectrum'),
-                      onClose: () => setState(() => _showSpectrum = false),
+                      onClose: () => _setShowSpectrum(false),
                       child: _buildSpectrumPane(),
                     ),
                   ),

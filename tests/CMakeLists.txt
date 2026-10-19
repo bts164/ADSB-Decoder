@@ -24,3 +24,8 @@ add_test(NAME peak_select_test COMMAND peak_select_test)
 add_executable(block_stitcher_test block_stitcher_test.cpp)
 target_link_libraries(block_stitcher_test PRIVATE adsb_dsp)
 add_test(NAME block_stitcher_test COMMAND block_stitcher_test)
+
+# The UI API server's tests, as a WebSocket client sees it.
+add_executable(api_server_test api_server_test.cpp)
+target_link_libraries(api_server_test PRIVATE adsb_output SQLite::SQLite3)
+add_test(NAME api_server_test COMMAND api_server_test)

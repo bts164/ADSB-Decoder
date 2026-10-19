@@ -30,6 +30,8 @@ find_package(SQLite3 REQUIRED)
 find_package(xtensor REQUIRED)
 find_package(HighFive REQUIRED)
 find_package(absl REQUIRED)
+# Also brings protobuf_generate() and the protobuf::protoc target, from the tool_requires protoc.
+find_package(protobuf CONFIG REQUIRED)
 
 # ISPC_ROOT (e.g. via a project-local .envrc/direnv) points this at a
 # manually-extracted ispc release instead of a system package -- the ispc

@@ -3,17 +3,16 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <cstdio>
 #include <deque>
 #include <limits>
 #include <numbers>
+#include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include <coro/stream.h>
 #include <coro/task/spawn_blocking.h>
-#include <nlohmann/json.hpp>
 #include <sqlite3.h>
 #include <xtensor/xbuilder.hpp>
 #include <xtensor/xtensor.hpp>
@@ -33,6 +32,8 @@ constexpr double kHistoryActivityBucketS = 60;
 constexpr int kHistoryHeatmapMaxCells = 512;
 // Most track points a snapshot carries per aircraft (the newest ones).
 constexpr size_t kHistoryMaxTrackPoints = 1000;
+// The schema's version, kept in the file's PRAGMA user_version. Files from before the protobuf API have 0.
+constexpr int kSchemaVersion = 2;
 
 // The statement is finalized on every exit path.
 struct Statement {
@@ -46,9 +47,27 @@ bool prepare(sqlite3* db, Statement& s, const char* sql) {
     return false;
 }
 
-nlohmann::json column_or_null(sqlite3_stmt* stmt, int col) {
-    return sqlite3_column_type(stmt, col) == SQLITE_NULL ? nlohmann::json(nullptr)
-                                                         : nlohmann::json(sqlite3_column_double(stmt, col));
+bool is_null(sqlite3_stmt* stmt, int col) { return sqlite3_column_type(stmt, col) == SQLITE_NULL; }
+
+void bind_double(sqlite3_stmt* stmt, int col, bool has, double value) {
+    if (has) sqlite3_bind_double(stmt, col, value);
+    else sqlite3_bind_null(stmt, col);
+}
+
+void bind_int(sqlite3_stmt* stmt, int col, bool has, int64_t value) {
+    if (has) sqlite3_bind_int64(stmt, col, value);
+    else sqlite3_bind_null(stmt, col);
+}
+
+// The one integer the query `sql` returns, or nullopt with an ERROR logged.
+std::optional<int64_t> query_int(sqlite3* db, const char* sql) {
+    Statement s;
+    if (!prepare(db, s, sql)) return std::nullopt;
+    if (sqlite3_step(s.stmt) != SQLITE_ROW) {
+        LOGF(ERROR, "history query failed: %s", sqlite3_errmsg(db));
+        return std::nullopt;
+    }
+    return sqlite3_column_int64(s.stmt, 0);
 }
 
 // Web Mercator y of a latitude, in radians of arc, clamped to the square world maps show.
@@ -138,11 +157,11 @@ public:
         sqlite3_close(m_db);
     }
 
-    void insert(const std::vector<HistoryRow>& rows);
-    std::optional<std::string> snapshot(std::optional<double> t_unix_s);
-    std::optional<std::string> aircraft(const std::string& icao, std::optional<double> t_unix_s);
-    std::optional<std::string> activity(std::optional<double> from_unix_s);
-    std::optional<std::string> heatmap(const HeatmapRequest& req);
+    void insert(const std::vector<api::Aircraft>& rows);
+    std::optional<api::Snapshot> snapshot(const api::SnapshotRequest& req);
+    std::optional<api::AircraftHistory> aircraft(const api::AircraftHistoryRequest& req);
+    std::optional<api::Activity> activity(const api::ActivityRequest& req);
+    std::optional<api::Heatmap> heatmap(const api::HeatmapRequest& req);
 
 private:
     explicit Db(sqlite3* db) : m_db(db) {}
@@ -159,6 +178,18 @@ std::optional<AircraftHistory::Db> AircraftHistory::Db::open(const std::string& 
         return std::nullopt;
     }
     Db self(conn);  // closes the connection on the failures below
+
+    // Checked before anything below writes to the file. An old file has no version, but has the table.
+    const std::optional<int64_t> version = query_int(conn, "PRAGMA user_version;");
+    const std::optional<int64_t> tables =
+        query_int(conn, "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'aircraft_updates';");
+    if (!version || !tables) return std::nullopt;
+    if (*version != kSchemaVersion && (*version != 0 || *tables != 0)) {
+        LOGF(ERROR, "history database %s is from %s adsb (schema version %d; this one reads %d): record to a new "
+             "file", db_path, *version > kSchemaVersion ? "a newer" : "an older", *version, kSchemaVersion);
+        return std::nullopt;
+    }
+
     // Without WAL, another process reading the file (the sqlite3 shell, say) blocks the writes, and the demod
     // loop with them, so say so. The pragma doesn't fail when WAL is unavailable: it returns the mode it set.
     std::string journal_mode;
@@ -174,30 +205,37 @@ std::optional<AircraftHistory::Db> AircraftHistory::Db::open(const std::string& 
              "block recording", db_path, journal_mode);
     sqlite3_exec(conn, "PRAGMA synchronous=NORMAL;", nullptr, nullptr, nullptr);
 
-    // t is last_seen_unix_s. lat/lon are copied out of the state JSON (null for
-    // position-less updates) so tracks can be found by index; other fields are
-    // read with json_extract().
-    const char* create_sql =
+    // t is last_seen_unix_s, and state the serialized api::Aircraft. The other columns are copied out of it
+    // (null where it doesn't have them), so the queries read them without parsing every state.
+    const std::string create_sql =
         "CREATE TABLE IF NOT EXISTS aircraft_updates ("
         "  t REAL NOT NULL,"
-        "  icao TEXT NOT NULL,"
+        "  icao INTEGER NOT NULL,"
         "  lat REAL,"
         "  lon REAL,"
-        "  state TEXT NOT NULL"
+        "  altitude_ft INTEGER,"
+        "  ground_speed_kt REAL,"
+        "  vertical_rate_fpm INTEGER,"
+        "  signal_db REAL,"
+        "  selected_altitude_ft INTEGER,"
+        "  state BLOB NOT NULL"
         ");"
-        // (t, icao) rather than just t, so AircraftHistory::activity() reads only the index. Replaces the
-        // older idx_aircraft_updates_t.
-        "DROP INDEX IF EXISTS idx_aircraft_updates_t;"
+        // (t, icao) rather than just t, so AircraftHistory::activity() reads only the index.
         "CREATE INDEX IF NOT EXISTS idx_aircraft_updates_t_icao ON aircraft_updates(t, icao);"
-        "CREATE INDEX IF NOT EXISTS idx_aircraft_updates_icao_t ON aircraft_updates(icao, t);";
+        "CREATE INDEX IF NOT EXISTS idx_aircraft_updates_icao_t ON aircraft_updates(icao, t);"
+        "PRAGMA user_version = " +
+        std::to_string(kSchemaVersion) + ";";
     char* err = nullptr;
-    if (sqlite3_exec(conn, create_sql, nullptr, nullptr, &err) != SQLITE_OK) {
+    if (sqlite3_exec(conn, create_sql.c_str(), nullptr, nullptr, &err) != SQLITE_OK) {
         LOGF(ERROR, "history schema creation failed: %s", err);
         sqlite3_free(err);
         return std::nullopt;
     }
 
-    if (sqlite3_prepare_v2(conn, "INSERT INTO aircraft_updates (t, icao, lat, lon, state) VALUES (?, ?, ?, ?, ?);",
+    if (sqlite3_prepare_v2(conn,
+                           "INSERT INTO aircraft_updates (t, icao, lat, lon, altitude_ft, ground_speed_kt, "
+                           "vertical_rate_fpm, signal_db, selected_altitude_ft, state) "
+                           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
                            -1, &self.m_insert, nullptr) != SQLITE_OK) {
         LOGF(ERROR, "history insert statement failed: %s", sqlite3_errmsg(conn));
         return std::nullopt;
@@ -205,44 +243,45 @@ std::optional<AircraftHistory::Db> AircraftHistory::Db::open(const std::string& 
     return self;
 }
 
-void AircraftHistory::Db::insert(const std::vector<HistoryRow>& rows) {
+void AircraftHistory::Db::insert(const std::vector<api::Aircraft>& rows) {
     TRACE_ZONE_VALUE("history_insert", rows.size());
     // One transaction for the block, not one per row.
     sqlite3_exec(m_db, "BEGIN;", nullptr, nullptr, nullptr);
-    for (const HistoryRow& row : rows) {
-        char icao_str[7];
-        std::snprintf(icao_str, sizeof(icao_str), "%06x", row.icao);
+    for (const api::Aircraft& ac : rows) {
+        const std::string state = ac.SerializeAsString();
+        // A track point needs both, so a position is both or neither.
+        const bool position = ac.has_lat() && ac.has_lon();
 
         sqlite3_reset(m_insert);
-        sqlite3_bind_double(m_insert, 1, row.t_unix_s);
-        sqlite3_bind_text(m_insert, 2, icao_str, -1, SQLITE_TRANSIENT);
-        if (row.lat && row.lon) {
-            sqlite3_bind_double(m_insert, 3, *row.lat);
-            sqlite3_bind_double(m_insert, 4, *row.lon);
-        } else {
-            sqlite3_bind_null(m_insert, 3);
-            sqlite3_bind_null(m_insert, 4);
-        }
-        sqlite3_bind_text(m_insert, 5, row.state.data(), static_cast<int>(row.state.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_double(m_insert, 1, ac.last_seen_unix_s());
+        sqlite3_bind_int64(m_insert, 2, ac.icao());
+        bind_double(m_insert, 3, position, ac.lat());
+        bind_double(m_insert, 4, position, ac.lon());
+        bind_int(m_insert, 5, ac.has_altitude_ft(), ac.altitude_ft());
+        bind_double(m_insert, 6, ac.has_ground_speed_kt(), ac.ground_speed_kt());
+        bind_int(m_insert, 7, ac.has_vertical_rate_fpm(), ac.vertical_rate_fpm());
+        bind_double(m_insert, 8, ac.has_signal_db(), ac.signal_db());
+        bind_int(m_insert, 9, ac.has_selected_altitude_ft(), ac.selected_altitude_ft());
+        sqlite3_bind_blob(m_insert, 10, state.data(), static_cast<int>(state.size()), SQLITE_TRANSIENT);
         if (sqlite3_step(m_insert) != SQLITE_DONE) LOGF(ERROR, "history insert failed: %s", sqlite3_errmsg(m_db));
     }
     if (sqlite3_exec(m_db, "COMMIT;", nullptr, nullptr, nullptr) != SQLITE_OK)
         LOGF(ERROR, "history commit failed: %s", sqlite3_errmsg(m_db));
 }
 
-std::optional<std::string> AircraftHistory::Db::snapshot(std::optional<double> t_unix_s) {
+std::optional<api::Snapshot> AircraftHistory::Db::snapshot(const api::SnapshotRequest& req) {
     TRACE_ZONE("history_snapshot");
 
     Statement range;
     if (!prepare(m_db, range, "SELECT min(t), max(t) FROM aircraft_updates;") || sqlite3_step(range.stmt) != SQLITE_ROW)
         return std::nullopt;
-    nlohmann::json msg;
-    msg["type"] = "snapshot";
-    msg["t_min"] = column_or_null(range.stmt, 0);
-    msg["t_max"] = column_or_null(range.stmt, 1);
-    const double t = t_unix_s.value_or(msg["t_max"].is_null() ? 0.0 : msg["t_max"].get<double>());
-    msg["t"] = t;
-    msg["aircraft"] = nlohmann::json::array();
+    api::Snapshot msg;
+    if (!is_null(range.stmt, 0)) {
+        msg.set_t_min(sqlite3_column_double(range.stmt, 0));
+        msg.set_t_max(sqlite3_column_double(range.stmt, 1));
+    }
+    const double t = req.has_t() ? req.t() : msg.t_max();  // 0 for an empty database
+    msg.set_t(t);
     const double t0 = t - kHistorySnapshotWindowS;
 
     // Each aircraft's latest state at t. SQLite takes a bare column alongside
@@ -252,105 +291,109 @@ std::optional<std::string> AircraftHistory::Db::snapshot(std::optional<double> t
         return std::nullopt;
     sqlite3_bind_double(states.stmt, 1, t0);
     sqlite3_bind_double(states.stmt, 2, t);
-    std::vector<std::string> order;
-    std::unordered_map<std::string, std::pair<std::string, std::deque<nlohmann::json>>> aircraft;
+    std::unordered_map<uint32_t, int> index;  // each aircraft's place in msg.aircraft()
     while (sqlite3_step(states.stmt) == SQLITE_ROW) {
-        std::string icao = reinterpret_cast<const char*>(sqlite3_column_text(states.stmt, 0));
-        order.push_back(icao);
-        aircraft[icao].first = reinterpret_cast<const char*>(sqlite3_column_text(states.stmt, 1));
+        const auto icao = static_cast<uint32_t>(sqlite3_column_int64(states.stmt, 0));
+        index[icao] = msg.aircraft_size();
+        if (!msg.add_aircraft()->mutable_state()->ParseFromArray(sqlite3_column_blob(states.stmt, 1),
+                                                                 sqlite3_column_bytes(states.stmt, 1))) {
+            LOGF(ERROR, "history snapshot failed: aircraft %06x has a state that doesn't parse", icao);
+            return std::nullopt;
+        }
     }
 
     Statement tracks;
-    if (!prepare(m_db, tracks, "SELECT icao, lat, lon, json_extract(state, '$.altitude_ft') FROM aircraft_updates "
+    if (!prepare(m_db, tracks, "SELECT icao, lat, lon, altitude_ft FROM aircraft_updates "
                          "WHERE t > ?1 AND t <= ?2 AND lat IS NOT NULL ORDER BY t;"))
         return std::nullopt;
     sqlite3_bind_double(tracks.stmt, 1, t0);
     sqlite3_bind_double(tracks.stmt, 2, t);
+    // Gathered first, so each keeps only its newest kHistoryMaxTrackPoints.
+    std::vector<std::deque<api::TrackPoint>> track(msg.aircraft_size());
     while (sqlite3_step(tracks.stmt) == SQLITE_ROW) {
-        auto& track = aircraft[reinterpret_cast<const char*>(sqlite3_column_text(tracks.stmt, 0))].second;
-        track.push_back({sqlite3_column_double(tracks.stmt, 1), sqlite3_column_double(tracks.stmt, 2),
-                         column_or_null(tracks.stmt, 3)});
-        if (track.size() > kHistoryMaxTrackPoints) track.pop_front();
+        // Always found: the states above cover the same window.
+        auto it = index.find(static_cast<uint32_t>(sqlite3_column_int64(tracks.stmt, 0)));
+        if (it == index.end()) continue;
+        std::deque<api::TrackPoint>& points = track[it->second];
+        api::TrackPoint& p = points.emplace_back();
+        p.set_lat(sqlite3_column_double(tracks.stmt, 1));
+        p.set_lon(sqlite3_column_double(tracks.stmt, 2));
+        if (!is_null(tracks.stmt, 3)) p.set_altitude_ft(sqlite3_column_int(tracks.stmt, 3));
+        if (points.size() > kHistoryMaxTrackPoints) points.pop_front();
     }
-
-    for (const auto& icao : order) {
-        const auto& [state, track] = aircraft[icao];
-        nlohmann::json points = track;
-        msg["aircraft"].push_back({{"state", nlohmann::json::parse(state)}, {"track", std::move(points)}});
+    for (int i = 0; i < msg.aircraft_size(); i++) {
+        for (api::TrackPoint& p : track[i]) *msg.mutable_aircraft(i)->add_track() = std::move(p);
     }
-    return msg.dump();
+    return msg;
 }
 
-std::optional<std::string> AircraftHistory::Db::aircraft(const std::string& icao, std::optional<double> t_unix_s) {
+std::optional<api::AircraftHistory> AircraftHistory::Db::aircraft(const api::AircraftHistoryRequest& req) {
     TRACE_ZONE("history_aircraft");
 
     Statement points;
-    if (!prepare(m_db, points, "SELECT t, json_extract(state, '$.altitude_ft'), json_extract(state, '$.ground_speed_kt'), "
-                         "json_extract(state, '$.vertical_rate_fpm'), json_extract(state, '$.signal_db'), "
-                         "json_extract(state, '$.selected_altitude_ft') "
-                         "FROM aircraft_updates WHERE icao = ?1 AND t > ?2 AND t <= ?3 ORDER BY t;"))
+    if (!prepare(m_db, points, "SELECT t, altitude_ft, ground_speed_kt, vertical_rate_fpm, signal_db, "
+                         "selected_altitude_ft FROM aircraft_updates WHERE icao = ?1 AND t > ?2 AND t <= ?3 ORDER BY t;"))
         return std::nullopt;
     // Without t, the window ends at this aircraft's latest update.
     double t = 0;
-    if (t_unix_s) {
-        t = *t_unix_s;
+    if (req.has_t()) {
+        t = req.t();
     } else {
         Statement latest;
         if (!prepare(m_db, latest, "SELECT max(t) FROM aircraft_updates WHERE icao = ?1;")) return std::nullopt;
-        sqlite3_bind_text(latest.stmt, 1, icao.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(latest.stmt, 1, req.icao());
         if (sqlite3_step(latest.stmt) == SQLITE_ROW) t = sqlite3_column_double(latest.stmt, 0);
     }
-    sqlite3_bind_text(points.stmt, 1, icao.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(points.stmt, 1, req.icao());
     sqlite3_bind_double(points.stmt, 2, t - kHistoryAircraftWindowS);
     sqlite3_bind_double(points.stmt, 3, t);
 
-    nlohmann::json msg;
-    msg["type"] = "aircraft_history";
-    msg["icao"] = icao;
-    msg["t"] = t;
-    msg["points"] = nlohmann::json::array();
+    api::AircraftHistory msg;
+    msg.set_t(t);
     while (sqlite3_step(points.stmt) == SQLITE_ROW) {
-        msg["points"].push_back({sqlite3_column_double(points.stmt, 0), column_or_null(points.stmt, 1),
-                                 column_or_null(points.stmt, 2), column_or_null(points.stmt, 3),
-                                 column_or_null(points.stmt, 4), column_or_null(points.stmt, 5)});
+        api::AircraftHistory::Point& p = *msg.add_points();
+        p.set_t(sqlite3_column_double(points.stmt, 0));
+        if (!is_null(points.stmt, 1)) p.set_altitude_ft(sqlite3_column_int(points.stmt, 1));
+        if (!is_null(points.stmt, 2)) p.set_ground_speed_kt(sqlite3_column_double(points.stmt, 2));
+        if (!is_null(points.stmt, 3)) p.set_vertical_rate_fpm(sqlite3_column_int(points.stmt, 3));
+        if (!is_null(points.stmt, 4)) p.set_signal_db(sqlite3_column_double(points.stmt, 4));
+        if (!is_null(points.stmt, 5)) p.set_selected_altitude_ft(sqlite3_column_int(points.stmt, 5));
     }
-    return msg.dump();
+    return msg;
 }
 
-std::optional<std::string> AircraftHistory::Db::activity(std::optional<double> from_unix_s) {
+std::optional<api::Activity> AircraftHistory::Db::activity(const api::ActivityRequest& req) {
     TRACE_ZONE("history_activity");
 
     Statement counts;
     if (!prepare(m_db, counts, "SELECT CAST(t / ?2 AS INTEGER) AS b, count(DISTINCT icao) FROM aircraft_updates "
                          "WHERE t >= ?1 GROUP BY b ORDER BY b;"))
         return std::nullopt;
-    const double from = from_unix_s ? std::floor(*from_unix_s / kHistoryActivityBucketS) * kHistoryActivityBucketS
-                                    : std::numeric_limits<double>::lowest();
+    const double from = req.has_from() ? std::floor(req.from() / kHistoryActivityBucketS) * kHistoryActivityBucketS
+                                       : std::numeric_limits<double>::lowest();
     sqlite3_bind_double(counts.stmt, 1, from);
     sqlite3_bind_double(counts.stmt, 2, kHistoryActivityBucketS);
 
-    nlohmann::json msg;
-    msg["type"] = "activity";
-    msg["bucket_s"] = kHistoryActivityBucketS;
-    msg["t0"] = nullptr;
-    std::vector<int64_t> dense;
+    api::Activity msg;
+    msg.set_bucket_s(kHistoryActivityBucketS);
+    std::vector<uint32_t> dense;
     int64_t first = 0;
     while (sqlite3_step(counts.stmt) == SQLITE_ROW) {
         const int64_t b = sqlite3_column_int64(counts.stmt, 0);
         if (dense.empty()) first = b;
         dense.resize(b - first + 1, 0);  // 0 for the empty buckets between rows.
-        dense.back() = sqlite3_column_int64(counts.stmt, 1);
+        dense.back() = static_cast<uint32_t>(sqlite3_column_int64(counts.stmt, 1));
     }
-    if (!dense.empty()) msg["t0"] = static_cast<double>(first) * kHistoryActivityBucketS;
-    msg["counts"] = dense;
-    return msg.dump();
+    if (!dense.empty()) msg.set_t0(static_cast<double>(first) * kHistoryActivityBucketS);
+    msg.mutable_counts()->Add(dense.begin(), dense.end());
+    return msg;
 }
 
-std::optional<std::string> AircraftHistory::Db::heatmap(const HeatmapRequest& req) {
-    if (!(req.east > req.west) || !(req.north > req.south)) return std::nullopt;
+std::optional<api::Heatmap> AircraftHistory::Db::heatmap(const api::HeatmapRequest& req) {
+    if (!(req.east() > req.west()) || !(req.north() > req.south())) return std::nullopt;
     TRACE_ZONE("history_heatmap");
-    const int width = std::clamp(req.width, 1, kHistoryHeatmapMaxCells);
-    const int height = std::clamp(req.height, 1, kHistoryHeatmapMaxCells);
+    const int width = static_cast<int>(std::clamp<uint32_t>(req.width(), 1, kHistoryHeatmapMaxCells));
+    const int height = static_cast<int>(std::clamp<uint32_t>(req.height(), 1, kHistoryHeatmapMaxCells));
 
     // Positions less than kJoinS apart are joined; a gap of kNewFlightS or more starts a new flight.
     constexpr double kJoinS = 60;
@@ -360,54 +403,43 @@ std::optional<std::string> AircraftHistory::Db::heatmap(const HeatmapRequest& re
     if (!prepare(m_db, points, "SELECT icao, t, lat, lon FROM aircraft_updates "
                          "WHERE lat IS NOT NULL AND t >= ?1 AND t <= ?2 ORDER BY icao, t;"))
         return std::nullopt;
-    sqlite3_bind_double(points.stmt, 1, req.t0.value_or(std::numeric_limits<double>::lowest()));
-    sqlite3_bind_double(points.stmt, 2, req.t1.value_or(std::numeric_limits<double>::max()));
+    sqlite3_bind_double(points.stmt, 1, req.has_t0() ? req.t0() : std::numeric_limits<double>::lowest());
+    sqlite3_bind_double(points.stmt, 2, req.has_t1() ? req.t1() : std::numeric_limits<double>::max());
 
-    const double x_scale = width / (req.east - req.west);
-    const double y_north = mercator_y(req.north);
-    const double y_scale = height / (y_north - mercator_y(req.south));
+    const double x_scale = width / (req.east() - req.west());
+    const double y_north = mercator_y(req.north());
+    const double y_scale = height / (y_north - mercator_y(req.south()));
     FlightGrid grid(width, height);
-    std::string prev_icao;
+    std::optional<int64_t> prev_icao;
     double prev_t = 0, prev_x = 0, prev_y = 0;
     while (sqlite3_step(points.stmt) == SQLITE_ROW) {
-        const char* icao = reinterpret_cast<const char*>(sqlite3_column_text(points.stmt, 0));
+        const int64_t icao = sqlite3_column_int64(points.stmt, 0);
         const double t = sqlite3_column_double(points.stmt, 1);
-        const double x = (sqlite3_column_double(points.stmt, 3) - req.west) * x_scale;
+        const double x = (sqlite3_column_double(points.stmt, 3) - req.west()) * x_scale;
         const double y = (y_north - mercator_y(sqlite3_column_double(points.stmt, 2))) * y_scale;
         const bool same_aircraft = prev_icao == icao;
         if (!same_aircraft || t - prev_t >= kNewFlightS) grid.next_flight();
         if (same_aircraft && t - prev_t < kJoinS) grid.line(prev_x, prev_y, x, y);
         else grid.mark(x, y);
-        if (!same_aircraft) prev_icao = icao;
+        prev_icao = icao;
         prev_t = t;
         prev_x = x;
         prev_y = y;
     }
 
-    nlohmann::json msg;
-    msg["type"] = "heatmap";
-    msg["west"] = req.west;
-    msg["south"] = req.south;
-    msg["east"] = req.east;
-    msg["north"] = req.north;
-    msg["width"] = width;
-    msg["height"] = height;
-    msg["t0"] = req.t0 ? nlohmann::json(*req.t0) : nlohmann::json(nullptr);
-    msg["t1"] = req.t1 ? nlohmann::json(*req.t1) : nlohmann::json(nullptr);
-    std::vector<uint32_t> cells;
+    api::Heatmap msg;
     uint32_t max = 0;
     const auto& counts = grid.counts();
     // Cells are numbered row by row, which is the order the tensor stores them in.
     for (size_t i = 0; i < counts.size(); i++) {
         const uint32_t count = counts.flat(i);
         if (!count) continue;
-        cells.push_back(static_cast<uint32_t>(i));
-        cells.push_back(count);
+        msg.add_cell_index(static_cast<uint32_t>(i));
+        msg.add_cell_count(count);
         max = std::max(max, count);
     }
-    msg["max"] = max;
-    msg["cells"] = std::move(cells);
-    return msg.dump();
+    msg.set_max(max);
+    return msg;
 }
 
 std::optional<AircraftHistory> AircraftHistory::open(const std::string& db_path) {
@@ -419,49 +451,55 @@ std::optional<AircraftHistory> AircraftHistory::open(const std::string& db_path)
     return AircraftHistory(std::move(tx));
 }
 
-coro::Coro<void> AircraftHistory::insert(std::vector<HistoryRow> rows) {
+coro::Coro<void> AircraftHistory::insert(std::vector<api::Aircraft> rows) {
     // Fails only once the history task has stopped, at runtime shutdown.
     (void)co_await m_tx.send(Insert{std::move(rows)});
 }
 
-coro::Coro<std::optional<std::string>> AircraftHistory::snapshot(std::optional<double> t_unix_s) {
-    auto [reply, result] = coro::oneshot_channel<std::optional<std::string>>();
-    co_return co_await ask(Snapshot{t_unix_s, std::move(reply)}, std::move(result));
-}
-
-coro::Coro<std::optional<std::string>> AircraftHistory::aircraft(std::string icao, std::optional<double> t_unix_s) {
-    auto [reply, result] = coro::oneshot_channel<std::optional<std::string>>();
-    co_return co_await ask(Aircraft{std::move(icao), t_unix_s, std::move(reply)}, std::move(result));
-}
-
-coro::Coro<std::optional<std::string>> AircraftHistory::activity(std::optional<double> from_unix_s) {
-    auto [reply, result] = coro::oneshot_channel<std::optional<std::string>>();
-    co_return co_await ask(Activity{from_unix_s, std::move(reply)}, std::move(result));
-}
-
-coro::Coro<std::optional<std::string>> AircraftHistory::heatmap(HeatmapRequest req) {
-    auto [reply, result] = coro::oneshot_channel<std::optional<std::string>>();
-    co_return co_await ask(Heatmap{req, std::move(reply)}, std::move(result));
-}
-
-coro::Coro<std::optional<std::string>> AircraftHistory::ask(
-    Request query, coro::OneshotReceiver<std::optional<std::string>> result) {
-    if (!co_await m_tx.send(std::move(query))) co_return std::nullopt;
+template <typename Query, typename Result, typename Req>
+coro::Coro<std::optional<Result>> AircraftHistory::ask(Req req) {
+    auto [reply, result] = coro::oneshot_channel<std::optional<Result>>();
+    if (!co_await m_tx.send(Query{std::move(req), std::move(reply)})) co_return std::nullopt;
     // An error only if the task dropped the reply: it threw, and logged why, or it was cancelled.
-    auto reply = co_await result.recv();
-    co_return reply ? std::move(*reply) : std::nullopt;
+    auto answer = co_await result.recv();
+    co_return answer ? std::move(*answer) : std::nullopt;
+}
+
+coro::Coro<std::optional<api::Snapshot>> AircraftHistory::snapshot(api::SnapshotRequest req) {
+    return ask<Snapshot, api::Snapshot>(std::move(req));
+}
+
+coro::Coro<std::optional<api::AircraftHistory>> AircraftHistory::aircraft(api::AircraftHistoryRequest req) {
+    return ask<Aircraft, api::AircraftHistory>(std::move(req));
+}
+
+coro::Coro<std::optional<api::Activity>> AircraftHistory::activity(api::ActivityRequest req) {
+    return ask<Activity, api::Activity>(std::move(req));
+}
+
+coro::Coro<std::optional<api::Heatmap>> AircraftHistory::heatmap(api::HeatmapRequest req) {
+    return ask<Heatmap, api::Heatmap>(std::move(req));
 }
 
 void AircraftHistory::run(coro::MpscReceiver<Request>& rx, Db& db) {
     auto handle = [&db](Request& req) {
-        // A query that throws drops its reply sender, so its caller gets nullopt.
+        // A query that throws drops its reply sender, so its caller gets nullopt. One whose caller has gone,
+        // a WebSocket client that disconnected, is skipped.
         try {
             std::visit(Overloaded{
                            [&](Insert& r) { db.insert(r.rows); },
-                           [&](Snapshot& r) { (void)r.reply.send(db.snapshot(r.t_unix_s)); },
-                           [&](Aircraft& r) { (void)r.reply.send(db.aircraft(r.icao, r.t_unix_s)); },
-                           [&](Activity& r) { (void)r.reply.send(db.activity(r.from_unix_s)); },
-                           [&](Heatmap& r) { (void)r.reply.send(db.heatmap(r.req)); },
+                           [&](Snapshot& r) {
+                               if (!r.reply.is_closed()) (void)r.reply.send(db.snapshot(r.req));
+                           },
+                           [&](Aircraft& r) {
+                               if (!r.reply.is_closed()) (void)r.reply.send(db.aircraft(r.req));
+                           },
+                           [&](Activity& r) {
+                               if (!r.reply.is_closed()) (void)r.reply.send(db.activity(r.req));
+                           },
+                           [&](Heatmap& r) {
+                               if (!r.reply.is_closed()) (void)r.reply.send(db.heatmap(r.req));
+                           },
                        },
                        req);
         } catch (const std::exception& e) {
@@ -470,7 +508,7 @@ void AircraftHistory::run(coro::MpscReceiver<Request>& rx, Db& db) {
     };
     try {
         while (auto req = coro::blocking_next(rx)) handle(*req);
-    } catch (const coro::BlockingCancelled&) {
+    } catch (const coro::TaskCancelled&) {
         // The runtime is shutting down. try_recv() isn't a cancellation point, so the rows already sent can
         // still be written; the queries are dropped, and their callers get nullopt.
         while (auto req = rx.try_recv())

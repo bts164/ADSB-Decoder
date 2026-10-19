@@ -13,21 +13,22 @@ String _windowLabel(double s) => s >= 86400
 extension _History on _FrameTablePageState {
   /// Asks for the activity histogram: all of it at first, then from the
   /// last bucket (which may have been still filling) on. Needs a history db.
-  void _requestActivity() {
+  Future<void> _requestActivity() async {
     if (!_backfilled || _historyStartS == null || _activityInFlight) return;
     _activityInFlight = true;
     final t0 = _activityT0;
     final from = t0 == null ? null : t0 + math.max(0, _activity.length - 1) * _activityBucketS;
-    _channel?.sink.add(jsonEncode({'type': 'activity', 'from': ?from}));
+    final reply = await _ask((c) => c.activity(api.ActivityRequest(from: from)));
+    _activityInFlight = false;
+    if (reply != null) _onActivity(reply);
   }
 
   /// Merges an activity reply: its counts replace ours from its t0 on.
-  void _onActivity(Map<String, dynamic> j) {
-    _activityInFlight = false;
-    final t0 = (j['t0'] as num?)?.toDouble();
-    if (t0 == null) return;
-    final bucketS = (j['bucket_s'] as num).toDouble();
-    final counts = [for (final c in j['counts'] as List) (c as num).toInt()];
+  void _onActivity(api.Activity reply) {
+    if (!reply.hasT0()) return;
+    final t0 = reply.t0;
+    final bucketS = reply.bucketS;
+    final counts = List<int>.of(reply.counts);
     final oldT0 = _activityT0;
     final List<int> merged;
     if (oldT0 == null || bucketS != _activityBucketS || t0 < oldT0) {
@@ -47,13 +48,18 @@ extension _History on _FrameTablePageState {
     _aircraftChanged.notify();
   }
 
-  void _seek(double t) {
+  Future<void> _seek(double t) async {
     if (_seekInFlight) {
       _queuedSeekS = t;
       return;
     }
     _seekInFlight = true;
-    _channel?.sink.add(jsonEncode({'type': 'seek', 't': t}));
+    final reply = await _ask((c) => c.snapshot(api.SnapshotRequest(t: t)));
+    _seekInFlight = false;
+    if (reply != null) _onSnapshot(AircraftSnapshot.fromProto(reply));
+    final queued = _queuedSeekS;
+    _queuedSeekS = null;
+    if (queued != null) _seek(queued);
   }
 
   void _onScrub(double t) {
@@ -150,9 +156,8 @@ extension _History on _FrameTablePageState {
   /// time. A newly selected aircraft's history restarts from what's shown
   /// now; otherwise (scrubbing, going live) the current charts stay up until
   /// the reply replaces them, so they don't flash empty while dragging.
-  /// Without a history db there's no reply and it builds up from live
-  /// updates alone.
-  void _requestSelectedHistory() {
+  /// Without a history db it builds up from live updates alone.
+  Future<void> _requestSelectedHistory() async {
     final icao = _selectedIcao;
     if (icao != _selectedHistoryIcao) {
       final a = icao == null ? null : _shownAircraft[icao];
@@ -160,25 +165,16 @@ extension _History on _FrameTablePageState {
       _selectedHistoryIcao = icao;
     }
     if (icao == null || !_backfilled) return;
-    _channel?.sink.add(jsonEncode({'type': 'aircraft_history', 'icao': icao, 't': ?_snapshot?.timeS}));
+    final request = api.AircraftHistoryRequest(icao: int.parse(icao, radix: 16), t: _snapshot?.timeS);
+    final reply = await _ask((c) => c.aircraftHistory(request));
+    // Dropped if the selection changed meanwhile.
+    if (reply != null && icao == _selectedIcao) _onAircraftHistory(reply);
   }
 
   /// A reply to _requestSelectedHistory: its points, then (when live) any
-  /// live ones that arrived after it. Replies for an earlier selection are
-  /// dropped.
-  void _onAircraftHistory(Map<String, dynamic> j) {
-    if (j['icao'] != _selectedIcao) return;
-    final points = <HistoryPoint>[
-      for (final p in j['points'] as List)
-        (
-          t: (p[0] as num).toDouble(),
-          altFt: (p[1] as num?)?.round(),
-          gsKt: (p[2] as num?)?.toDouble(),
-          vrFpm: (p[3] as num?)?.round(),
-          signalDb: (p[4] as num?)?.toDouble(),
-          selAltFt: (p[5] as num?)?.round(),
-        ),
-    ];
+  /// live ones that arrived after it.
+  void _onAircraftHistory(api.AircraftHistory reply) {
+    final points = reply.points.map(historyPointFromProto).toList();
     final last = points.isEmpty ? double.negativeInfinity : points.last.t;
     _selectedHistory = [
       ...points,

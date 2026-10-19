@@ -1,7 +1,12 @@
 import 'package:latlong2/latlong.dart';
 
-/// One decoded frame, as published by the backend's --ws-port
-/// (see src/decode/frame_decode.cpp: to_json).
+// Prefixed: the generated Error would hide dart:core's.
+import 'api/adsb/api/v1/api.pb.dart' as api;
+
+/// An ICAO address as the UI shows and keys it: six lowercase hex digits.
+String icaoHex(int icao) => icao.toRadixString(16).padLeft(6, '0');
+
+/// One decoded frame, from a live update (api.Frame).
 class FrameRecord {
   final int idx;
   final int bits;
@@ -13,6 +18,7 @@ class FrameRecord {
   final bool crcChecked;
   /// The bit single-bit error correction flipped to pass the CRC (DF17/18), or null if none.
   final int? crcFixedBit;
+  /// In hex.
   final String payload;
   /// One-line description of what the frame says, e.g. "Position · 7200 ft"; null when the CRC failed.
   final String? summary;
@@ -30,27 +36,26 @@ class FrameRecord {
     required this.summary,
   });
 
-  factory FrameRecord.fromJson(Map<String, dynamic> j) {
+  factory FrameRecord.fromProto(api.Frame f) {
     return FrameRecord(
-      idx: j['idx'] as int,
-      bits: j['bits'] as int,
-      confidence: (j['confidence'] as num).toDouble(),
-      df: j['df'] as int,
-      icao: j['icao'] as String?,
-      crcOk: j['crc_ok'] as bool,
-      crcChecked: j['crc_checked'] as bool,
-      crcFixedBit: j['crc_fixed_bit'] as int?,
-      payload: j['payload'] as String,
-      summary: j['summary'] as String?,
+      idx: f.idx.toInt(),
+      bits: f.bits,
+      confidence: f.confidence,
+      df: f.df,
+      icao: f.hasIcao() ? icaoHex(f.icao) : null,
+      crcOk: f.crcOk,
+      crcChecked: f.crcChecked,
+      crcFixedBit: f.hasCrcFixedBit() ? f.crcFixedBit : null,
+      payload: [for (final b in f.payload) b.toRadixString(16).padLeft(2, '0')].join(),
+      summary: f.summary.isEmpty ? null : f.summary,
     );
   }
 }
 
-/// Current tracked state of one aircraft, as published by the backend's
-/// --ws-port on every change (see src/decode/aircraft.cpp: to_json).
-/// Unlike FrameRecord this isn't appended to a log -- each message carries
-/// the aircraft's full current state, so the frontend just replaces its map
-/// entry for that ICAO wholesale.
+/// Current tracked state of one aircraft (api.Aircraft), from a live update or
+/// a snapshot, with each unset field null. Unlike FrameRecord this isn't
+/// appended to a log -- each update carries the aircraft's full current
+/// state, so the frontend just replaces its map entry for that ICAO wholesale.
 class AircraftRecord {
   final String icao;
   final String? callsign;
@@ -129,37 +134,37 @@ class AircraftRecord {
     required this.signalDb,
   });
 
-  factory AircraftRecord.fromJson(Map<String, dynamic> j) {
+  factory AircraftRecord.fromProto(api.Aircraft a) {
     return AircraftRecord(
-      icao: j['icao'] as String,
-      callsign: j['callsign'] as String?,
-      category: j['category'] as String?,
-      squawk: j['squawk'] as String?,
-      altitudeFt: j['altitude_ft'] as int?,
-      lat: (j['lat'] as num?)?.toDouble(),
-      lon: (j['lon'] as num?)?.toDouble(),
-      groundSpeedKt: (j['ground_speed_kt'] as num?)?.toDouble(),
-      trackDeg: (j['track_deg'] as num?)?.toDouble(),
-      verticalRateFpm: j['vertical_rate_fpm'] as int?,
-      headingDeg: (j['heading_deg'] as num?)?.toDouble(),
-      iasKt: j['ias_kt'] as int?,
-      tasKt: j['tas_kt'] as int?,
-      mach: (j['mach'] as num?)?.toDouble(),
-      rollDeg: (j['roll_deg'] as num?)?.toDouble(),
-      onGround: j['on_ground'] as bool?,
-      alert: j['alert'] as bool? ?? false,
-      spi: j['spi'] as bool? ?? false,
-      selectedAltitudeFt: j['selected_altitude_ft'] as int?,
-      selectedAltitudeSource: j['selected_altitude_source'] as String?,
-      selectedHeadingDeg: (j['selected_heading_deg'] as num?)?.toDouble(),
-      baroSettingHpa: (j['baro_setting_hpa'] as num?)?.toDouble(),
-      autopilotModes: (j['autopilot_modes'] as List?)?.cast<String>(),
-      adsbVersion: j['adsb_version'] as int?,
-      nacP: j['nac_p'] as int?,
-      sil: j['sil'] as int?,
-      lastSeenUnixS: (j['last_seen_unix_s'] as num).toDouble(),
-      messages: j['messages'] as int,
-      signalDb: (j['signal_db'] as num?)?.toDouble(),
+      icao: icaoHex(a.icao),
+      callsign: a.hasCallsign() ? a.callsign : null,
+      category: a.hasCategory() ? a.category : null,
+      squawk: a.hasSquawk() ? a.squawk : null,
+      altitudeFt: a.hasAltitudeFt() ? a.altitudeFt : null,
+      lat: a.hasLat() ? a.lat : null,
+      lon: a.hasLon() ? a.lon : null,
+      groundSpeedKt: a.hasGroundSpeedKt() ? a.groundSpeedKt : null,
+      trackDeg: a.hasTrackDeg() ? a.trackDeg : null,
+      verticalRateFpm: a.hasVerticalRateFpm() ? a.verticalRateFpm : null,
+      headingDeg: a.hasHeadingDeg() ? a.headingDeg : null,
+      iasKt: a.hasIasKt() ? a.iasKt : null,
+      tasKt: a.hasTasKt() ? a.tasKt : null,
+      mach: a.hasMach() ? a.mach : null,
+      rollDeg: a.hasRollDeg() ? a.rollDeg : null,
+      onGround: a.hasOnGround() ? a.onGround : null,
+      alert: a.alert,
+      spi: a.spi,
+      selectedAltitudeFt: a.hasSelectedAltitudeFt() ? a.selectedAltitudeFt : null,
+      selectedAltitudeSource: a.hasSelectedAltitudeSource() ? a.selectedAltitudeSource.name : null,
+      selectedHeadingDeg: a.hasSelectedHeadingDeg() ? a.selectedHeadingDeg : null,
+      baroSettingHpa: a.hasBaroSettingHpa() ? a.baroSettingHpa : null,
+      autopilotModes: a.hasAutopilotModes() ? [for (final m in a.autopilotModes.modes) m.name] : null,
+      adsbVersion: a.hasAdsbVersion() ? a.adsbVersion : null,
+      nacP: a.hasNacP() ? a.nacP : null,
+      sil: a.hasSil() ? a.sil : null,
+      lastSeenUnixS: a.lastSeenUnixS,
+      messages: a.messages.toInt(),
+      signalDb: a.hasSignalDb() ? a.signalDb : null,
     );
   }
 }
@@ -190,7 +195,7 @@ const categoryNames = {
 /// What the emergency squawks mean.
 const emergencySquawks = {'7500': 'Hijack', '7600': 'Radio failure', '7700': 'Emergency'};
 
-/// The sky at one time, from the backend's history db (--history-db; see
+/// The sky at one time, from the backend's history db (a snapshot call; see
 /// src/output/aircraft_history.h: AircraftHistory::snapshot): every
 /// aircraft updated in the ten minutes before `timeS`, with its state as of
 /// `timeS` and its track over those minutes.
@@ -210,21 +215,20 @@ class AircraftSnapshot {
     required this.trails,
   });
 
-  factory AircraftSnapshot.fromJson(Map<String, dynamic> j) {
+  factory AircraftSnapshot.fromProto(api.Snapshot s) {
     final aircraft = <String, AircraftRecord>{};
     final trails = <String, List<TrailPoint>>{};
-    for (final e in j['aircraft'] as List) {
-      final a = AircraftRecord.fromJson(e['state'] as Map<String, dynamic>);
+    for (final e in s.aircraft) {
+      final a = AircraftRecord.fromProto(e.state);
       aircraft[a.icao] = a;
       trails[a.icao] = [
-        for (final p in e['track'] as List)
-          (pos: LatLng((p[0] as num).toDouble(), (p[1] as num).toDouble()), altFt: (p[2] as num?)?.round()),
+        for (final p in e.track) (pos: LatLng(p.lat, p.lon), altFt: p.hasAltitudeFt() ? p.altitudeFt : null),
       ];
     }
     return AircraftSnapshot(
-      timeS: (j['t'] as num).toDouble(),
-      startS: (j['t_min'] as num?)?.toDouble(),
-      endS: (j['t_max'] as num?)?.toDouble(),
+      timeS: s.t,
+      startS: s.hasTMin() ? s.tMin : null,
+      endS: s.hasTMax() ? s.tMax : null,
       aircraft: aircraft,
       trails: trails,
     );
@@ -246,8 +250,17 @@ HistoryPoint historyPointOf(AircraftRecord a) => (
       selAltFt: a.selectedAltitudeFt,
     );
 
-/// One FFT snapshot of the raw pre-resample IQ, as published by the
-/// backend's --ws-port (see src/dsp/spectrum.cpp: to_json). `bins` is
+HistoryPoint historyPointFromProto(api.AircraftHistory_Point p) => (
+      t: p.t,
+      altFt: p.hasAltitudeFt() ? p.altitudeFt : null,
+      gsKt: p.hasGroundSpeedKt() ? p.groundSpeedKt : null,
+      vrFpm: p.hasVerticalRateFpm() ? p.verticalRateFpm : null,
+      signalDb: p.hasSignalDb() ? p.signalDb : null,
+      selAltFt: p.hasSelectedAltitudeFt() ? p.selectedAltitudeFt : null,
+    );
+
+/// One FFT snapshot of the raw pre-resample IQ, from a live update
+/// (api.SpectrumRow), in dB. `bins` is
 /// already fftshifted -- bin 0 is freqHz - rateHz/2, the last bin is
 /// freqHz + rateHz/2 -- so it plots directly against a linear frequency axis.
 class SpectrumFrame {
@@ -257,12 +270,8 @@ class SpectrumFrame {
 
   SpectrumFrame({required this.freqHz, required this.rateHz, required this.bins});
 
-  factory SpectrumFrame.fromJson(Map<String, dynamic> j) {
-    return SpectrumFrame(
-      freqHz: (j['freq_hz'] as num).toDouble(),
-      rateHz: (j['rate_hz'] as num).toDouble(),
-      bins: (j['bins'] as List).map((e) => (e as num).toDouble()).toList(),
-    );
+  factory SpectrumFrame.fromProto(api.SpectrumRow r) {
+    return SpectrumFrame(freqHz: r.freqHz, rateHz: r.rateHz, bins: List.of(r.binsDb));
   }
 }
 
@@ -291,14 +300,14 @@ int compareNullable(num? a, num? b) {
 }
 
 /// The backend's report on whether its live input keeps up with real time
-/// (an `input_status` message, sent every couple of seconds while packets
+/// (an update's api.InputStatus, sent every couple of seconds while packets
 /// arrive).
 class InputStatus {
-  InputStatus.fromJson(Map<String, dynamic> j)
-      : ok = j['ok'] as bool,
-        summary = j['summary'] as String,
-        rateHz = (j['rate_hz'] as num).toDouble(),
-        delivered = _delivered(j),
+  InputStatus.fromProto(api.InputStatus s)
+      : ok = s.ok,
+        summary = s.summary,
+        rateHz = s.rateHz,
+        delivered = _delivered(s),
         received = DateTime.now();
 
   final bool ok;
@@ -309,10 +318,9 @@ class InputStatus {
   final double delivered;
   final DateTime received;
 
-  static double _delivered(Map<String, dynamic> j) {
-    final window = (j['window_s'] as num).toDouble();
-    if (window <= 0) return 0;
-    final d = ((j['stream_s'] as num) - (j['lost_s'] as num) - (j['dropped_s'] as num)) / window;
+  static double _delivered(api.InputStatus s) {
+    if (s.windowS <= 0) return 0;
+    final d = (s.streamS - s.lostS - s.droppedS) / s.windowS;
     return d.clamp(0.0, 1.0).toDouble();
   }
 }

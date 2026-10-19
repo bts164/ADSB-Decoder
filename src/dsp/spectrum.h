@@ -38,7 +38,7 @@ private:
 
 /** One SpectrumComputer::compute() result with the context needed to serialize it. */
 struct SpectrumFrame {
-    const xt::xtensor<float, 1>& mag_db;
+    xt::xtensor<float, 1> mag_db;
     double rate_hz;  /**< input sample rate, i.e. the span of the bins */
     double freq_hz;  /**< center frequency */
 };

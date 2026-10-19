@@ -1,0 +1,233 @@
+// The calls between adsb and the UI, over a WebSocket: doc/design/ui_api.md describes the protocol.
+//
+// Every WebSocket message is one binary frame holding one envelope: a ClientMessage from the UI, or a
+// ServerMessage from adsb. A request and its reply share a field number in the two oneofs.
+
+syntax = "proto3";
+
+package adsb.api.v1;
+
+// ---- Envelopes ----
+
+message ClientMessage {
+  uint32 id = 1;  // larger than every earlier id on this connection; for cancel, the call to cancel
+  oneof call {
+    Cancel cancel = 2;
+    ServerInfoRequest server_info = 3;
+    SubscribeRequest subscribe = 4;
+    SpectrumRequest spectrum = 5;
+    SnapshotRequest snapshot = 10;
+    AircraftHistoryRequest aircraft_history = 11;
+    ActivityRequest activity = 12;
+    HeatmapRequest heatmap = 13;
+  }
+}
+
+message ServerMessage {
+  uint32 id = 1;  // the call this belongs to
+  bool end = 2;   // the call's last message
+  oneof body {    // unset only on the end of a stream that finished normally
+    Error error = 9;  // always with end
+    ServerInfo server_info = 3;
+    Update update = 4;
+    SpectrumRow spectrum = 5;
+    Snapshot snapshot = 10;
+    AircraftHistory aircraft_history = 11;
+    Activity activity = 12;
+    Heatmap heatmap = 13;
+  }
+}
+
+message Cancel {}
+
+message Error {
+  enum Code {
+    CODE_UNSPECIFIED = 0;
+    UNIMPLEMENTED = 1;       // a call this server doesn't know
+    INVALID_ARGUMENT = 2;    // e.g. an id not larger than the last, or an empty heatmap area
+    NO_HISTORY = 3;          // a history call without --history-db
+    INTERNAL = 4;            // the handler failed; the server logged why
+    CANCELLED = 5;           // the client cancelled it
+    RESOURCE_EXHAUSTED = 6;  // kClientCalls calls already in progress
+    NO_LIVE_INPUT = 7;       // a spectrum call to a server with no live input (`serve`)
+  }
+  Code code = 1;
+  string message = 2;
+}
+
+// ---- Server info and live updates ----
+
+message ServerInfoRequest {}
+
+message ServerInfo {
+  bool history = 1;   // the history calls are answered
+  bool spectrum = 2;  // the spectrum call is answered
+  double default_interval_s = 3;  // --ws-interval
+}
+
+message SubscribeRequest {
+  optional double interval_s = 1;  // unset for --ws-interval; at least kMinUpdateIntervalS
+}
+
+// One reply of a subscription: what was published since its last update. Frames are in the order they were
+// published; aircraft are those that changed since the last update, each as last published. The first update
+// has every aircraft heard in the last 600 s.
+message Update {
+  repeated Frame frames = 1;
+  repeated Aircraft aircraft = 3;
+  InputStatus input_status = 4;  // set only when it changed
+}
+
+message Frame {
+  uint64 idx = 1;  // stream sample index of the preamble
+  uint32 bits = 2;
+  float confidence = 3;
+  uint32 df = 4;
+  optional uint32 icao = 5;  // unset when the address isn't known
+  bool crc_ok = 6;
+  bool crc_checked = 7;  // false for DF19/22
+  optional uint32 crc_fixed_bit = 8;
+  bytes payload = 9;  // bits / 8 bytes, first bit in the top bit of byte 0
+  string summary = 10;  // empty when there's none
+}
+
+// The spectrum's rows, one reply each, as they're computed. The server computes them only while a spectrum
+// call is in progress.
+message SpectrumRequest {}
+
+message SpectrumRow {
+  double freq_hz = 1;
+  double rate_hz = 2;
+  repeated float bins_db = 3;
+}
+
+message InputStatus {
+  double window_s = 1;
+  double rate_hz = 2;
+  double stream_s = 3;
+  double lost_s = 4;
+  double dropped_s = 5;
+  optional uint64 kernel_drops = 6;
+  bool ok = 7;
+  string summary = 8;
+}
+
+message Aircraft {
+  uint32 icao = 1;
+  optional string callsign = 2;
+  optional string category = 3;
+  optional string squawk = 4;
+  optional int32 altitude_ft = 5;
+  optional double lat = 6;
+  optional double lon = 7;
+  optional double ground_speed_kt = 8;
+  optional double track_deg = 9;
+  optional int32 vertical_rate_fpm = 10;
+  optional double heading_deg = 11;
+  optional int32 ias_kt = 12;
+  optional int32 tas_kt = 13;
+  optional double mach = 14;
+  optional double roll_deg = 15;
+  optional bool on_ground = 16;
+  bool alert = 17;
+  bool spi = 18;
+  optional int32 selected_altitude_ft = 19;
+  enum AltitudeSource {
+    ALTITUDE_SOURCE_UNSPECIFIED = 0;
+    MCP = 1;
+    FMS = 2;
+  }
+  optional AltitudeSource selected_altitude_source = 20;
+  optional double selected_heading_deg = 21;
+  optional double baro_setting_hpa = 22;
+  AutopilotModes autopilot_modes = 23;  // unset until target state arrives
+  optional int32 adsb_version = 24;
+  optional int32 nac_p = 25;
+  optional int32 sil = 26;
+  uint64 messages = 27;
+  optional double signal_db = 28;
+  double last_seen_s = 29;
+  double last_seen_unix_s = 30;
+}
+
+// Wrapped so that "not known yet" (unset) differs from "none engaged" (empty).
+message AutopilotModes {
+  enum Mode {
+    MODE_UNSPECIFIED = 0;
+    AP = 1;
+    VNAV = 2;
+    ALT = 3;
+    APP = 4;
+    LNAV = 5;
+  }
+  repeated Mode modes = 1;
+}
+
+// ---- History calls ----
+
+message SnapshotRequest {
+  optional double t = 1;  // Unix s; unset for the latest
+}
+
+message Snapshot {
+  double t = 1;
+  optional double t_min = 2;  // the database's span; unset when it's empty
+  optional double t_max = 3;
+  message Entry {
+    Aircraft state = 1;
+    repeated TrackPoint track = 2;  // oldest first
+  }
+  repeated Entry aircraft = 4;
+}
+
+message TrackPoint {
+  double lat = 1;
+  double lon = 2;
+  optional int32 altitude_ft = 3;
+}
+
+message AircraftHistoryRequest {
+  uint32 icao = 1;
+  optional double t = 2;  // unset for its latest update
+}
+
+message AircraftHistory {
+  double t = 1;
+  message Point {
+    double t = 1;
+    optional int32 altitude_ft = 2;
+    optional double ground_speed_kt = 3;
+    optional int32 vertical_rate_fpm = 4;
+    optional double signal_db = 5;
+    optional int32 selected_altitude_ft = 6;
+  }
+  repeated Point points = 2;  // oldest first
+}
+
+message ActivityRequest {
+  optional double from = 1;  // unset for the whole database
+}
+
+message Activity {
+  double bucket_s = 1;
+  optional double t0 = 2;  // unset when there are no buckets
+  repeated uint32 counts = 3;
+}
+
+message HeatmapRequest {
+  double west = 1;
+  double south = 2;
+  double east = 3;
+  double north = 4;
+  uint32 width = 5;
+  uint32 height = 6;
+  optional double t0 = 7;
+  optional double t1 = 8;
+}
+
+message Heatmap {
+  uint32 max = 1;
+  // The nonzero cells: row-major index (row 0 at the north) and flight count, one pair per position.
+  repeated uint32 cell_index = 2;
+  repeated uint32 cell_count = 3;
+}

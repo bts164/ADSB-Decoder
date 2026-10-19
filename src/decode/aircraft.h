@@ -106,6 +106,8 @@ public:
     const AircraftState* find(uint32_t icao) const;
     /** The aircraft with address `icao`, added if it hasn't been seen. */
     AircraftState& aircraft(uint32_t icao);
+    /** Every aircraft seen so far, by address. */
+    const std::unordered_map<uint32_t, AircraftState>& all() const { return m_table; }
 
 private:
     // Confirmed by a CRC-valid DF11/17/18, whose AA field is the address in the clear. Short replies, whose AP

@@ -6,7 +6,7 @@ class AdsbRecipe(ConanFile):
     name = "adsb"
     package_type = "application"
     settings = "os", "compiler", "build_type", "arch"
-    exports_sources = "CMakeLists.txt", "src/*", "tests/CMakeLists.txt", "tests/*.cpp", "scenarios/*"
+    exports_sources = "CMakeLists.txt", "src/*", "proto/*", "tests/CMakeLists.txt", "tests/*.cpp", "scenarios/*"
 
     # No version attribute: this is developed and re-exported/rebuilt as
     # often as coro is (see requirements() below), so pass --version
@@ -45,8 +45,16 @@ class AdsbRecipe(ConanFile):
         # (see frame_recorder.h). HighFive is a header-only C++ wrapper over
         # the HDF5 C library.
         self.requires("highfive/2.10.0")
-        # Logging (see src/common/log.h for the printf-style LOGF macros).
-        self.requires("abseil/20250127.0")
+        # The UI API's messages (proto/adsb/api/v1/api.proto, doc/design/ui_api.md). The full library, not
+        # lite: MessageDifferencer and the debug strings need it.
+        self.requires("protobuf/7.36.2")
+        # Logging (see src/common/log.h for the printf-style LOGF macros). protobuf requires Abseil too, and
+        # its recipe takes any version from 20240722.0 to 20260107.1, so this one serves both.
+        self.requires("abseil/[*]")
+
+    def build_requirements(self):
+        # protoc, for src/api's protobuf_generate(), at the same version as the library it generates for.
+        self.tool_requires("protobuf/<host_version>")
 
     def configure(self):
         # Only the single-precision (float) library is used -- see

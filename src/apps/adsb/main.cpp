@@ -10,8 +10,8 @@
 // run_demod_loop the same way.
 // The `serve` subcommand has no source: it only serves an existing history
 // database to WebSocket clients until Ctrl+C.
-// See pipeline.h/frame_decode.h/aircraft.h for frame decoding, ws_publisher.h
-// for the WebSocket fan-out, and spectrum.h for the waterfall FFT side channel.
+// See pipeline.h/frame_decode.h/aircraft.h for frame decoding, api_server.h
+// for the UI's WebSocket API, and spectrum.h for the waterfall FFT side channel.
 
 #include <chrono>
 #include <csignal>
@@ -25,12 +25,12 @@
 #include <utility>
 
 #include <argparse/argparse.hpp>
-#include <nlohmann/json.hpp>
 
 #include <coro/coro.h>
 #include <coro/io/signal.h>
 #include <coro/runtime/runtime.h>
 #include <coro/sync/select.h>
+#include <coro/sync/watch.h>
 
 #include "apps/adsb/pipeline.h"
 #include "apps/filter_options.h"
@@ -40,7 +40,7 @@
 #include "input/rtlsdr_stream.h"
 #include "input/vita49_stream.h"
 #include "output/aircraft_history.h"
-#include "output/ws_publisher.h"
+#include "output/api_server.h"
 
 namespace {
 
@@ -52,14 +52,19 @@ struct Commands {
     argparse::ArgumentParser serve{"serve"};
 };
 
-// Sends an InputStatus to the UI, which warns when the input isn't keeping up.
-void publish_input_status(const InputStatus& s) {
-    nlohmann::json j{
-        {"type", "input_status"}, {"window_s", s.window_s}, {"rate_hz", s.rate_hz},    {"stream_s", s.stream_s},
-        {"lost_s", s.lost_s},     {"dropped_s", s.dropped_s}, {"ok", s.ok()},          {"summary", s.describe()},
-    };
-    if (s.kernel_drops) j["kernel_drops"] = *s.kernel_drops;
-    ws_publisher_publish(j.dump());
+// An InputStatus as the UI takes it; the UI warns when the input isn't keeping up. Here rather than in adsb_api,
+// so that library doesn't need adsb_input.
+api::InputStatus to_proto(const InputStatus& s) {
+    api::InputStatus msg;
+    msg.set_window_s(s.window_s);
+    msg.set_rate_hz(s.rate_hz);
+    msg.set_stream_s(s.stream_s);
+    msg.set_lost_s(s.lost_s);
+    msg.set_dropped_s(s.dropped_s);
+    if (s.kernel_drops) msg.set_kernel_drops(*s.kernel_drops);
+    msg.set_ok(s.ok());
+    msg.set_summary(s.describe());
+    return msg;
 }
 
 // Options every source shares are global and go before the subcommand; each source's own options belong to its
@@ -73,16 +78,15 @@ void add_options(argparse::ArgumentParser& program, Commands& cmds) {
                        "  ADSB_TIMING=1                log the demodulator's stage times for every block, and the\n"
                        "                               demod loop's throughput every second (0: off)\n"
                        "  ADSB_NTASKS=N                split each block's kernels into N parts instead of one per\n"
-                       "                               runtime worker\n"
-                       "  ADSB_WS_MAX_PENDING_BYTES=N  most bytes of updates one WebSocket client may have waiting\n"
-                       "                               before the oldest are dropped (default 16 MiB)");
+                       "                               runtime worker");
     FilterOptions::add_options(program);
-    add_log_options(program, "1 adds a line for each aircraft change, 2 a line for every decoded frame");
+    add_log_options(program,
+                    "1 adds a line for each websocket call, 2 for each aircraft change, 3 for every decoded frame");
     DemodLoopParams::add_options(program);
     program.add_argument("--ws-port").scan<'u', uint16_t>().help(
-        "publish decoded frames as JSON over a WebSocket server on this port (default: no server)");
+        "serve the UI's API (doc/design/ui_api.md) over a WebSocket server on this port (default: no server)");
     program.add_argument("--ws-interval").scan<'g', double>().default_value(1.0).help(
-        "seconds between the updates sent to each --ws-port client");
+        "seconds between a --ws-port client's live updates, unless its subscription asks otherwise");
     program.add_argument("--history-db").help(
         "record every aircraft update to this SQLite file, live, for the UI's time scrubber; --ws-port "
         "clients get the recent sky on connect and can seek through it (default: not recorded)");
@@ -167,7 +171,8 @@ coro::Coro<int> async_main(int argc, char** argv) {
         }
         std::optional<AircraftHistory> history = AircraftHistory::open(*history_db_path);
         if (!history) co_return 1;
-        ws_publisher_init(*ws_port, ws_interval, std::move(history));
+        // Nothing is published, so the senders go now.
+        api_server_spawn(*ws_port, ws_interval, false, api_channels().second, std::move(history));
         LOGF(INFO, "serving %s on port %u (Ctrl+C to stop)", *history_db_path, *ws_port);
         co_await coro::signal(SIGINT);
         LOGF(INFO, "stopping after SIGINT");
@@ -185,10 +190,13 @@ coro::Coro<int> async_main(int argc, char** argv) {
             if (!history) co_return 1;
             LOGF(INFO, "recording aircraft history to %s", *history_db_path);
         }
+        std::optional<ApiSenders> ws;
         if (ws_port) {
             std::optional<AircraftHistory> ws_history;
             if (history) ws_history = history->clone();
-            ws_publisher_init(*ws_port, ws_interval, std::move(ws_history));
+            auto [senders, receivers] = api_channels();
+            api_server_spawn(*ws_port, ws_interval, true, std::move(receivers), std::move(ws_history));
+            ws = std::move(senders);
         }
 
         // The filter is built for the source's rate, and the source pads its blocks for the filter.
@@ -207,7 +215,11 @@ coro::Coro<int> async_main(int argc, char** argv) {
         std::optional<coro::CoroStream<IqBlock>> stream;
         if (program.is_subcommand_used(cmds.vita49)) {
             Vita49StreamParams params = Vita49StreamParams::from_options(program, cmds.vita49);
-            if (ws_port) params.receiver.on_status = publish_input_status;
+            // A clone of its own, as `ws` goes to run_demod_loop; shared, as on_status must be copyable.
+            if (ws)
+                params.receiver.on_status =
+                    [status = std::make_shared<coro::WatchSender<std::optional<api::InputStatus>>>(
+                         ws->input_status.clone())](const InputStatus& s) { (void)status->send(to_proto(s)); };
             rate_hz = params.receiver.sample_rate_hz;
             freq_hz = params.freq_hz;
             filter = make_filter(rate_hz);
@@ -242,7 +254,7 @@ coro::Coro<int> async_main(int argc, char** argv) {
         auto done = co_await coro::select(
             coro::build_task().name("demod").spawn(run_demod_loop(std::move(filter), rate_hz, freq_hz,
                                                                   std::move(*stream), std::move(loop_params),
-                                                                  std::move(history))),
+                                                                  std::move(history), std::move(ws))),
             coro::signal(SIGINT));
         if (done.index() == 1) {
             LOGF(INFO, "stopping after SIGINT");

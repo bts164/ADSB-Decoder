@@ -41,7 +41,7 @@ coro::Coro<void> send_loop(coro::UdpSocket sock, coro::CoroStream<PacketBatch> s
         double rate_hz;
         ~Summary() { log_pace_summary(pace_rx.get(), duration<double>(steady_clock::now() - t0).count(), rate_hz); }
     } summary{pace_rx, t0, rate_hz};
-    VLOGF(1, "sending at %.3f Msps", rate_hz / 1e6);
+    LOGF(INFO, "sending at %.3f Msps", rate_hz / 1e6);
     uint64_t sent = 0;
     steady_clock::duration send_wait{};
     while (auto batch = co_await coro::next(stream)) {
@@ -62,5 +62,5 @@ coro::Coro<void> send_loop(coro::UdpSocket sock, coro::CoroStream<PacketBatch> s
             return true;
         });
     }
-    VLOGF(1, "stream ended after %.2f s", duration<double>(steady_clock::now() - t0).count());
+    LOGF(INFO, "stream ended after %.2f s", duration<double>(steady_clock::now() - t0).count());
 }

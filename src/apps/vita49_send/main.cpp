@@ -67,7 +67,7 @@ void add_options(argparse::ArgumentParser& program) {
     program.add_argument("--samples-per-packet").scan<'u', unsigned>().default_value(360u).help(
         "IQ sample pairs per VRT packet (default 360, chosen to keep the packet under one "
         "Ethernet MTU -- see doc/design/vita49-format.md's \"UDP framing\" section)");
-    add_log_options(program, "1 for when sending starts and stops, 2 for every send, sim render step and drop");
+    add_log_options(program, "2 adds a line for every send, sim render step and drop");
 }
 
 // Parses the command line and starts logging. On an error prints it, with the usage of the parser the bad

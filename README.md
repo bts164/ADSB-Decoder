@@ -188,7 +188,7 @@ adsb/
     net/      UDP sending helpers: datagram_batch (GSO batches + buffer pool), gso
     vrt/      the VITA-49 (VRT) wire format: format, encode (sender), assembler (receiver reorder/gap-fill)
     input/    file_stream, vita49_stream + iq_block_chunker, rtlsdr_stream + rtlsdr_device, sigmf_meta
-    output/   ws_publisher (WebSocket fan-out), aircraft_history (SQLite), frame_recorder (debug HDF5)
+    output/   api_server (the UI's API over WebSocket), aircraft_history (SQLite), frame_recorder (debug HDF5)
     sim/      adsb_sim (Mode S signal simulator), sim_kernels.ispc
     apps/
       filter_options.h  resampling-filter command-line options
@@ -242,10 +242,11 @@ channels. The diagrams below show each app's chain. The rules are:
 - **A shared resource gets an actor.** One task owns it and handles requests
   from one channel, in order. A request that needs an answer carries a
   oneshot sender for it. The history database is one: the sink sends it
-  inserts and the WebSocket clients send it queries.
-- **Fan-out is a broadcast, shared status a watch.** Every WebSocket client
-  has its own receiver on one broadcast channel. `vita49_send`'s stages
-  report drops on one watch channel, which the pace monitor reads.
+  inserts and the WebSocket clients' calls send it queries.
+- **Fan-out is a broadcast, shared status a watch.** Every live subscription
+  has its own receiver on one broadcast channel of frames, and reads the
+  live aircraft and the input status from watch channels. `vita49_send`'s
+  stages report drops on one watch channel, which the pace monitor reads.
 - **Parallelism is inside a stage.** A stage that needs more than one core
   splits its own work with `coro::parallel()` (the demodulator, the sim's
   renderer). More stages would only add queues.
@@ -266,64 +267,87 @@ flowchart TB
         VRT["<b>vita49</b><br/>vita49_receive task<br/>UDP recv, VRT reorder and gap fill"]
         RTL["<b>rtlsdr</b><br/>blocking thread<br/>librtlsdr callback, u8 to cf32"]
     end
-    DEMOD["<b>demodulate task</b><br/>spectrum_tap(): FFT<br/>BlockStitcher: padding<br/>AdsbDemod: resample,<br/>preamble, slice"]
+    subgraph dtask["demodulate task"]
+        TAP["spectrum_tap()<br/>passes every block on,<br/>FFTs one per 150 ms at most"]
+        DEMOD["demodulate()<br/>BlockStitcher: padding<br/>AdsbDemod: resample,<br/>preamble, slice"]
+        TAP --> DEMOD
+    end
     PAR["coro::parallel() parts<br/>one per worker"]
     SINK["<b>demod task</b><br/>run_demod_loop()<br/>handle_frame(): validate,<br/>decode, AircraftTracker"]
     REC["debug_h5 task<br/>FrameRecorder"]
     HIST["history actor<br/>blocking thread"]
     subgraph ws["WebSocket server"]
         direction LR
-        ACC["ws_accept task"] --> CLI["ws_client task<br/>one per client"]
+        ACC["ws_accept task"] --> CLI["ws_client task<br/>one per client<br/>reads, starts calls, writes"]
+        CLI -- "requests, cancels" --> CALL["ws_call task<br/>one per call, at most 8"]
+        CALL -- "replies: mpsc, 16" --> CLI
     end
     H5[("HDF5")]
     DB[("SQLite")]
     UI(["UI"])
 
-    FILE -- "buffered, 4 blocks" --> DEMOD
-    VRT -- "mpsc, 64 MiB" --> DEMOD
-    RTL -- "mpsc, 4 blocks, drops when full" --> DEMOD
+    FILE -- "buffered, 4 blocks" --> TAP
+    VRT -- "mpsc, 64 MiB" --> TAP
+    RTL -- "mpsc, 4 blocks, drops when full" --> TAP
     DEMOD <-- "fork / join" --> PAR
     DEMOD -- "buffered, 64 blocks" --> SINK
-    SINK -- "broadcast" --> CLI
+    SINK -- "frames: broadcast, 64<br/>aircraft: watch" --> CALL
     SINK -. "--history-db: mpsc, 16" .-> HIST
     SINK -. "--debug-h5: mpsc, 4" .-> REC
     REC --> H5
     HIST <--> DB
-    DEMOD -. "--spectrum: broadcast" .-> CLI
-    VRT -. "input status, broadcast" .-> CLI
-    CLI -. "queries, oneshot replies" .-> HIST
+    TAP -. "spectrum: broadcast, 64" .-> CALL
+    CALL -. "settings: watch" .-> TAP
+    VRT -. "input status: watch" .-> CALL
+    CALL -. "queries, oneshot replies" .-> HIST
     CLI <--> UI
+
+    classDef optional stroke-dasharray: 5 5
+    class TAP,REC,HIST optional
 ```
 
 How to read the diagram:
 
-- **Boxes:** every box is a task on the one coro runtime, except the two marked
-  "blocking thread", which run on coro's blocking pool (`spawn_blocking`).
-  The stages listed in a task's box run in that task's polls: the task pulls
-  the stream through them.
+- **Boxes:** each box is a task. The two marked "blocking thread" run on
+  coro's blocking pool (`spawn_blocking`). The boxes inside the
+  demodulate task are not tasks: each is a stage of the stream that task
+  pulls, run in the task's polls, and the arrow between stages is a direct
+  call, with no queue. The stages listed in the demod task's box run in its
+  polls in the same way.
 - **Arrows:** each arrow is labelled with its channel and its depth, in
-  blocks or requests where no unit is given. A dashed arrow is there only
-  with the option it names. The spectrum and the input status go only to
-  WebSocket clients, so they also need `--ws-port`.
+  blocks or requests where no unit is given. A dashed arrow or box is there
+  only with the option it names. The spectrum tap and the input status are
+  for WebSocket clients, so they are there only with `--ws-port`; without it,
+  the source feeds `demodulate()` directly.
 - **`serve`:** the subcommand has no source and no demodulation. It runs only
   the history actor and the WebSocket server.
 
 The pieces fit together like this:
 
 1. A source turns its input into a `coro::CoroStream<IqBlock>`.
-2. A demodulate task on the same runtime pulls blocks from that stream,
-   through the optional spectrum tap, then stitches and demodulates them
-   (`demodulate()` in [demod.h](src/dsp/demod.h)). Each block's resampling
-   and preamble search are split across the runtime's workers. It can run
-   ahead of the demod loop, through a buffered stream (4 blocks deep with
-   `--debug-h5`, since each block then holds its IQ).
+2. A demodulate task on the same runtime pulls blocks from that stream.
+   With `--ws-port`, the first stage it pulls them through is the spectrum
+   tap (`spectrum_tap()` in [pipeline.cpp](src/apps/adsb/pipeline.cpp)). The
+   tap passes every block on unchanged. While a client has a spectrum call
+   open, which it reads from the server's settings watch, it also runs a
+   1024-point FFT of one block's raw IQ at most once every 150 ms, and
+   broadcasts the result, on its own clone of the frames' sender, to the
+   WebSocket clients for the waterfall. Then
+   `demodulate()` ([demod.h](src/dsp/demod.h)) stitches and demodulates each
+   block, splitting its resampling and preamble search across the runtime's
+   workers. The demodulate task can run ahead of the demod loop, through a
+   buffered stream (4 blocks deep with `--debug-h5`, since each block then
+   holds its IQ).
 3. The demod loop validates and decodes each block's frames in order, and
    keeps each aircraft's state in its `AircraftTracker`. It then hands the
    block's results to the outputs:
-    - one broadcast send of JSON to the WebSocket clients;
+    - with `--ws-port`, one broadcast send of the block's frames to the
+      WebSocket clients, and one update of the live aircraft in a watch,
+      which keeps each aircraft heard in the last 10 minutes as last
+      published. Each subscription builds its own updates from these;
     - with `--history-db`, one insert of the block's aircraft updates to the
       history actor, which owns the database and also answers the clients'
-      history queries;
+      history calls;
     - with `--debug-h5`, the frames and their IQ, to a recorder task, so
       writing the file doesn't hold up the loop.
 
@@ -344,16 +368,15 @@ the filter and picks the source. Every source then feeds the same
 | `--filter`, `--filter-meta` | off | Load the filter bank from these files instead of designing it |
 | `--preamble-min` | 3.0 | Preamble correlation threshold, in units of the block RMS |
 | `--slice-mag-min` | 112 | Bit-slice magnitude threshold, in units of the block RMS |
-| `--ws-port` | off | Publish JSON over WebSocket on this port |
-| `--ws-interval` | 1.0 | Seconds between the updates sent to each `--ws-port` client |
+| `--ws-port` | off | Serve the UI's API over WebSocket on this port (see [WebSocket](#websocket)) |
+| `--ws-interval` | 1.0 | Seconds between a subscription's live updates, unless it asks for another interval |
 | `--history-db` | off | SQLite file recording every aircraft update, for the UI's time scrubber |
-| `--spectrum` | off | Publish a 1024-point FFT of the raw IQ every 150 ms (for the waterfall); needs `--ws-port`, and is ignored with a warning without it |
 | `--debug-h5` | off | Write every decoded frame, with its IQ and everything needed to rerun the demodulator, to this HDF5 file (see [Debug HDF5](#debug-hdf5)) |
 | `--debug-h5-failed-only` | | With `--debug-h5`, record only frames that fail CRC (not unchecked ones) |
 | `--log-level` | info | Least severe log message written to stderr: `info`, `warning`, `error`, `fatal`, or `none` |
 | `--log-file` | off | Also append log messages to this file |
 | `--log-file-level` | info | Least severe log message written to `--log-file`, independent of `--log-level` |
-| `--verbosity` | 0 | Extra log messages (see [Log](#log)): 1 adds a line for each aircraft change, 2 a line for every decoded frame |
+| `--verbosity` | 0 | Extra log messages (see [Log](#log)): 1 adds a line for each WebSocket call, 2 for each aircraft change, 3 for every decoded frame |
 
 | Source | Options |
 |---|---|
@@ -376,7 +399,7 @@ for `rtlsdr`; otherwise it only labels the spectrum frames.
 **`serve` subcommand.** `serve` takes no input and has no options of its own.
 
 - It serves an existing `--history-db` to `--ws-port` clients until Ctrl+C,
-  answering the UI's history queries (see [WebSocket](#websocket)).
+  answering the UI's history calls (see [WebSocket](#websocket)).
 - It requires both of those global options, and the database file must
   already exist.
 - No frames or live aircraft are published, so the UI's live view shows the
@@ -443,8 +466,8 @@ The three sources:
       went.
     - It logs `back to full rate` on recovery, and a summary of the whole
       run at exit.
-    - With `--ws-port`, each check is also published as `input_status` (see
-      [WebSocket](#websocket)).
+    - With `--ws-port`, each check is also sent to live subscriptions as an
+      `InputStatus` (see [WebSocket](#websocket)).
   - **Socket buffer.** `adsb` doesn't set `SO_RCVBUF`, so the socket gets
     the system default receive buffer. At tens of Msps and up, raise that
     default before starting `adsb` (see [High sample rates](#high-sample-rates)).
@@ -744,18 +767,31 @@ level (`--log-level`, `--log-file-level`).
 
 The log is for watching the receiver, not for reading its results: those are
 in the WebSocket messages, the history database and the
-[debug HDF5](#debug-hdf5). Two kinds of line that report results are
-available for a quick look, and are off by default. They are logged at
-`info`.
+[debug HDF5](#debug-hdf5). At `info` it tells the story of the run:
 
-With `--verbosity 1` or higher, one line each time an aircraft's state
-changes, with only the fields that are known (and the flags that are set):
+- the settings in effect, at startup;
+- each WebSocket client connecting and disconnecting, and each streaming call,
+  such as the UI's subscription and spectrum, starting and ending;
+- the spectrum starting and stopping, as clients open and close it;
+- each aircraft heard, and lost once it has gone 10 minutes unheard:
+
+  ```
+  aircraft a1b2c3: heard
+  aircraft a1b2c3 UAL123: lost, not heard for 10 min (523 messages)
+  ```
+
+- problems with the input, and its recovery.
+
+`--verbosity` adds more, also logged at `info`. At 1, every WebSocket call,
+including each history query. At 2 or higher, also one line each time an
+aircraft's state changes, with only the fields that are known (and the flags
+that are set):
 
 ```
 aircraft icao=... callsign=... cat=... squawk=... alt=...ft lat=... lon=... gs=...kt trk=... vr=...fpm hdg=... ias=...kt tas=...kt mach=... roll=... sel_alt=...ft ground alert spi t=...s
 ```
 
-With `--verbosity 2`, also one line per frame:
+With `--verbosity 3`, also one line per frame:
 
 ```
 frame idx=<sample> bits=112 confidence=<c> df=<n> icao=<hex|??????> crc=<ok|fixed|fail|unchecked> payload=<32 hex>
@@ -765,22 +801,57 @@ frame idx=<sample> bits=112 confidence=<c> df=<n> icao=<hex|??????> crc=<ok|fixe
 
 #### WebSocket
 
-`--ws-port` sends each client an update every `--ws-interval` seconds (1 by
-default): one message holding a JSON array of everything published since the
-client's last update, in order ([ws_publisher.h](src/output/ws_publisher.h)).
-An interval with nothing published sends nothing. The history snapshot sent on
-connect and the replies to a client's requests are not held for an update;
-each is a message holding one JSON object. There are four broadcast message
-types.
+`--ws-port` serves the UI's API: calls, like gRPC's, over one WebSocket per
+client. [api.proto](proto/adsb/api/v1/api.proto) defines the messages, and
+[ui_api.md](doc/design/ui_api.md) describes the protocol and its design. In
+short:
 
-`{"type":"frame",...}` is sent for every frame. Besides the frame itself it
-has:
+- Each WebSocket message is one binary protobuf: a `ClientMessage` from the
+  client, or a `ServerMessage` from `adsb`.
+- A client starts a call by sending its request with a new `id`, larger than
+  every earlier one on the connection. Each reply carries the call's `id`.
+- A unary call has one reply. A streaming call replies until a message with
+  `end` set, and a client stops one early by sending a `cancel` with its `id`.
+- A call that fails ends with an `Error`, whose code says why:
+    - `NO_HISTORY`, a history call to an `adsb` without `--history-db`;
+    - `NO_LIVE_INPUT`, a spectrum call to `adsb serve`;
+    - `INVALID_ARGUMENT`, a bad request, such as an `id` that isn't new or an
+      empty heatmap area;
+    - `RESOURCE_EXHAUSTED`, a ninth call while a connection already has 8 in
+      progress;
+    - `UNIMPLEMENTED`, a call this `adsb` doesn't know;
+    - `INTERNAL`, a failure `adsb` has logged.
+- A client that takes over 20 s to accept a message is disconnected.
+
+The UI's [ApiClient](ui/frontend/lib/api_client.dart) makes each call a
+method, and the UI makes them in this order: `server_info`, `subscribe`, then
+with history a `snapshot` to backfill the sky. It makes a `spectrum` call
+while its Spectrum pane is shown.
+
+**`server_info`** says what this `adsb` serves: whether it answers the
+history calls (`--history-db`), whether it answers the spectrum call (any
+subcommand but `serve`), and its `--ws-interval`.
+
+**`subscribe`** streams the live data. It sends an `Update` every
+`interval_s` (default `--ws-interval`, at least 0.1 s). An update holds:
+
+- the frames published since the last update, in order;
+- each aircraft that changed since the last update, as it was last published;
+  the first update holds every aircraft heard in the last 10 minutes;
+- the input status, if it changed.
+
+An interval with none of these sends nothing.
+
+**`spectrum`** streams the spectrum rows for the waterfall, one `SpectrumRow`
+per reply. `adsb` computes them only while at least one spectrum call is open.
+
+A `Frame` is sent for every frame. Besides the frame itself it has:
 
 - `crc_ok`;
 - `crc_checked`, false for DF19/22;
-- `crc_fixed_bit`, the bit that single-bit correction flipped, or null;
+- `crc_fixed_bit`, the bit that single-bit correction flipped, unset if none;
 - `summary`, a one-line description of what the frame says, for example
-  `"Velocity · 223 kt GS · trk 235° · -1408 fpm"`. It is null when the CRC
+  `Velocity · 223 kt GS · trk 235° · -1408 fpm`. It is empty when the CRC
   failed.
 
 The UI uses these fields for its CRC statistics:
@@ -791,26 +862,28 @@ The UI uses these fields for its CRC statistics:
   confirmed on DF11/17/18.
 - It counts corrected frames separately.
 
-`{"type":"aircraft",...}` carries the aircraft's whole state. It is sent when
-a decoded field changes, and otherwise at most once a second while frames
-from the aircraft keep arriving. Besides the ADS-B fields it has:
+An `Aircraft` carries the aircraft's whole state, each field unset until it
+is known. It is published when a decoded field changes, and otherwise at most
+once a second while frames from the aircraft keep arriving. Besides the ADS-B
+fields it has:
 
-- `category`, the emitter category (for example `"A3"`, large);
+- `category`, the emitter category (for example `A3`, large);
 - `squawk`, from DF5/21 replies and ES emergency status;
 - `altitude_ft`, from ES airborne position and DF0/4/16/20 replies;
 - `heading_deg` (magnetic), `ias_kt` and `tas_kt`, from airspeed velocity
   messages (TC19 subtypes 3-4) and Comm-B BDS 5,0 and 6,0;
 - `mach` (BDS 6,0) and `roll_deg` (BDS 5,0, positive right wing down);
 - `on_ground`, from DF4/5/20/21 flight status, DF0/16 vertical status, DF11
-  capability and the ES position type; null until one of these arrives;
+  capability and the ES position type; unset until one of these arrives;
 - `alert` (squawk changed, or an emergency) and `spi` (ident), from flight
   status and ES surveillance status;
-- `selected_altitude_ft`, `selected_altitude_source` (`"MCP"` or `"FMS"`),
+- `selected_altitude_ft`, `selected_altitude_source` (`MCP` or `FMS`),
   `selected_heading_deg`, `baro_setting_hpa` and `autopilot_modes`, from ES
   target state (TC29, version 2):
-  - `autopilot_modes` is a list drawn from `"AP"`, `"VNAV"`, `"ALT"`,
-    `"APP"` and `"LNAV"`;
-  - selected altitude and baro setting also come from BDS 4,0;
+    - `autopilot_modes` lists the engaged modes, drawn from `AP`, `VNAV`,
+      `ALT`, `APP` and `LNAV`. It is unset until target state arrives, so that
+      unknown differs from none engaged;
+    - selected altitude and baro setting also come from BDS 4,0;
 - `adsb_version`, `nac_p` (position accuracy, 0-11) and `sil` (integrity,
   0-3), from ES operational status (TC31); `nac_p` and `sil` need version 1
   or later;
@@ -822,11 +895,10 @@ from the aircraft keep arriving. Besides the ADS-B fields it has:
   `last_seen_s`. In file playback it runs ahead of, or behind, the real
   clock.
 
-`{"type":"spectrum",...}` is sent when `--spectrum` is on.
+A `SpectrumRow` is a 1024-point FFT of the raw IQ, in dB.
 
-`{"type":"input_status","window_s","rate_hz","stream_s","lost_s","dropped_s","kernel_drops","ok","summary"}`
-is sent by the `vita49` source, every 2 s while packets arrive. It covers the
-last `window_s` of wall time:
+An `InputStatus` comes from the `vita49` source, every 2 s while packets
+arrive. It covers the last `window_s` of wall time:
 
 - In that window the source delivered `stream_s` seconds of signal at
   `rate_hz`.
@@ -834,9 +906,9 @@ last `window_s` of wall time:
 - `dropped_s` of it was dropped because the demodulator fell behind.
 - `kernel_drops` counts the times the kernel dropped on the socket because the
   receive buffer was full.
-  - Each drop is one datagram, or with GRO a whole coalesced batch, so the
-    amount lost is given by `lost_s`.
-  - This field is absent where `/proc/net/udp` isn't readable.
+    - Each drop is one datagram, or with GRO a whole coalesced batch, so the
+      amount lost is given by `lost_s`.
+    - This field is unset where `/proc/net/udp` isn't readable.
 - `ok` is false when less than 98% of real time was demodulated, or anything
   was lost.
 - `summary` says the same in words.
@@ -845,77 +917,59 @@ The UI shows a red warning in the top bar when `ok` is false. The warning
 gives the percentage demodulated and has `summary` as its tooltip. The UI
 hides the warning once it is 6 s old.
 
-With `--history-db`, clients can also query the history. These replies are
-unicast, so other clients don't see them.
+The history calls answer from `--history-db`, and fail with `NO_HISTORY`
+without it. Each is unary. Times are Unix seconds.
 
-**`snapshot`** gives the sky at a point in time:
+**`snapshot`** gives the sky at time `t`, default the newest update:
 
-```
-{"type":"snapshot","t","t_min","t_max","aircraft":[{"state":{...},"track":[[lat,lon,alt_ft],...]}]}
-```
-
-- The time is Unix time `t`.
-- `aircraft` holds every aircraft updated in the 10 minutes up to `t`, with
-  its latest state.
-- Each `track` holds that aircraft's positions in the window: up to 1000,
-  oldest first, with `alt_ft` null where unknown.
-- `t_min` and `t_max` span the whole database, and are null when it's empty.
-- A client receives a snapshot on connect, with `t` set to the newest update.
-  This serves as a backfill.
-- A client also receives a snapshot in reply to each
-  `{"type":"seek","t":<unix s>}` it sends.
+- `aircraft` holds every aircraft updated in the 10 minutes up to `t`, each
+  with its latest `state` and its `track`: its positions in the window, up to
+  1000, oldest first.
+- `t_min` and `t_max` span the whole database, and are unset when it's empty.
+- The UI asks for one on connect, to backfill the live sky, and one for each
+  seek of its scrubber.
 
 **`aircraft_history`** gives one aircraft's recent history:
 
-```
-{"type":"aircraft_history","icao","t","points":[[t,alt_ft,gs_kt,vr_fpm,signal_db,selected_alt_ft],...]}
-```
-
-- It answers `{"type":"aircraft_history","icao":"<hex>","t":<unix s>}`. `t`
-  is optional and defaults to the aircraft's latest update.
-- It holds that aircraft's updates in the 30 minutes up to `t`, oldest first,
-  with null for fields not yet known.
+- It takes the aircraft's `icao` and a `t`, default the aircraft's latest
+  update.
+- Its `points` are that aircraft's updates in the 30 minutes up to `t`,
+  oldest first, each field unset where not yet known.
 - The UI uses it for the selected aircraft's detail charts.
 
 **`activity`** counts aircraft over time:
 
-```
-{"type":"activity","bucket_s":60,"t0","counts":[...]}
-```
-
-- It answers `{"type":"activity","from":<unix s>}`. `from` is optional and
-  defaults to the whole database.
-- `counts` holds the number of distinct aircraft updated in each 60 s bucket.
-  - Buckets are aligned to the Unix epoch.
-  - The buckets are consecutive, starting with the bucket that begins at `t0`.
-    A bucket with no aircraft holds 0.
-  - They run from the bucket holding `from` to the latest one.
-  - The last bucket may still be filling.
-- `t0` is null when there are no buckets.
+- It takes a `from`, default the whole database.
+- `counts` holds the number of distinct aircraft updated in each `bucket_s`
+  (60 s) bucket.
+    - Buckets are aligned to the Unix epoch.
+    - The buckets are consecutive, starting with the bucket that begins at
+      `t0`. A bucket with no aircraft holds 0.
+    - They run from the bucket holding `from` to the latest one.
+    - The last bucket may still be filling.
+- `t0` is unset when there are no buckets.
 - The UI fetches the whole database after connecting, which takes about 15 ms
   per hour of history. It then re-fetches from the last bucket every 30 s.
   This drives the scrubber's histogram.
 
 **`heatmap`** gives traffic density over an area:
 
-```
-{"type":"heatmap","west","south","east","north","width","height","t0","t1","max","cells":[i,n,...]}
-```
-
-- It answers
-  `{"type":"heatmap","west","south","east","north","width":<int>,"height":<int>,"t0","t1"}`.
-  `t0` and `t1` are optional and default to the whole database.
-- It divides the box into a `width`×`height` grid. Each dimension is at most
-  512.
-  - The grid is even in Web Mercator, so it lines up with the map.
-  - Row 0 is at the north.
-- `cells` lists each nonzero cell as its index `row*width+col`, followed by the
-  number of distinct flights that crossed it between `t0` and `t1`.
+- It takes the area (`west`, `south`, `east` and `north`, in degrees), a
+  grid size (`width` and `height`), and `t0` and `t1`, default the whole
+  database. An empty area (east not past west, or north not past south) is
+  refused.
+- It divides the area into a `width`×`height` grid. Each dimension is clamped
+  to 1..512.
+    - The grid is even in Web Mercator, so it lines up with the map.
+    - Row 0 is at the north.
+- The reply lists the nonzero cells: `cell_index[i]` is a cell's index,
+  `row*width+col`, and `cell_count[i]` the number of distinct flights that
+  crossed it between `t0` and `t1`.
 - `max` is the largest count.
 - How flights are counted:
-  - A flight is one aircraft's positions with no gap of 30 minutes or more.
-  - Positions under 60 s apart are joined by a line, so a flight counts in
-    every cell it passed through, not just where it was sampled.
+    - A flight is one aircraft's positions with no gap of 30 minutes or more.
+    - Positions under 60 s apart are joined by a line, so a flight counts in
+      every cell it passed through, not just where it was sampled.
 - The grid is computed on request. That takes about 40 ms for an hour of
   history, or 0.2 s for 5 h over a 400×300 grid.
 - The UI's map heatmap asks for one grid cell per 4×4 pixels of the current
@@ -927,11 +981,17 @@ unicast, so other clients don't see them.
 `--history-db` ([aircraft_history.h](src/output/aircraft_history.h))
 stores the history in one table:
 
-- The table is `aircraft_updates(t, icao, lat, lon, state)`, in WAL mode.
+- The table is `aircraft_updates(t, icao, lat, lon, altitude_ft,
+  ground_speed_kt, vertical_rate_fpm, signal_db, selected_altitude_ft,
+  state)`, in WAL mode.
 - It is indexed on `(t, icao)` and `(icao, t)`.
 - `t` is `last_seen_unix_s`.
 - Every published aircraft update is written live, with `state` holding the
-  published JSON.
+  published `Aircraft`, serialized, and the other columns copied out of it
+  for the queries.
+- The file records its schema's version (`PRAGMA user_version`). `adsb`
+  refuses a file of another version, older files included, rather than
+  misread it: record to a new file.
 - Queries run over a separate read-only connection.
 
 #### Debug HDF5
@@ -1117,9 +1177,9 @@ flowchart LR
     RTL & GEN & PACE -.-> MON
 ```
 
-Every box is a task on the one coro runtime, except the `rtlsdr` callback,
-which runs on coro's blocking pool (`spawn_blocking`). `paced_sim_stream()`
-runs in the send task's polls, and is there only with `sim`.
+Each box is a task. The `rtlsdr` callback runs on coro's blocking pool
+(`spawn_blocking`). `paced_sim_stream()` runs in the send task's polls, and
+is there only with `sim`.
 
 - **Packets.** Both sources interleave the IF Context packets with the data.
   The sim's batches are GSO batches of up to 44 packets. The `rtlsdr` source
@@ -1312,7 +1372,6 @@ when it is first read, with its value.
 |---|---|
 | `ADSB_TIMING=1` | Logs per-stage timings for each block, plus a throughput and realtime-factor line every second; `0` turns it off |
 | `ADSB_NTASKS=N` | Overrides the demodulator's part count (`exec()`) |
-| `ADSB_WS_MAX_PENDING_BYTES=N` | Most published JSON one WebSocket client may have waiting before the oldest is dropped (default 16 MiB) |
 
 ## Profiling
 

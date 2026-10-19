@@ -78,9 +78,14 @@ and a silent fallback is the hardest kind of bug to find.
   off silently.
 - **Fatal:** a setting that would make the output wrong, rather than just worse, is an error, not a
   warning. For example, a sample rate the device rejects would mislabel every sample.
-- **INFO, for the run's state:** started, input ended, stopped and why, and a summary at the end.
-- **`VLOGF(1)`** for detail per connection or per phase, and **`VLOGF(2)`** for detail per batch or
-  per item. A disabled statement costs one comparison, so the hot path may have them.
+- **INFO, for the run's state:** INFO alone tells the story of the run, so a user asking "did it do
+  X?" finds the answer there without `--verbosity`. That is the start, the input ending, the stop and
+  why, a summary at the end, and every change in between, including those a client causes: a client
+  connecting, a streaming call starting or ending, a feature turning on or off, an aircraft heard or
+  lost. Nothing that happens many times a second is INFO.
+- **`VLOGF(1)`** for detail only someone debugging wants, per connection or per call, such as each
+  unary call. **`VLOGF(2)`** and up for detail per batch or per item, the busiest at the highest
+  level. A disabled statement costs one comparison, so the hot path may have them.
 - **Before and after logging starts:** argument-parsing errors print the usage, so they stay on
   `std::cerr`. Every error after logging has started goes through `LOGF`.
 - **Where:** a library logs its own decisions, where it makes them, so every user of it gets the

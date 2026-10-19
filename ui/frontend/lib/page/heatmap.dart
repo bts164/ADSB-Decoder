@@ -56,6 +56,9 @@ final _heatmapLut = [
   return (rgba, top);
 }
 
+// The server's kHistoryHeatmapMaxCells.
+const _heatmapMaxCells = 512;
+
 String _heatmapRangeLabel(double s) =>
     s.isInfinite ? 'all' : s >= 86400 ? '${(s / 86400).round()} d' : _windowLabel(s);
 
@@ -63,9 +66,9 @@ String _heatmapRangeLabel(double s) =>
 extension _Heatmap on _FrameTablePageState {
   /// Asks for the heatmap of the map's current view over _heatmapRangeS up to
   /// the shown time. Needs a history db; does nothing while it's off.
-  void _requestHeatmap() {
+  Future<void> _requestHeatmap() async {
     final range = _heatmapRangeS;
-    if (range == null || !_mapReady || _channel == null || _historyStartS == null) return;
+    if (range == null || !_mapReady || _client == null || _historyStartS == null) return;
     if (_heatmapInFlight) {
       _heatmapQueued = true;
       return;
@@ -73,18 +76,27 @@ extension _Heatmap on _FrameTablePageState {
     final camera = _mapController.camera;
     final bounds = camera.visibleBounds;
     final t1 = _snapshot?.timeS; // null: up to the latest
+    // The server clamps each side to its kHistoryHeatmapMaxCells, so clamp the same to read its cells.
+    int cells(double px) => (px / _FrameTablePageState._heatmapCellPx).ceil().clamp(1, _heatmapMaxCells);
+    final width = cells(camera.size.width);
+    final height = cells(camera.size.height);
     _heatmapInFlight = true;
-    _channel!.sink.add(jsonEncode({
-      'type': 'heatmap',
-      'west': bounds.west,
-      'south': bounds.south,
-      'east': bounds.east,
-      'north': bounds.north,
-      'width': (camera.size.width / _FrameTablePageState._heatmapCellPx).ceil(),
-      'height': (camera.size.height / _FrameTablePageState._heatmapCellPx).ceil(),
-      't0': ?(range.isFinite ? (t1 ?? _latestTimeS) - range : null),
-      't1': ?t1,
-    }));
+    final reply = await _ask((c) => c.heatmap(api.HeatmapRequest(
+          west: bounds.west,
+          south: bounds.south,
+          east: bounds.east,
+          north: bounds.north,
+          width: width,
+          height: height,
+          t0: range.isFinite ? (t1 ?? _latestTimeS) - range : null,
+          t1: t1,
+        )));
+    _heatmapInFlight = false;
+    if (_heatmapQueued) {
+      _heatmapQueued = false;
+      _requestHeatmap();
+    }
+    if (reply != null) await _onHeatmap(reply, bounds, width, height);
   }
 
   void _scheduleHeatmap() {
@@ -93,25 +105,13 @@ extension _Heatmap on _FrameTablePageState {
     _heatmapDebounce = Timer(const Duration(milliseconds: 300), _requestHeatmap);
   }
 
-  /// Draws a heatmap reply as an image over the area it covers.
-  Future<void> _onHeatmap(Map<String, dynamic> j) async {
-    _heatmapInFlight = false;
-    if (_heatmapQueued) {
-      _heatmapQueued = false;
-      _requestHeatmap();
-    }
+  /// Draws a heatmap reply as an image over the area it was asked for.
+  Future<void> _onHeatmap(api.Heatmap reply, LatLngBounds bounds, int width, int height) async {
     if (_heatmapRangeS == null) return;
-    final width = j['width'] as int;
-    final height = j['height'] as int;
     final counts = Float64List(width * height);
-    final cells = j['cells'] as List;
-    for (var i = 0; i + 1 < cells.length; i += 2) {
-      counts[cells[i] as int] = (cells[i + 1] as num).toDouble();
+    for (var i = 0; i < reply.cellIndex.length; i++) {
+      counts[reply.cellIndex[i]] = reply.cellCount[i].toDouble();
     }
-    final bounds = LatLngBounds(
-      LatLng((j['south'] as num).toDouble(), (j['west'] as num).toDouble()),
-      LatLng((j['north'] as num).toDouble(), (j['east'] as num).toDouble()),
-    );
     final done = Completer<ui.Image>();
     final (pixels, top) = _heatmapPixels(counts, width, height);
     ui.decodeImageFromPixels(pixels, width, height, ui.PixelFormat.rgba8888, done.complete);
