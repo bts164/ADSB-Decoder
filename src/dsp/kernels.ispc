@@ -118,13 +118,13 @@ inline float load(const uniform int16 * uniform p, int j, const uniform I16Be &)
 // passes its taskIndex and taskCount on as task_index and task_count.
 //
 // The samples are used unscaled. `scale` is 1 / (the format's full scale), applied once per output (the
-// filter and |z| are linear in the input's scale) and, squared, to the sum of squares, so y[] and sumsq[]
-// come out as if the input had been scaled to [-1, 1] first.
+// filter and |z| are linear in the input's scale), so y[] and sumsq[] come out as if the input had been scaled
+// to [-1, 1] first.
 template <typename T, typename F>
 inline void resample_body(const uniform T x[], const uniform float h[], uniform int stride, uniform int Np,
                           uniform int64 step, uniform int64 offset, uniform int n_out, uniform float y[],
-                          const uniform T samples[], uniform int n, uniform float scale, uniform float sumsq[],
-                          uniform int task_index, uniform int task_count) {
+                          uniform int n_own, uniform float scale, uniform float sumsq[], uniform int task_index,
+                          uniform int task_count) {
     uniform F fmt;
     // Whole batches per task, so with n_out a multiple of programCount every task's range is too.
     uniform int chunk = ((n_out + task_count - 1) / task_count + programCount - 1) / programCount * programCount;
@@ -132,23 +132,10 @@ inline void resample_body(const uniform T x[], const uniform float h[], uniform 
     uniform int t_end = min(n_out, t_start + chunk);
     const uniform int64 frac_mask = ((uniform int64)1 << kPosFracBits) - 1;
 
-    // This task's share of the block's sum of squares (see RESAMPLE_FORMAT): the input samples from its first
-    // output's center sample up to (not including) the next task's, accumulated a batch at a time alongside
-    // the filter so those loads overlap its math. Every task's range meets the next's, the first starts at
-    // sample 0 (base(0) = 0) and the last is extended to n, so together they cover [0, n) exactly once. Sum of
-    // re^2 + im^2 over samples is just the sum of x^2 over the interleaved components.
+    // This task's share of the block's sum of squares (see RESAMPLE_FORMAT), over its outputs below n_own.
     float ss = 0.f;
-    uniform int s_next = clamp(resample_center_index(t_start, step, offset), 0, n);
 
     for (uniform int m0 = t_start; m0 < t_end; m0 += programCount) {
-        uniform int m1 = m0 + programCount;
-        uniform int s_hi = m1 == n_out ? n : clamp(resample_center_index(m1, step, offset), 0, n);
-        foreach (k = 2 * s_next ... 2 * s_hi) {
-            float s = load(samples, k, fmt);
-            ss += s * s;
-        }
-        s_next = s_hi;
-
         // One tap-parallel accumulator per output in this batch: even lanes hold I partial sums, odd lanes Q.
         float acc[programCount];
         for (uniform int i = 0; i < programCount; i++) {
@@ -188,8 +175,9 @@ inline void resample_body(const uniform T x[], const uniform float h[], uniform 
         float mag = sqrt(re * re + im * im) * scale;
 
         y[m0 + programIndex] = mag;
+        if (m0 + programIndex < n_own) ss += mag * mag;
     }
-    sumsq[task_index] = reduce_add(ss) * scale * scale;
+    sumsq[task_index] = reduce_add(ss);
 }
 
 // Stamps out the resampler for one format: resample_task_NAME, and the export resample_block_NAME that the
@@ -199,34 +187,36 @@ inline void resample_body(const uniform T x[], const uniform float h[], uniform 
 //
 // `step` = resample_pos_fixed(ry / rx) and `offset` = resample_pos_fixed(0.5 + 0.5 / Np); see the derivation at
 // the top of this file. `n_out` must be a multiple of programCount. `scale` is 1 / (the format's full scale).
-// Also sums the squares of the block's n raw input samples `samples` (the same block as `x`, without the
-// leading-guard offset), one partial per task into `sumsq[]`, which must have at least `ntasks` elements; the
-// host adds them up for the block's RMS. That normalization is never applied to y[] itself: the filter and
-// |z| are linear in the input's scale, so the host scales its thresholds by rms instead (see demod.cpp). Doing
-// it in this kernel saves a separate launch and pass over the input.
+// Also sums |z|^2 over the outputs the block owns, [0, n_own), one partial per task into `sumsq[]`, which must
+// have at least `ntasks` elements; the host adds them up for the block's RMS. It is taken after the filter, not
+// from the raw input, so the thresholds it scales are relative to the noise in the band the filter passes: the
+// noise the filter removes, most of it when the input is much wider than the passband, would otherwise raise
+// them. That normalization is never applied to y[] itself: the filter and |z| are linear in the input's scale,
+// so the host scales its thresholds by rms instead (see demod.cpp). Doing it in this kernel saves a separate
+// launch and pass over y[].
 #define RESAMPLE_FORMAT(NAME, T, F, ID)                                                                         \
     task void resample_task_##NAME(const uniform T x[], const uniform float h[], uniform int stride,           \
                                    uniform int Np, uniform int64 step, uniform int64 offset,                    \
-                                   uniform int n_out, uniform float y[], const uniform T samples[],             \
-                                   uniform int n, uniform float scale, uniform float sumsq[]) {                 \
+                                   uniform int n_out, uniform float y[], uniform int n_own,                     \
+                                   uniform float scale, uniform float sumsq[]) {                                \
         adsb_trace_kernel(ID);                                                                                  \
-        resample_body<T, F>(x, h, stride, Np, step, offset, n_out, y, samples, n, scale, sumsq,                 \
+        resample_body<T, F>(x, h, stride, Np, step, offset, n_out, y, n_own, scale, sumsq,                      \
                             (uniform int)taskIndex, (uniform int)taskCount);                                    \
     }                                                                                                           \
     export void resample_block_##NAME(const uniform T x[], const uniform float h[], uniform int stride,        \
                                       uniform int Np, uniform int64 step, uniform int64 offset,                 \
-                                      uniform int n_out, uniform float y[], const uniform T samples[],          \
-                                      uniform int n, uniform float scale, uniform float sumsq[],                \
+                                      uniform int n_out, uniform float y[], uniform int n_own,                  \
+                                      uniform float scale, uniform float sumsq[],                               \
                                       uniform int ntasks) {                                                     \
         uniform int nt = max(1, min(n_out, ntasks));                                                            \
-        launch[nt] resample_task_##NAME(x, h, stride, Np, step, offset, n_out, y, samples, n, scale, sumsq);    \
+        launch[nt] resample_task_##NAME(x, h, stride, Np, step, offset, n_out, y, n_own, scale, sumsq);         \
     }                                                                                                           \
     export void resample_chunk_##NAME(const uniform T x[], const uniform float h[], uniform int stride,        \
                                       uniform int Np, uniform int64 step, uniform int64 offset,                 \
-                                      uniform int n_out, uniform float y[], const uniform T samples[],          \
-                                      uniform int n, uniform float scale, uniform float sumsq[],                \
+                                      uniform int n_out, uniform float y[], uniform int n_own,                  \
+                                      uniform float scale, uniform float sumsq[],                               \
                                       uniform int task_index, uniform int task_count) {                         \
-        resample_body<T, F>(x, h, stride, Np, step, offset, n_out, y, samples, n, scale, sumsq, task_index,     \
+        resample_body<T, F>(x, h, stride, Np, step, offset, n_out, y, n_own, scale, sumsq, task_index,          \
                             task_count);                                                                        \
     }
 

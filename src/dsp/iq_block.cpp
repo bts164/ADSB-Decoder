@@ -6,6 +6,8 @@
 #include <stdexcept>
 #include <utility>
 
+#include <coro/coro.h>
+
 namespace {
 
 // Samples [first, first + count) of a block's buffer, padding included, as interleaved I/Q. A span and not an
@@ -16,11 +18,24 @@ std::span<typename F::Sample> rows(iq::Samples<F>& s, size_t first, size_t count
     return std::span<typename F::Sample>(s.data.data(), s.data.size()).subspan(2 * first, 2 * count);
 }
 
+// Deletes an IqBlock's samples once its last share is dropped, handing them back to the pool first if it has one.
+struct Recycle {
+    IqBufferPool pool;
+
+    void operator()(const iq::SamplesVariant* samples) const noexcept {
+        // No share is left to read the samples, and IqBlock(IqBuffer&&) allocated them non-const, so they can
+        // be moved out.
+        auto* owned = const_cast<iq::SamplesVariant*>(samples);
+        if (pool) (void)pool->try_send(std::move(*owned));
+        delete owned;
+    }
+};
+
 }  // namespace
 
-void IqBlock::truncate(size_t new_n) {
-    if (new_n > n) throw std::invalid_argument("IqBlock::truncate: new_n is past the block's samples");
-    const size_t keep = static_cast<size_t>(lead) + new_n;
+void IqBuffer::truncate(size_t new_n) {
+    if (new_n > m_n) throw std::invalid_argument("IqBuffer::truncate: new_n is past the buffer's samples");
+    const size_t keep = static_cast<size_t>(m_lead) + new_n;
     const size_t new_total = keep + trail();
     std::visit(
         [&]<class F>(iq::Samples<F>& s) {
@@ -30,7 +45,7 @@ void IqBlock::truncate(size_t new_n) {
             s = std::move(cut);
         },
         m_samples);
-    n = new_n;
+    m_n = new_n;
 }
 
 void IqBlock::to_float(size_t first, std::span<float> out) const {
@@ -44,11 +59,22 @@ void IqBlock::to_float(size_t first, std::span<float> out) const {
     });
 }
 
-std::optional<IqBlock> BlockStitcher::push(IqBlock next) {
-    std::optional<IqBlock> prev = std::exchange(m_held, std::move(next));
+IqBlock::IqBlock(IqBuffer&& buffer)
+    : m_n(buffer.m_n),
+      m_lead(buffer.m_lead),
+      m_start(buffer.m_start),
+      // Taking the pool leaves the buffer none, so its destructor doesn't send the moved-from samples back.
+      m_samples(new iq::SamplesVariant(std::move(buffer.m_samples)), Recycle{std::move(buffer.m_pool)}) {}
+
+IqBlock IqBlock::clone() const {
+    return IqBlock(m_n, m_lead, m_start, std::make_shared<const iq::SamplesVariant>(*m_samples));
+}
+
+std::optional<IqBuffer> BlockStitcher::push(IqBuffer next) {
+    std::optional<IqBuffer> prev = std::exchange(m_held, std::move(next));
     if (!prev) return std::nullopt;
-    IqBlock& cur = *m_held;
-    if (cur.start != prev->start + prev->n) return prev;
+    IqBuffer& cur = *m_held;
+    if (cur.m_start != prev->m_start + prev->m_n) return prev;
     std::visit(
         [&]<class F>(iq::Samples<F>& p) {
             // A change of format is treated like a gap: the padding on both sides of it stays zero.
@@ -56,9 +82,9 @@ std::optional<IqBlock> BlockStitcher::push(IqBlock next) {
             if (!c) return;
             // prev's samples [0, lead + n) are its lead (filled from the block before it) then its own
             // samples, so its tail can supply up to all of cur's lead even when prev is short.
-            const size_t prev_end = static_cast<size_t>(prev->lead) + prev->n;
-            const size_t cur_lead = static_cast<size_t>(cur.lead);
-            const size_t head = std::min(prev->trail(), cur.n);
+            const size_t prev_end = static_cast<size_t>(prev->m_lead) + prev->m_n;
+            const size_t cur_lead = static_cast<size_t>(cur.m_lead);
+            const size_t head = std::min(prev->trail(), cur.m_n);
             std::ranges::copy(rows(*c, cur_lead, head), rows(p, prev_end, head).begin());
             const size_t tail = std::min(cur_lead, prev_end);
             std::ranges::copy(rows(p, prev_end - tail, tail), rows(*c, cur_lead - tail, tail).begin());
@@ -67,4 +93,12 @@ std::optional<IqBlock> BlockStitcher::push(IqBlock next) {
     return prev;
 }
 
-std::optional<IqBlock> BlockStitcher::flush() { return std::exchange(m_held, std::nullopt); }
+std::optional<IqBuffer> BlockStitcher::flush() { return std::exchange(m_held, std::nullopt); }
+
+coro::CoroStream<IqBlock> stitch(coro::CoroStream<IqBuffer> in) {
+    BlockStitcher stitcher;
+    while (auto buffer = co_await coro::next(in)) {
+        if (auto ready = stitcher.push(std::move(*buffer))) co_yield IqBlock(std::move(*ready));
+    }
+    if (auto last = stitcher.flush()) co_yield IqBlock(std::move(*last));
+}

@@ -60,6 +60,11 @@ class ApiClient {
   Stream<api.SpectrumRow> spectrum(api.SpectrumRequest request) =>
       _stream(api.ClientMessage(spectrum: request)).map((m) => m.spectrum);
 
+  /// A capture of one point to a file on the server, which replies when it is done: one result, then the end.
+  /// Starts when listened to; cancelling the subscription stops the capture, keeping what it has written.
+  Stream<api.CaptureResult> capture(api.CaptureRequest request) =>
+      _stream(api.ClientMessage(capture: request)).map((m) => m.capture);
+
   Future<api.Snapshot> snapshot(api.SnapshotRequest request) async =>
       (await _call(api.ClientMessage(snapshot: request))).snapshot;
 

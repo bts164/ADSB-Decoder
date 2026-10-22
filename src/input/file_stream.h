@@ -31,7 +31,7 @@ std::optional<FileFormat> file_format(std::string_view datatype);
 const char* datatype_name(FileFormat format);
 
 /**
- * Streams a recording as IqBlocks, in the format it is stored in.
+ * Streams a recording as IqBuffers, in the format it is stored in.
  *
  * Reads run as a task on the coro runtime, a few chunks ahead of the consumer, so file IO overlaps demod
  * compute and memory use is bounded by the chunk size rather than the file size.
@@ -40,7 +40,7 @@ const char* datatype_name(FileFormat format);
  * @param pad guard padding to allocate around each block (demod_padding())
  * @param chunk_samples samples per block; the last block may be shorter
  */
-coro::CoroStream<IqBlock> file_iq_stream(std::string path, FileFormat format, IqPadding pad, uint32_t chunk_samples);
+coro::CoroStream<IqBuffer> file_iq_stream(std::string path, FileFormat format, IqPadding pad, uint32_t chunk_samples);
 
 /** `adsb file`'s options, and what the recording's SigMF metadata says. */
 struct FileStreamParams {

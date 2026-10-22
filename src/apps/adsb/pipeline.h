@@ -44,7 +44,7 @@
 DecodedFrameView handle_frame(AircraftTracker& tracker, const AdsbFrame& f, double rate_hz, double start_unix_s,
                               std::vector<api::Frame>* frames, std::vector<api::Aircraft>* aircraft);
 
-/** run_demod_loop's optional HDF5 debug recording (FrameRecorder). */
+/** run_demod_loop's optional HDF5 debug recording (FrameRecorder). Never set in a build without ADSB_WITH_HDF5. */
 struct DebugRecordOptions {
     std::optional<std::string> path;  /**< HDF5 file to write; no recording without one */
     bool failed_only = false;         /**< record only frames that fail CRC */
@@ -56,26 +56,34 @@ struct DemodLoopParams {
     float preamble_min;    /**< demodulate() preamble threshold */
     float slice_mag_min;   /**< demodulate() slice-magnitude threshold */
     DebugRecordOptions debug;
+    std::optional<std::string> capture_dir;  /**< where the capture calls write; no captures without one */
 
-    /** Adds the thresholds and --debug-h5*. */
+    /** Adds the thresholds, --capture-dir, and --debug-h5* in a build with ADSB_WITH_HDF5. */
     static void add_options(argparse::ArgumentParser& program);
     /** @param command_line the whole command line, recorded in the --debug-h5 file */
     static DemodLoopParams from_options(const argparse::ArgumentParser& program, std::string command_line);
 };
 
 /**
- * Demodulates every IqBlock from `stream` until it ends, through a chain of stream nodes:
+ * Demodulates every buffer from `stream` until it ends, through a chain of stream nodes:
  *
- * 1. With a `ws`, a tap that publishes a spectrum row from at most one block every kSpectrumInterval, on a
- *    clone of `ws->live`, while `ws->settings` has a spectrum viewer.
- * 2. demodulate(), in a task of its own with a buffered output, so the next blocks demodulate while this one's
- *    frames are handled. It holds each block until the next arrives, so frames come out one block late.
- * 3. This task, the sink: handle_frame() on each frame, in order. With a `ws`, it then sends the block's
+ * 1. stitch(), which fills each buffer's padding from its neighbors and yields it as a shared IqBlock. It
+ *    holds each buffer until the next arrives, so frames come out one block late.
+ * 2. With a `ws`, a tee that sends a share of each block to every side branch that isn't behind. The one
+ *    branch is a spectrum task that, while `ws->settings` has a spectrum viewer, publishes a peak-held row
+ *    every kSpectrumInterval on a clone of `ws->live`.
+ * 3. demodulate(), in a task of its own with a buffered output, so the next blocks demodulate while this one's
+ *    frames are handled.
+ * 4. This task, the sink: handle_frame() on each frame, in order. With a `ws`, it then sends the block's
  *    frames on `ws->live` and updates its aircraft in `ws->aircraft`, dropping those not heard from in
  *    10 minutes; with a `history`, one AircraftHistory::insert() of its aircraft.
  *
+ * With a `ws` and a capture directory, two capture tasks (capture.h) take the capture calls from
+ * `ws->captures`: one fed by a second branch of the tee, the other by the sink, which sends it each block's
+ * envelope while demodulate() copies it, which is while an envelope capture is in progress.
+ *
  * With a debug path, the sink also sends each block that has frames, with its envelope and validated frames,
- * to a FrameRecorder task over a channel. Each of those holds its block, so the demod task's buffer is
+ * to a FrameRecorder task over a channel. Each of those holds its block's buffer, so the demod task's buffer is
  * shorter then.
  *
  * A task on the runtime: demodulate() splits each block's kernels across the runtime's workers, so it needs a
@@ -85,13 +93,13 @@ struct DemodLoopParams {
  * @param filter polyphase filter bank for demodulate()
  * @param rate_hz input sample rate
  * @param freq_hz center frequency, for labelling spectrum frames
- * @param stream IQ blocks from any `adsb` source, padded to demod_padding()
- * @param params the thresholds, and the HDF5 debug recording, if its path is set
+ * @param stream IQ buffers from any `adsb` source, padded to demod_padding()
+ * @param params the thresholds, the capture directory, and the HDF5 debug recording, each if set
  * @param history where the aircraft updates are recorded, if anywhere
  * @param ws where the frames, aircraft and spectrum are published (api_channels()), if anywhere
  * @return total number of frames decoded
  */
 [[nodiscard]] coro::Coro<uint64_t> run_demod_loop(FilterBank filter, double rate_hz, double freq_hz,
-                                                  coro::CoroStream<IqBlock> stream, DemodLoopParams params,
+                                                  coro::CoroStream<IqBuffer> stream, DemodLoopParams params,
                                                   std::optional<AircraftHistory> history,
                                                   std::optional<ApiSenders> ws);

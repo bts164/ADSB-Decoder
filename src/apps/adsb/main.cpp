@@ -3,9 +3,11 @@
 // ispc-vectorized demodulator and publishes decoded frames and aircraft. See
 // README.md "The receiver (adsb)".
 //
-// This file is just argument parsing and picking which coro::CoroStream<IqBlock>
+// This file is just argument parsing and picking which coro::CoroStream<IqBuffer>
 // source to build, one argparse subcommand per source (`file`: file_stream.h,
-// `vita49`: vita49_stream.h VRT/UDP streaming, `rtlsdr`: rtlsdr_stream.h), each
+// `vita49`: vita49_stream.h VRT/UDP streaming, `rtlsdr`: rtlsdr_stream.h,
+// `sidekiq`: sidekiq_stream.h, in a build with ADSB_WITH_SIDEKIQ, and `uhd`:
+// uhd_stream.h, in a build with ADSB_WITH_UHD), each
 // with its options beside it -- every source hands its stream to pipeline.h's
 // run_demod_loop the same way.
 // The `serve` subcommand has no source: it only serves an existing history
@@ -38,6 +40,12 @@
 #include "dsp/filter_bank.h"
 #include "input/file_stream.h"
 #include "input/rtlsdr_stream.h"
+#ifdef ADSB_WITH_SIDEKIQ
+#include "input/sidekiq_stream.h"
+#endif
+#ifdef ADSB_WITH_UHD
+#include "input/uhd_stream.h"
+#endif
 #include "input/vita49_stream.h"
 #include "output/aircraft_history.h"
 #include "output/api_server.h"
@@ -49,6 +57,12 @@ struct Commands {
     argparse::ArgumentParser file{"file"};
     argparse::ArgumentParser vita49{"vita49"};
     argparse::ArgumentParser rtlsdr{"rtlsdr"};
+#ifdef ADSB_WITH_SIDEKIQ
+    argparse::ArgumentParser sidekiq{"sidekiq"};
+#endif
+#ifdef ADSB_WITH_UHD
+    argparse::ArgumentParser uhd{"uhd"};
+#endif
     argparse::ArgumentParser serve{"serve"};
 };
 
@@ -94,6 +108,14 @@ void add_options(argparse::ArgumentParser& program, Commands& cmds) {
     FileStreamParams::add_options(cmds.file);
     Vita49StreamParams::add_options(cmds.vita49);
     RtlSdrStreamParams::add_options(cmds.rtlsdr);
+#ifdef ADSB_WITH_SIDEKIQ
+    SidekiqStreamParams::add_options(cmds.sidekiq);
+    program.add_subparser(cmds.sidekiq);
+#endif
+#ifdef ADSB_WITH_UHD
+    UhdStreamParams::add_options(cmds.uhd);
+    program.add_subparser(cmds.uhd);
+#endif
     cmds.serve.add_description("No input: serve an existing --history-db to --ws-port clients (the UI's history "
                                "views) until Ctrl+C.");
     for (argparse::ArgumentParser* cmd : {&cmds.file, &cmds.vita49, &cmds.rtlsdr, &cmds.serve})
@@ -106,8 +128,22 @@ bool parse_command_line(argparse::ArgumentParser& program, const Commands& cmds,
     try {
         program.parse_args(argc, argv);
         if (!program.is_subcommand_used(cmds.file) && !program.is_subcommand_used(cmds.vita49) &&
-            !program.is_subcommand_used(cmds.rtlsdr) && !program.is_subcommand_used(cmds.serve)) {
-            throw std::runtime_error("a subcommand is required: file, vita49, rtlsdr or serve");
+            !program.is_subcommand_used(cmds.rtlsdr) && !program.is_subcommand_used(cmds.serve)
+#ifdef ADSB_WITH_SIDEKIQ
+            && !program.is_subcommand_used(cmds.sidekiq)
+#endif
+#ifdef ADSB_WITH_UHD
+            && !program.is_subcommand_used(cmds.uhd)
+#endif
+        ) {
+            std::string names = "file, vita49, rtlsdr";
+#ifdef ADSB_WITH_SIDEKIQ
+            names += ", sidekiq";
+#endif
+#ifdef ADSB_WITH_UHD
+            names += ", uhd";
+#endif
+            throw std::runtime_error("a subcommand is required: " + names + " or serve");
         }
         if (program.present<uint16_t>("--ws-port") == uint16_t{0}) {
             throw std::runtime_error("--ws-port must be between 1 and 65535");
@@ -119,10 +155,32 @@ bool parse_command_line(argparse::ArgumentParser& program, const Commands& cmds,
             (!program.present<uint16_t>("--ws-port") || !program.present("--history-db"))) {
             throw std::runtime_error("serve needs --ws-port and --history-db");
         }
+        if (const auto dir = program.present("--capture-dir")) {
+            if (!program.present<uint16_t>("--ws-port") || program.is_subcommand_used(cmds.serve))
+                throw std::runtime_error("--capture-dir needs --ws-port and a source");
+            if (!std::filesystem::is_directory(*dir))
+                throw std::runtime_error("--capture-dir " + *dir + " is not a directory");
+        }
         for (const argparse::ArgumentParser* cmd : {&cmds.file, &cmds.vita49, &cmds.rtlsdr}) {
             if (cmd->is_used("--rate") && !(cmd->get<double>("--rate") > 0.0))
                 throw std::runtime_error("--rate must be greater than 0");
         }
+#ifdef ADSB_WITH_SIDEKIQ
+        if (program.is_subcommand_used(cmds.sidekiq)) {
+            if (!(cmds.sidekiq.get<double>("--rate") > 0.0)) throw std::runtime_error("--rate must be greater than 0");
+            if (cmds.sidekiq.is_used("--bandwidth") && !(cmds.sidekiq.get<double>("--bandwidth") > 0.0))
+                throw std::runtime_error("--bandwidth must be greater than 0");
+            (void)SidekiqStreamParams::from_options(program, cmds.sidekiq);  // --handle and --gain
+        }
+#endif
+#ifdef ADSB_WITH_UHD
+        if (program.is_subcommand_used(cmds.uhd)) {
+            if (!(cmds.uhd.get<double>("--rate") > 0.0)) throw std::runtime_error("--rate must be greater than 0");
+            if (cmds.uhd.is_used("--bandwidth") && !(cmds.uhd.get<double>("--bandwidth") > 0.0))
+                throw std::runtime_error("--bandwidth must be greater than 0");
+            (void)UhdStreamParams::from_options(program, cmds.uhd);  // --gain
+        }
+#endif
     } catch (const std::exception& err) {
         std::cerr << err.what() << "\n";
         if (program.is_subcommand_used(cmds.file)) {
@@ -131,6 +189,14 @@ bool parse_command_line(argparse::ArgumentParser& program, const Commands& cmds,
             std::cerr << cmds.vita49;
         } else if (program.is_subcommand_used(cmds.rtlsdr)) {
             std::cerr << cmds.rtlsdr;
+#ifdef ADSB_WITH_SIDEKIQ
+        } else if (program.is_subcommand_used(cmds.sidekiq)) {
+            std::cerr << cmds.sidekiq;
+#endif
+#ifdef ADSB_WITH_UHD
+        } else if (program.is_subcommand_used(cmds.uhd)) {
+            std::cerr << cmds.uhd;
+#endif
         } else {
             std::cerr << program;
         }
@@ -172,7 +238,7 @@ coro::Coro<int> async_main(int argc, char** argv) {
         std::optional<AircraftHistory> history = AircraftHistory::open(*history_db_path);
         if (!history) co_return 1;
         // Nothing is published, so the senders go now.
-        api_server_spawn(*ws_port, ws_interval, false, api_channels().second, std::move(history));
+        api_server_spawn(*ws_port, ws_interval, false, false, api_channels().second, std::move(history));
         LOGF(INFO, "serving %s on port %u (Ctrl+C to stop)", *history_db_path, *ws_port);
         co_await coro::signal(SIGINT);
         LOGF(INFO, "stopping after SIGINT");
@@ -195,7 +261,8 @@ coro::Coro<int> async_main(int argc, char** argv) {
             std::optional<AircraftHistory> ws_history;
             if (history) ws_history = history->clone();
             auto [senders, receivers] = api_channels();
-            api_server_spawn(*ws_port, ws_interval, true, std::move(receivers), std::move(ws_history));
+            api_server_spawn(*ws_port, ws_interval, true, loop_params.capture_dir.has_value(), std::move(receivers),
+                             std::move(ws_history));
             ws = std::move(senders);
         }
 
@@ -212,7 +279,7 @@ coro::Coro<int> async_main(int argc, char** argv) {
         double rate_hz;
         double freq_hz;
         FilterBank filter;
-        std::optional<coro::CoroStream<IqBlock>> stream;
+        std::optional<coro::CoroStream<IqBuffer>> stream;
         if (program.is_subcommand_used(cmds.vita49)) {
             Vita49StreamParams params = Vita49StreamParams::from_options(program, cmds.vita49);
             // A clone of its own, as `ws` goes to run_demod_loop; shared, as on_status must be copyable.
@@ -226,14 +293,29 @@ coro::Coro<int> async_main(int argc, char** argv) {
             stream.emplace(vita49_iq_stream(std::move(params.receiver), demod_padding(filter, rate_hz),
                                             Vita49StreamParams::kChunkSamples));
         } else if (program.is_subcommand_used(cmds.rtlsdr)) {
-            const RtlSdrStreamParams params = RtlSdrStreamParams::from_options(program, cmds.rtlsdr);
-            // What the device actually runs at, which RtlSdr warns about when it differs from what was asked.
-            auto radio = std::make_unique<RtlSdr>(params.tuning);
-            rate_hz = radio->sample_rate_hz();
-            freq_hz = radio->center_freq_hz();
+            RtlSdrStreamParams params = RtlSdrStreamParams::from_options(program, cmds.rtlsdr);
+            rate_hz = params.tuning.rate_hz;
+            freq_hz = params.tuning.freq_hz;
             filter = make_filter(rate_hz);
-            stream.emplace(rtlsdr_iq_stream(std::move(radio), demod_padding(filter, rate_hz), params.buf_num,
-                                            params.buf_len));
+            stream.emplace(rtlsdr_iq_stream(std::move(params), demod_padding(filter, rate_hz)));
+#ifdef ADSB_WITH_SIDEKIQ
+        } else if (program.is_subcommand_used(cmds.sidekiq)) {
+            SidekiqStreamParams params = SidekiqStreamParams::from_options(program, cmds.sidekiq);
+            rate_hz = params.rate_hz;
+            freq_hz = params.freq_hz;
+            filter = make_filter(rate_hz);
+            stream.emplace(sidekiq_iq_stream(std::move(params), demod_padding(filter, rate_hz),
+                                             SidekiqStreamParams::kChunkSamples));
+#endif
+#ifdef ADSB_WITH_UHD
+        } else if (program.is_subcommand_used(cmds.uhd)) {
+            UhdStreamParams params = UhdStreamParams::from_options(program, cmds.uhd);
+            rate_hz = params.rate_hz;
+            freq_hz = params.freq_hz;
+            filter = make_filter(rate_hz);
+            stream.emplace(uhd_iq_stream(std::move(params), demod_padding(filter, rate_hz),
+                                         UhdStreamParams::kChunkSamples));
+#endif
         } else {
             FileStreamParams params = FileStreamParams::from_options(program, cmds.file);
             rate_hz = params.rate_hz;
@@ -246,7 +328,9 @@ coro::Coro<int> async_main(int argc, char** argv) {
         // The demod task owns the source stream, and runs until the stream ends or Ctrl+C: this is the one place
         // the signal is handled, as no source watches for it itself. On Ctrl+C, select() drops the demod task's
         // handle, which cancels run_demod_loop and drains it before select() returns. That destroys the stream,
-        // and with it the source (its receive task, or its RtlSdr, whose destructor stops the read).
+        // and with it the source (its receive task, or its RtlSdr, whose destructor stops the read). A hardware source
+        // opens its device when the demod first reads from it, so an error opening it ends the stream as one
+        // receiving would, and is logged below.
         // demodulate() splits each block across the runtime's workers; with one it still works, serially.
         if (coro::worker_count() < 2)
             LOGF(WARNING, "the runtime has %u worker(s): the demodulator runs serially",

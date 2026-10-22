@@ -20,6 +20,7 @@ message ClientMessage {
     AircraftHistoryRequest aircraft_history = 11;
     ActivityRequest activity = 12;
     HeatmapRequest heatmap = 13;
+    CaptureRequest capture = 14;
   }
 }
 
@@ -35,6 +36,7 @@ message ServerMessage {
     AircraftHistory aircraft_history = 11;
     Activity activity = 12;
     Heatmap heatmap = 13;
+    CaptureResult capture = 14;
   }
 }
 
@@ -50,6 +52,7 @@ message Error {
     CANCELLED = 5;           // the client cancelled it
     RESOURCE_EXHAUSTED = 6;  // kClientCalls calls already in progress
     NO_LIVE_INPUT = 7;       // a spectrum call to a server with no live input (`serve`)
+    NO_CAPTURE = 8;          // a capture call without --capture-dir
   }
   Code code = 1;
   string message = 2;
@@ -63,6 +66,8 @@ message ServerInfo {
   bool history = 1;   // the history calls are answered
   bool spectrum = 2;  // the spectrum call is answered
   double default_interval_s = 3;  // --ws-interval
+  bool capture = 4;  // the capture call is answered (--capture-dir)
+  double capture_max_s = 5;  // longest capture the call takes; 0 without capture
 }
 
 message SubscribeRequest {
@@ -99,6 +104,30 @@ message SpectrumRow {
   double freq_hz = 1;
   double rate_hz = 2;
   repeated float bins_db = 3;
+}
+
+// Records one point in the pipeline to a SigMF recording in --capture-dir, from the next block on, for
+// duration_s of stream time. One capture per point at a time; cancelling stops it, keeping what's written.
+message CaptureRequest {
+  enum Point {
+    POINT_UNSPECIFIED = 0;
+    INPUT = 1;     // the input IQ after stitching, as the source delivered it: replayable with `adsb file`
+    ENVELOPE = 2;  // the demodulator's resampled envelope magnitude, real float32 at its output rate
+  }
+  Point point = 1;
+  double duration_s = 2;  // stream time; over 0, and at most ServerInfo.capture_max_s
+  string name = 3;        // file name in --capture-dir: no '/', not starting with '.'; .sigmf-data/-meta added
+}
+
+// Sent when the capture has covered its duration, or the input ended first.
+message CaptureResult {
+  string data_path = 1;  // the .sigmf-data on the server; its .sigmf-meta is beside it
+  string datatype = 2;   // SigMF core:datatype, e.g. "cf32_le"
+  double rate_hz = 3;
+  uint64 start_index = 4;  // the point's stream index of the first sample: an input index is Frame.idx's
+  uint64 samples = 5;      // samples written
+  uint64 missing = 6;      // samples of the duration not written: dropped behind a slow disk, or lost by the
+                           // source; each gap starts a new SigMF capture segment
 }
 
 message InputStatus {

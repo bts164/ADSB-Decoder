@@ -82,13 +82,13 @@ double pct(size_t a, size_t b) { return b ? 100.0 * static_cast<double>(a) / sta
 
 // The simulated signal, `total` samples in blocks of `block`, as float blocks scaled to [-1, 1): the scale the
 // demod gives the vita49 source's int16 samples.
-coro::CoroStream<IqBlock> sim_blocks(adsb_sim::Simulator& sim, IqPadding pad, size_t block, uint64_t total) {
+coro::CoroStream<IqBuffer> sim_blocks(adsb_sim::Simulator& sim, IqPadding pad, size_t block, uint64_t total) {
     std::vector<int16_t> iq(2 * block);
     for (uint64_t done = 0; done < total;) {
         const size_t n = static_cast<size_t>(std::min<uint64_t>(block, total - done));
         const std::span<int16_t> spans[] = {std::span(iq.data(), 2 * n)};
         co_await sim.generate(spans);
-        IqBlock b = IqBlock::uninitialized<iq::F32>(pad, n, done);
+        IqBuffer b = IqBuffer::uninitialized<iq::F32>(pad, n, done);
         const std::span<float> out = b.iq<iq::F32>();
         for (size_t i = 0; i < out.size(); i++) out[i] = iq[i] / 32768.0f;
         done += n;
@@ -155,7 +155,7 @@ int main(int argc, char** argv) {
     // with its default of one render thread.
     coro::Runtime rt;
     rt.block_on([&]() -> coro::Coro<void> {
-        auto blocks = demodulate(sim_blocks(sim, demod_padding(filter, rate), block, total), filter, rate,
+        auto blocks = demodulate(stitch(sim_blocks(sim, demod_padding(filter, rate), block, total)), filter, rate,
                                  preamble_min, slice_mag_min);
         while (auto b = co_await coro::next(blocks)) {
             frames.insert(frames.end(), b->frames.begin(), b->frames.end());

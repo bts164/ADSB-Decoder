@@ -28,7 +28,7 @@ namespace vrt {
  * What Assembler::drain() appends reordered, gap-filled samples into. Kept abstract (rather than a
  * concrete buffer type) so Assembler stays decoupled from buffer management: production code
  * (input/vita49_stream.cpp) drains into an IqBlockChunker (input/iq_block_chunker.h), which builds guard-padded
- * IqBlocks directly with no intermediate copy, while tests can drain into a trivial growable buffer.
+ * IqBuffers directly with no intermediate copy, while tests can drain into a trivial growable buffer.
  *
  * append_with(n, write) appends `n` samples by calling write(dst, offset), possibly several times, to
  * have the samples starting at `offset` of them written straight into `dst`, the interleaved I/Q

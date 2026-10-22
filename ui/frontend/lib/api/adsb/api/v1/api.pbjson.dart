@@ -91,6 +91,15 @@ const ClientMessage$json = {
       '9': 0,
       '10': 'heatmap'
     },
+    {
+      '1': 'capture',
+      '3': 14,
+      '4': 1,
+      '5': 11,
+      '6': '.adsb.api.v1.CaptureRequest',
+      '9': 0,
+      '10': 'capture'
+    },
   ],
   '8': [
     {'1': 'call'},
@@ -108,7 +117,8 @@ final $typed_data.Uint8List clientMessageDescriptor = $convert.base64Decode(
     'aXJjcmFmdF9oaXN0b3J5GAsgASgLMiMuYWRzYi5hcGkudjEuQWlyY3JhZnRIaXN0b3J5UmVxdW'
     'VzdEgAUg9haXJjcmFmdEhpc3RvcnkSOgoIYWN0aXZpdHkYDCABKAsyHC5hZHNiLmFwaS52MS5B'
     'Y3Rpdml0eVJlcXVlc3RIAFIIYWN0aXZpdHkSNwoHaGVhdG1hcBgNIAEoCzIbLmFkc2IuYXBpLn'
-    'YxLkhlYXRtYXBSZXF1ZXN0SABSB2hlYXRtYXBCBgoEY2FsbA==');
+    'YxLkhlYXRtYXBSZXF1ZXN0SABSB2hlYXRtYXASNwoHY2FwdHVyZRgOIAEoCzIbLmFkc2IuYXBp'
+    'LnYxLkNhcHR1cmVSZXF1ZXN0SABSB2NhcHR1cmVCBgoEY2FsbA==');
 
 @$core.Deprecated('Use serverMessageDescriptor instead')
 const ServerMessage$json = {
@@ -188,6 +198,15 @@ const ServerMessage$json = {
       '9': 0,
       '10': 'heatmap'
     },
+    {
+      '1': 'capture',
+      '3': 14,
+      '4': 1,
+      '5': 11,
+      '6': '.adsb.api.v1.CaptureResult',
+      '9': 0,
+      '10': 'capture'
+    },
   ],
   '8': [
     {'1': 'body'},
@@ -204,7 +223,8 @@ final $typed_data.Uint8List serverMessageDescriptor = $convert.base64Decode(
     'Fkc2IuYXBpLnYxLlNuYXBzaG90SABSCHNuYXBzaG90EkkKEGFpcmNyYWZ0X2hpc3RvcnkYCyAB'
     'KAsyHC5hZHNiLmFwaS52MS5BaXJjcmFmdEhpc3RvcnlIAFIPYWlyY3JhZnRIaXN0b3J5EjMKCG'
     'FjdGl2aXR5GAwgASgLMhUuYWRzYi5hcGkudjEuQWN0aXZpdHlIAFIIYWN0aXZpdHkSMAoHaGVh'
-    'dG1hcBgNIAEoCzIULmFkc2IuYXBpLnYxLkhlYXRtYXBIAFIHaGVhdG1hcEIGCgRib2R5');
+    'dG1hcBgNIAEoCzIULmFkc2IuYXBpLnYxLkhlYXRtYXBIAFIHaGVhdG1hcBI2CgdjYXB0dXJlGA'
+    '4gASgLMhouYWRzYi5hcGkudjEuQ2FwdHVyZVJlc3VsdEgAUgdjYXB0dXJlQgYKBGJvZHk=');
 
 @$core.Deprecated('Use cancelDescriptor instead')
 const Cancel$json = {
@@ -244,16 +264,17 @@ const Error_Code$json = {
     {'1': 'CANCELLED', '2': 5},
     {'1': 'RESOURCE_EXHAUSTED', '2': 6},
     {'1': 'NO_LIVE_INPUT', '2': 7},
+    {'1': 'NO_CAPTURE', '2': 8},
   ],
 };
 
 /// Descriptor for `Error`. Decode as a `google.protobuf.DescriptorProto`.
 final $typed_data.Uint8List errorDescriptor = $convert.base64Decode(
     'CgVFcnJvchIrCgRjb2RlGAEgASgOMhcuYWRzYi5hcGkudjEuRXJyb3IuQ29kZVIEY29kZRIYCg'
-    'dtZXNzYWdlGAIgASgJUgdtZXNzYWdlIp0BCgRDb2RlEhQKEENPREVfVU5TUEVDSUZJRUQQABIR'
+    'dtZXNzYWdlGAIgASgJUgdtZXNzYWdlIq0BCgRDb2RlEhQKEENPREVfVU5TUEVDSUZJRUQQABIR'
     'Cg1VTklNUExFTUVOVEVEEAESFAoQSU5WQUxJRF9BUkdVTUVOVBACEg4KCk5PX0hJU1RPUlkQAx'
     'IMCghJTlRFUk5BTBAEEg0KCUNBTkNFTExFRBAFEhYKElJFU09VUkNFX0VYSEFVU1RFRBAGEhEK'
-    'DU5PX0xJVkVfSU5QVVQQBw==');
+    'DU5PX0xJVkVfSU5QVVQQBxIOCgpOT19DQVBUVVJFEAg=');
 
 @$core.Deprecated('Use serverInfoRequestDescriptor instead')
 const ServerInfoRequest$json = {
@@ -277,6 +298,8 @@ const ServerInfo$json = {
       '5': 1,
       '10': 'defaultIntervalS'
     },
+    {'1': 'capture', '3': 4, '4': 1, '5': 8, '10': 'capture'},
+    {'1': 'capture_max_s', '3': 5, '4': 1, '5': 1, '10': 'captureMaxS'},
   ],
 };
 
@@ -284,7 +307,8 @@ const ServerInfo$json = {
 final $typed_data.Uint8List serverInfoDescriptor = $convert.base64Decode(
     'CgpTZXJ2ZXJJbmZvEhgKB2hpc3RvcnkYASABKAhSB2hpc3RvcnkSGgoIc3BlY3RydW0YAiABKA'
     'hSCHNwZWN0cnVtEiwKEmRlZmF1bHRfaW50ZXJ2YWxfcxgDIAEoAVIQZGVmYXVsdEludGVydmFs'
-    'Uw==');
+    'UxIYCgdjYXB0dXJlGAQgASgIUgdjYXB0dXJlEiIKDWNhcHR1cmVfbWF4X3MYBSABKAFSC2NhcH'
+    'R1cmVNYXhT');
 
 @$core.Deprecated('Use subscribeRequestDescriptor instead')
 const SubscribeRequest$json = {
@@ -408,6 +432,61 @@ const SpectrumRow$json = {
 final $typed_data.Uint8List spectrumRowDescriptor = $convert.base64Decode(
     'CgtTcGVjdHJ1bVJvdxIXCgdmcmVxX2h6GAEgASgBUgZmcmVxSHoSFwoHcmF0ZV9oehgCIAEoAV'
     'IGcmF0ZUh6EhcKB2JpbnNfZGIYAyADKAJSBmJpbnNEYg==');
+
+@$core.Deprecated('Use captureRequestDescriptor instead')
+const CaptureRequest$json = {
+  '1': 'CaptureRequest',
+  '2': [
+    {
+      '1': 'point',
+      '3': 1,
+      '4': 1,
+      '5': 14,
+      '6': '.adsb.api.v1.CaptureRequest.Point',
+      '10': 'point'
+    },
+    {'1': 'duration_s', '3': 2, '4': 1, '5': 1, '10': 'durationS'},
+    {'1': 'name', '3': 3, '4': 1, '5': 9, '10': 'name'},
+  ],
+  '4': [CaptureRequest_Point$json],
+};
+
+@$core.Deprecated('Use captureRequestDescriptor instead')
+const CaptureRequest_Point$json = {
+  '1': 'Point',
+  '2': [
+    {'1': 'POINT_UNSPECIFIED', '2': 0},
+    {'1': 'INPUT', '2': 1},
+    {'1': 'ENVELOPE', '2': 2},
+  ],
+};
+
+/// Descriptor for `CaptureRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List captureRequestDescriptor = $convert.base64Decode(
+    'Cg5DYXB0dXJlUmVxdWVzdBI3CgVwb2ludBgBIAEoDjIhLmFkc2IuYXBpLnYxLkNhcHR1cmVSZX'
+    'F1ZXN0LlBvaW50UgVwb2ludBIdCgpkdXJhdGlvbl9zGAIgASgBUglkdXJhdGlvblMSEgoEbmFt'
+    'ZRgDIAEoCVIEbmFtZSI3CgVQb2ludBIVChFQT0lOVF9VTlNQRUNJRklFRBAAEgkKBUlOUFVUEA'
+    'ESDAoIRU5WRUxPUEUQAg==');
+
+@$core.Deprecated('Use captureResultDescriptor instead')
+const CaptureResult$json = {
+  '1': 'CaptureResult',
+  '2': [
+    {'1': 'data_path', '3': 1, '4': 1, '5': 9, '10': 'dataPath'},
+    {'1': 'datatype', '3': 2, '4': 1, '5': 9, '10': 'datatype'},
+    {'1': 'rate_hz', '3': 3, '4': 1, '5': 1, '10': 'rateHz'},
+    {'1': 'start_index', '3': 4, '4': 1, '5': 4, '10': 'startIndex'},
+    {'1': 'samples', '3': 5, '4': 1, '5': 4, '10': 'samples'},
+    {'1': 'missing', '3': 6, '4': 1, '5': 4, '10': 'missing'},
+  ],
+};
+
+/// Descriptor for `CaptureResult`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List captureResultDescriptor = $convert.base64Decode(
+    'Cg1DYXB0dXJlUmVzdWx0EhsKCWRhdGFfcGF0aBgBIAEoCVIIZGF0YVBhdGgSGgoIZGF0YXR5cG'
+    'UYAiABKAlSCGRhdGF0eXBlEhcKB3JhdGVfaHoYAyABKAFSBnJhdGVIehIfCgtzdGFydF9pbmRl'
+    'eBgEIAEoBFIKc3RhcnRJbmRleBIYCgdzYW1wbGVzGAUgASgEUgdzYW1wbGVzEhgKB21pc3Npbm'
+    'cYBiABKARSB21pc3Npbmc=');
 
 @$core.Deprecated('Use inputStatusDescriptor instead')
 const InputStatus$json = {

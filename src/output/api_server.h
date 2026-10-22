@@ -10,10 +10,12 @@
 #include <vector>
 
 #include <coro/sync/broadcast.h>
+#include <coro/sync/mpsc.h>
 #include <coro/sync/watch.h>
 
 #include "api/convert.h"
 #include "output/aircraft_history.h"
+#include "output/capture.h"
 
 /**
  * @file
@@ -33,18 +35,19 @@ using LiveAircraft = std::unordered_map<uint32_t, api::Aircraft>;
 
 /** What the pipeline's tasks are asked to do, written by the API server. */
 struct PipelineSettings {
-    int spectrum_viewers = 0;  /**< spectrum calls in progress; the spectrum tap computes while above 0 */
+    int spectrum_viewers = 0;  /**< spectrum calls in progress; the spectrum task computes while above 0 */
 };
 
 /**
- * The pipeline's ends of the server's channels: what it publishes to the clients on, and the settings it
- * reads. Each is for one task at a time: clone for another.
+ * The pipeline's ends of the server's channels: what it publishes to the clients on, and what it reads. Each
+ * but `captures` is for one task at a time: clone for another.
  */
 struct ApiSenders {
     coro::BroadcastSender<LiveItem> live;
     coro::WatchSender<LiveAircraft> aircraft;
     coro::WatchSender<std::optional<api::InputStatus>> input_status;  /**< unset until the input reports one */
-    coro::WatchReceiver<PipelineSettings> settings;                    /**< the one end here the pipeline reads */
+    coro::WatchReceiver<PipelineSettings> settings;
+    coro::MpscReceiver<CaptureCall> captures;  /**< the capture calls, for one task only */
 };
 
 /** The server's ends. */
@@ -52,7 +55,8 @@ struct ApiReceivers {
     coro::BroadcastReceiver<LiveItem> live;
     coro::WatchReceiver<LiveAircraft> aircraft;
     coro::WatchReceiver<std::optional<api::InputStatus>> input_status;
-    coro::WatchSender<PipelineSettings> settings;  /**< the one end here the server writes */
+    coro::WatchSender<PipelineSettings> settings;
+    coro::MpscSender<CaptureCall> captures;
 };
 
 /** Makes the server's channels; each watch starts empty. */
@@ -65,8 +69,10 @@ std::pair<ApiSenders, ApiReceivers> api_channels();
  * @param default_interval time between a subscription's updates, unless its request says otherwise
  * @param live whether there's a pipeline publishing on `inputs`; without one the spectrum call fails with
  *     NO_LIVE_INPUT
+ * @param capture whether the pipeline takes capture calls on `inputs` (--capture-dir); without it the capture
+ *     call fails with NO_CAPTURE
  * @param inputs what the calls are answered from, and the settings they write
  * @param history what the history calls are answered from; without one they fail with NO_HISTORY
  */
-void api_server_spawn(uint16_t port, std::chrono::nanoseconds default_interval, bool live, ApiReceivers inputs,
-                      std::optional<AircraftHistory> history);
+void api_server_spawn(uint16_t port, std::chrono::nanoseconds default_interval, bool live, bool capture,
+                      ApiReceivers inputs, std::optional<AircraftHistory> history);

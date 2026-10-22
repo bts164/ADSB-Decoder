@@ -23,6 +23,11 @@ constexpr std::array<std::chrono::seconds, 5> kReconnectBackoff{
 constexpr uint32_t kDefaultBufNum = 15;
 constexpr uint32_t kDefaultBufLen = 16 * 32 * 512;
 
+// How far the rate the device runs at may be from the one asked for. Within it, the error is no more than a
+// crystal's, and the samples are labeled with the rate asked for; beyond it, that label would make every sample's
+// time wrong.
+constexpr double kRateTolerancePpm = 100;
+
 // Opens and tunes the device. nullptr, with the reason in `error`, if it can't be opened or rejects the rate or
 // frequency: streaming at other settings would mislabel every sample. A rejected gain is only logged.
 rtlsdr_dev_t* open_tuned(const RtlSdrTuning& tuning, std::string& error) {
@@ -83,13 +88,19 @@ RtlSdr::RtlSdr(const RtlSdrTuning& tuning) : m_tuning(tuning) {
 
     // The rate and frequency the device reports, which are what it uses: the resampler can round the rate.
     m_rate_hz = rtlsdr_get_sample_rate(m_dev);
-    m_freq_hz = rtlsdr_get_center_freq(m_dev);
+    const double freq_hz = rtlsdr_get_center_freq(m_dev);
     LOGF(INFO, "streaming from rtl-sdr device %d: rate=%.0f Hz, freq=%.0f Hz, gain=%s (Ctrl+C to stop)",
-         tuning.device_index, m_rate_hz, m_freq_hz,
+         tuning.device_index, m_rate_hz, freq_hz,
          tuning.gain_db < 0.0 ? std::string("auto") : absl::StrFormat("%g dB", tuning.gain_db));
+    if (std::abs(m_rate_hz - tuning.rate_hz) > kRateTolerancePpm * 1e-6 * tuning.rate_hz) {
+        close();
+        throw std::runtime_error(absl::StrFormat("rtl-sdr device %d runs at %.0f Hz, more than %g ppm from the %g Hz "
+                                                 "asked for; give --rate %.0f", tuning.device_index, m_rate_hz,
+                                                 kRateTolerancePpm, tuning.rate_hz, m_rate_hz));
+    }
     if (std::abs(m_rate_hz - tuning.rate_hz) >= 1.0)
-        LOGF(WARNING, "rtl-sdr device %d runs at %.0f Hz, not the %g Hz asked for", tuning.device_index, m_rate_hz,
-             tuning.rate_hz);
+        LOGF(WARNING, "rtl-sdr device %d runs at %.0f Hz, within %g ppm of the %g Hz asked for, which the samples "
+             "are labeled with", tuning.device_index, m_rate_hz, kRateTolerancePpm, tuning.rate_hz);
     check_gain_step(m_dev, tuning);
 }
 

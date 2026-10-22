@@ -5,6 +5,8 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <type_traits>
 
 #include <coro/coro.h>
 #include <coro/coro_stream.h>
@@ -38,6 +40,9 @@ constexpr size_t kReadQueue = 4;
 
 // Serialized messages waiting for the connection's writer, from all its calls.
 constexpr size_t kWriteQueue = 16;
+
+// Capture calls on their way to the pipeline, from all the connections.
+constexpr size_t kCaptureQueue = 4;
 
 // A send that takes longer closes the connection. Long enough never to fire on a client that's just slow:
 // a message isn't dropped instead, since a dropped `end` would leave the client waiting forever.
@@ -102,6 +107,7 @@ void put(api::ServerMessage& m, api::Snapshot r) { *m.mutable_snapshot() = std::
 void put(api::ServerMessage& m, api::AircraftHistory r) { *m.mutable_aircraft_history() = std::move(r); }
 void put(api::ServerMessage& m, api::Activity r) { *m.mutable_activity() = std::move(r); }
 void put(api::ServerMessage& m, api::Heatmap r) { *m.mutable_heatmap() = std::move(r); }
+void put(api::ServerMessage& m, api::CaptureResult r) { *m.mutable_capture() = std::move(r); }
 
 bool has_anything(const api::Update& update) {
     return update.frames_size() > 0 || update.aircraft_size() > 0 || update.has_input_status();
@@ -144,6 +150,7 @@ public:
     struct Settings {
         std::chrono::nanoseconds default_interval;  // --ws-interval
         bool live;                                  // whether a pipeline publishes on the channels
+        bool capture;                               // whether the pipeline takes capture calls
     };
 
     // Most calls one connection may have in progress at once.
@@ -213,6 +220,7 @@ private:
         case ClientMessage::kAircraftHistory: return serve(calls, id, msg.aircraft_history());
         case ClientMessage::kActivity: return serve(calls, id, msg.activity());
         case ClientMessage::kHeatmap: return serve(calls, id, msg.heatmap());
+        case ClientMessage::kCapture: return serve(calls, id, msg.capture());
         case ClientMessage::CALL_NOT_SET:  // a call newer than this server, or none at all
             return error_message(id, api::Error::UNIMPLEMENTED, "unknown call");
         }
@@ -244,11 +252,11 @@ private:
                 .name("ws_call")
                 .spawn(run_call(id, std::move(adapter), std::move(cancel_rx), m_out.clone(), m_done_tx->clone()));
         calls.emplace(id, Call{std::move(task), std::move(cancel_tx)});
-        // A streaming call is something a client turned on, such as the spectrum; a unary call is one of many,
-        // such as each seek of the history scrubber.
+        // A streaming call is something a client turned on, such as the spectrum, as is a capture; a unary call
+        // is one of many, such as each seek of the history scrubber.
         const std::string args = request.ShortDebugString();
         const auto name = Request::descriptor()->name();
-        if constexpr (coro::Stream<Result>)
+        if constexpr (coro::Stream<Result> || std::is_same_v<Request, api::CaptureRequest>)
             LOGF(INFO, "websocket call %u: %s started%s%s", id, name, args.empty() ? "" : ": ", args);
         else
             VLOGF(1, "websocket call %u: %s started%s%s", id, name, args.empty() ? "" : ": ", args);
@@ -322,6 +330,8 @@ private:
         info.set_history(m_history.has_value());
         info.set_spectrum(m_settings.live);
         info.set_default_interval_s(std::chrono::duration<double>(m_settings.default_interval).count());
+        info.set_capture(m_settings.capture);
+        info.set_capture_max_s(m_settings.capture ? CaptureCall::kMaxDurationS : 0);
         co_return info;
     }
 
@@ -401,6 +411,31 @@ private:
             }
             if (auto* row = std::get_if<std::shared_ptr<const api::SpectrumRow>>(&*item)) co_yield **row;
         }
+    }
+
+    // Answered by the pipeline's capture task for the point, once the capture is done; a cancel drops the reply's
+    // receiver, which ends the capture.
+    coro::Coro<api::CaptureResult> Handle(const api::CaptureRequest& request) {
+        if (!m_settings.capture) throw CallError(api::Error::NO_CAPTURE, "the server has no --capture-dir");
+        if (request.point() != api::CaptureRequest::INPUT && request.point() != api::CaptureRequest::ENVELOPE)
+            throw CallError(api::Error::INVALID_ARGUMENT, "no such capture point");
+        const double s = request.duration_s();
+        if (!(s > 0 && s <= CaptureCall::kMaxDurationS)) {  // NaN too
+            throw CallError(api::Error::INVALID_ARGUMENT, "duration_s " + std::to_string(s) +
+                                                              " isn't over 0 and at most " +
+                                                              std::to_string(CaptureCall::kMaxDurationS));
+        }
+        const std::string& name = request.name();
+        if (name.empty() || name.front() == '.' || name.find_first_of(std::string_view("/\0", 2)) != name.npos)
+            throw CallError(api::Error::INVALID_ARGUMENT, "name must be a file name, not starting with '.'");
+        auto [reply_tx, reply_rx] = coro::oneshot_channel<CaptureCall::Reply>();
+        coro::MpscSender<CaptureCall> captures = m_live.captures.clone();
+        if (!co_await captures.send(CaptureCall{request, std::move(reply_tx)}))
+            throw CallError(api::Error::INTERNAL, "the pipeline has stopped taking captures");
+        auto reply = co_await reply_rx.recv();
+        if (!reply) throw CallError(api::Error::INTERNAL, "the capture task ended without replying");
+        if (!*reply) throw CallError(reply->error().code(), reply->error().message());
+        co_return std::move(**reply);
     }
 
     coro::Coro<api::Snapshot> Handle(const api::SnapshotRequest& request) {
@@ -491,10 +526,11 @@ coro::Coro<void> handle_connection(coro::WsStream ws, ApiConnection conn, coro::
 coro::Coro<void> run(uint16_t port, ApiReceivers inputs, ApiConnection::Settings settings,
                      std::optional<AircraftHistory> history) {
     coro::WsListener listener = co_await coro::WsListener::bind("0.0.0.0", port);
-    LOGF(INFO, "websocket listening on port %u: an update every %g s unless a subscription asks otherwise, %s, %s",
+    LOGF(INFO, "websocket listening on port %u: an update every %g s unless a subscription asks otherwise, %s, %s, "
+         "%s",
          port, std::chrono::duration<double>(settings.default_interval).count(),
          settings.live ? "spectrum while a client watches it" : "no spectrum",
-         history ? "history answered" : "no history");
+         settings.capture ? "captures taken" : "no captures", history ? "history answered" : "no history");
     // Runs until the task is cancelled: Ctrl+C is handled in main(), and ~Runtime cancels and drains this
     // task (see api_server_spawn()). JoinSet's destructor then cancels and drains any remaining clients.
     coro::JoinSet<void> clients;
@@ -508,7 +544,8 @@ coro::Coro<void> run(uint16_t port, ApiReceivers inputs, ApiConnection::Settings
                 std::optional<AircraftHistory> client_history;
                 if (history) client_history = history->clone();
                 ApiReceivers client_inputs{inputs.live.resubscribe(), inputs.aircraft.clone(),
-                                           inputs.input_status.clone(), inputs.settings.clone()};
+                                           inputs.input_status.clone(), inputs.settings.clone(),
+                                           inputs.captures.clone()};
                 auto [out_tx, out_rx] = coro::mpsc_channel<std::string>(kWriteQueue);
                 clients
                     .build_task(handle_connection(
@@ -536,15 +573,19 @@ std::pair<ApiSenders, ApiReceivers> api_channels() {
     auto [aircraft_tx, aircraft_rx] = coro::watch_channel(LiveAircraft{});
     auto [status_tx, status_rx] = coro::watch_channel(std::optional<api::InputStatus>{});
     auto [settings_tx, settings_rx] = coro::watch_channel(PipelineSettings{});
-    return {ApiSenders{std::move(live_tx), std::move(aircraft_tx), std::move(status_tx), std::move(settings_rx)},
-            ApiReceivers{std::move(live_rx), std::move(aircraft_rx), std::move(status_rx), std::move(settings_tx)}};
+    auto [captures_tx, captures_rx] = coro::mpsc_channel<CaptureCall>(kCaptureQueue);
+    return {ApiSenders{std::move(live_tx), std::move(aircraft_tx), std::move(status_tx), std::move(settings_rx),
+                       std::move(captures_rx)},
+            ApiReceivers{std::move(live_rx), std::move(aircraft_rx), std::move(status_rx), std::move(settings_tx),
+                         std::move(captures_tx)}};
 }
 
-void api_server_spawn(uint16_t port, std::chrono::nanoseconds default_interval, bool live, ApiReceivers inputs,
-                      std::optional<AircraftHistory> history) {
+void api_server_spawn(uint16_t port, std::chrono::nanoseconds default_interval, bool live, bool capture,
+                      ApiReceivers inputs, std::optional<AircraftHistory> history) {
     // Detached: run() accepts clients until the runtime's destructor cancels and drains it.
     coro::build_task()
         .name("ws_accept")
-        .spawn(run(port, std::move(inputs), ApiConnection::Settings{default_interval, live}, std::move(history)))
+        .spawn(run(port, std::move(inputs), ApiConnection::Settings{default_interval, live, capture},
+                   std::move(history)))
         .detach();
 }

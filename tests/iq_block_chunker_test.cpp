@@ -35,10 +35,10 @@ std::vector<float> samples(size_t first, size_t n) {
 }
 
 // Real samples [0, n) of a block, as a plain vector for comparison against samples(...).
-std::vector<float> real_of(const IqBlock& b) { return {b.iq<Format>().begin(), b.iq<Format>().end()}; }
+std::vector<float> real_of(const IqBuffer& b) { return {b.iq<Format>().begin(), b.iq<Format>().end()}; }
 
 // Samples [first, first + n) of a block's real samples, as interleaved I/Q floats.
-std::span<const float> part(const IqBlock& b, size_t first, size_t n) {
+std::span<const float> part(const IqBuffer& b, size_t first, size_t n) {
     return b.iq<Format>().subspan(2 * first, 2 * n);
 }
 
@@ -51,10 +51,10 @@ bool all_zero(std::span<const float> iq) {
 
 // Every completed block must be guard-padded, real-sample-complete, and start-indexed n samples
 // after the previous one.
-void check_well_formed_block(const IqBlock& b, size_t expect_n, uint64_t expect_start) {
-    CHECK(b.n == expect_n);
-    CHECK(b.start == expect_start);
-    CHECK(b.lead == kPad.lead);
+void check_well_formed_block(const IqBuffer& b, size_t expect_n, uint64_t expect_start) {
+    CHECK(b.n() == expect_n);
+    CHECK(b.start() == expect_start);
+    CHECK(b.lead() == kPad.lead);
     const size_t lead = static_cast<size_t>(kPad.lead);
     const size_t trail = static_cast<size_t>(kPad.trail);
     CHECK(b.total() == lead + expect_n + trail);
@@ -68,7 +68,7 @@ void test_completes_one_block() {
     CHECK(c.ready() == 0);
     c.append(samples(100, kChunk));
     CHECK(c.ready() == 1);
-    IqBlock b = c.pop();
+    IqBuffer b = c.pop();
     check_well_formed_block(b, kChunk, 0);
     CHECK(real_of(b) == samples(100, kChunk));
     CHECK(c.ready() == 0);
@@ -80,14 +80,14 @@ void test_append_crosses_block_boundary() {
     Chunker c(kPad, kChunk);
     c.append(samples(0, 6));  // 4 complete block 0, 2 start block 1
     CHECK(c.ready() == 1);
-    IqBlock b0 = c.pop();
+    IqBuffer b0 = c.pop();
     check_well_formed_block(b0, kChunk, 0);
     CHECK(real_of(b0) == samples(0, 4));
     CHECK(c.ready() == 0);  // block 1 only half full
 
     c.append(samples(6, 2));  // completes block 1
     CHECK(c.ready() == 1);
-    IqBlock b1 = c.pop();
+    IqBuffer b1 = c.pop();
     check_well_formed_block(b1, kChunk, kChunk);
     CHECK(real_of(b1) == samples(4, 4));
 }
@@ -97,8 +97,8 @@ void test_append_spans_multiple_blocks() {
     Chunker c(kPad, kChunk);
     c.append(samples(0, 9));  // 2 full blocks + 1 sample starting a third
     CHECK(c.ready() == 2);
-    IqBlock b0 = c.pop();
-    IqBlock b1 = c.pop();
+    IqBuffer b0 = c.pop();
+    IqBuffer b1 = c.pop();
     check_well_formed_block(b0, kChunk, 0);
     check_well_formed_block(b1, kChunk, kChunk);
     CHECK(real_of(b0) == samples(0, 4));
@@ -110,7 +110,7 @@ void test_append_zeros_fills_real_region() {
     Chunker c(kPad, kChunk);
     c.append_zeros(kChunk);
     CHECK(c.ready() == 1);
-    IqBlock b = c.pop();
+    IqBuffer b = c.pop();
     check_well_formed_block(b, kChunk, 0);
     CHECK(all_zero(b.iq<Format>()));
 }
@@ -122,7 +122,7 @@ void test_mixed_zeros_then_samples_in_one_block() {
     c.append_zeros(2);
     c.append(samples(50, 2));
     CHECK(c.ready() == 1);
-    IqBlock b = c.pop();
+    IqBuffer b = c.pop();
     check_well_formed_block(b, kChunk, 0);
     CHECK(all_zero(part(b, 0, 2)));
     CHECK(std::ranges::equal(part(b, 2, 2), samples(50, 2)));
@@ -154,7 +154,7 @@ void test_flush_shrinks_partial_block() {
     CHECK(c.ready() == 0);
     c.flush();
     CHECK(c.ready() == 1);
-    IqBlock b = c.pop();
+    IqBuffer b = c.pop();
     check_well_formed_block(b, 3, 0);
     CHECK(real_of(b) == samples(7, 3));
 }
@@ -181,7 +181,7 @@ void test_start_indices_advance_in_order() {
     c.append(samples(8, 4));
     CHECK(c.ready() == 3);
     for (uint64_t i = 0; i < 3; i++) {
-        IqBlock b = c.pop();
+        IqBuffer b = c.pop();
         check_well_formed_block(b, kChunk, i * kChunk);
         CHECK(real_of(b) == samples(i * kChunk, kChunk));
     }

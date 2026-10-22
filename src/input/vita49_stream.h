@@ -62,7 +62,7 @@ struct Vita49Options {
 };
 
 /**
- * Binds a UDP socket and streams IqBlocks until it is dropped or the sender goes quiet for
+ * Binds a UDP socket and streams IqBuffers until it is dropped or the sender goes quiet for
  * Vita49Options::idle_timeout_s.
  *
  * A receive task on the runtime keeps draining the socket while the demod thread is busy, handing blocks
@@ -78,7 +78,7 @@ struct Vita49Options {
  * @throws std::runtime_error (when the stream is consumed) if the bind fails or the stream's IF Context
  *         packets advertise a different sample rate
  */
-coro::CoroStream<IqBlock> vita49_iq_stream(Vita49Options opts, IqPadding pad, uint32_t chunk_samples);
+coro::CoroStream<IqBuffer> vita49_iq_stream(Vita49Options opts, IqPadding pad, uint32_t chunk_samples);
 
 /** `adsb vita49`'s options. */
 struct Vita49StreamParams {

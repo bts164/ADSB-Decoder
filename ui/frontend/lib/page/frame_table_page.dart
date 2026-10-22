@@ -18,6 +18,7 @@ import '../settings.dart';
 import '../settings_panel.dart';
 
 part 'aircraft_table.dart';
+part 'capture.dart';
 part 'detail_panel.dart';
 part 'frames.dart';
 part 'heatmap.dart';
@@ -53,6 +54,11 @@ class _FrameTablePageState extends State<FrameTablePage> {
   StreamSubscription<api.SpectrumRow>? _spectrum;
   // Whether the last server connected to answers the spectrum call; the toggle is shown only if it does.
   bool _spectrumAvailable = false;
+  // Whether the last server connected to takes capture calls, and the longest it takes.
+  bool _captureAvailable = false;
+  double _captureMaxS = 0;
+  // The capture call in progress, if any.
+  final _capture = ValueNotifier<_CaptureInProgress?>(null);
   bool _connected = false;
   String? _error;
 
@@ -227,19 +233,32 @@ class _FrameTablePageState extends State<FrameTablePage> {
   static const double _minDockWidth = 400;
   static const double _minMapWidth = 320;
 
-  // Spectrum snapshots arrive far slower than frames (backend throttles to
-  // one every 150ms regardless of sample rate -- see kSpectrumInterval in
+  // Spectrum rows arrive at most every 50 ms (kSpectrumInterval in
   // pipeline.cpp), so unlike frames/aircraft these go straight into their own
   // ValueNotifier on arrival instead of through the once-a-second
   // _flushUpdates batch: only the waterfall widget listening to it repaints,
-  // not the whole page, and at ~7Hz that's cheap either way.
-  static const int _maxSpectrumRows = 150;
-  final ValueNotifier<List<SpectrumFrame>> _spectrumHistory = ValueNotifier<List<SpectrumFrame>>([]);
+  // not the whole page. 400 rows is 20 s of history.
+  static const int _maxSpectrumRows = 400;
+  final ValueNotifier<List<_WaterfallRow>> _spectrumHistory = ValueNotifier<List<_WaterfallRow>>([]);
+  // The noise floor the rows are colored against, smoothed across rows so the
+  // colors don't flicker; null until the first row.
+  double? _spectrumFloorDb;
+  // Rows are colored in arrival order, each after the one before, and dropped
+  // once done if the history was cleared meanwhile (the generation changed).
+  Future<void> _spectrumColoring = Future.value();
+  int _spectrumGeneration = 0;
+  // A recoloring of the history waiting its turn: changes while one waits join it, so a drag of the range
+  // recolors as fast as recoloring goes and no faster.
+  bool _spectrumRecolorQueued = false;
 
   // Display units and time format. The page's own defaults if it wasn't given any.
   late final DisplaySettings _units = widget.settings ?? DisplaySettings();
   // Rebuilt when the units change, for the headers.
   late List<TableColumn<AircraftRecord>> _aircraftColumns = _buildAircraftColumns();
+  // The spectrum's color range, ahead of _units while the slider is dragged: saving it then would rebuild
+  // the page on every step.
+  late final ValueNotifier<RangeValues> _spectrumRange =
+      ValueNotifier(RangeValues(_units.spectrumLowDb, _units.spectrumHighDb));
 
   @override
   void initState() {
@@ -259,12 +278,20 @@ class _FrameTablePageState extends State<FrameTablePage> {
     _heatmapDebounce?.cancel();
     _updates?.cancel();
     _spectrum?.cancel();
+    _capture.value?.subscription.cancel();
     _client?.close();
     _urlController.dispose();
     _searchController.dispose();
+    // Not _clearSpectrum(): nothing is listening to be told.
+    _spectrumGeneration++;
+    for (final row in _spectrumHistory.value) {
+      row.image.dispose();
+    }
     _spectrumHistory.dispose();
+    _spectrumRange.dispose();
     _framesChanged.dispose();
     _inputStatus.dispose();
+    _capture.dispose();
     _aircraftChanged.dispose();
     _clockTick.dispose();
     super.dispose();
@@ -317,7 +344,7 @@ class _FrameTablePageState extends State<FrameTablePage> {
     _statsFramesPerSec = 0;
     _inputStatus.value = null;
     _statsWindowStart = DateTime.now();
-    _spectrumHistory.value = [];
+    _clearSpectrum();
     _framesChanged.notify();
     _aircraftChanged.notify();
     setState(() => _error = null);
@@ -339,6 +366,8 @@ class _FrameTablePageState extends State<FrameTablePage> {
       setState(() {
         _spectrumAvailable = info.spectrum;
         if (!info.spectrum) _showSpectrum = false;
+        _captureAvailable = info.capture;
+        _captureMaxS = info.captureMaxS;
       });
       if (_showSpectrum) _startSpectrum();
       // The subscription reports a disconnect, and the server never ends it.
@@ -541,11 +570,59 @@ class _FrameTablePageState extends State<FrameTablePage> {
   }
 
   void _onSpectrumRow(api.SpectrumRow row) {
-    final rows = [..._spectrumHistory.value, SpectrumFrame.fromProto(row)];
-    if (rows.length > _maxSpectrumRows) {
-      rows.removeRange(0, rows.length - _maxSpectrumRows);
+    if (row.binsDb.isEmpty) return;
+    final median = _WaterfallRow.medianDb(row.binsDb);
+    final floor = _spectrumFloorDb;
+    final floorDb = _spectrumFloorDb = floor == null ? median : floor + 0.1 * (median - floor);
+    final generation = _spectrumGeneration;
+    _spectrumColoring = _spectrumColoring.then((_) async {
+      final colored = await _WaterfallRow.fromProto(row, floorDb, _units.spectrumColormap, _spectrumRange.value);
+      if (!mounted || generation != _spectrumGeneration) {
+        colored.image.dispose();
+        return;
+      }
+      final rows = [..._spectrumHistory.value, colored];
+      if (rows.length > _maxSpectrumRows) {
+        for (final old in rows.take(rows.length - _maxSpectrumRows)) {
+          old.image.dispose();
+        }
+        rows.removeRange(0, rows.length - _maxSpectrumRows);
+      }
+      _spectrumHistory.value = rows;
+    });
+  }
+
+  /// Recolors the history in the current colormap and range, after the rows already being colored.
+  void _recolorSpectrum() {
+    if (_spectrumRecolorQueued) return;
+    _spectrumRecolorQueued = true;
+    final generation = _spectrumGeneration;
+    _spectrumColoring = _spectrumColoring.then((_) async {
+      _spectrumRecolorQueued = false;
+      final old = _spectrumHistory.value;
+      final colormap = _units.spectrumColormap;
+      final range = _spectrumRange.value;
+      final rows = await Future.wait([for (final row in old) row.recolored(colormap, range)]);
+      if (!mounted || generation != _spectrumGeneration) {
+        for (final row in rows) {
+          row.image.dispose();
+        }
+        return;
+      }
+      _spectrumHistory.value = rows;
+      for (final row in old) {
+        row.image.dispose();
+      }
+    });
+  }
+
+  void _clearSpectrum() {
+    _spectrumGeneration++;
+    _spectrumFloorDb = null;
+    for (final row in _spectrumHistory.value) {
+      row.image.dispose();
     }
-    _spectrumHistory.value = rows;
+    _spectrumHistory.value = [];
   }
 
   /// Applies a snapshot. The first, on connect, backfills the live aircraft
@@ -589,6 +666,7 @@ class _FrameTablePageState extends State<FrameTablePage> {
     _activityTimer = null;
     _updates?.cancel();
     _stopSpectrum();
+    _dropCapture();
     _client?.close();
     _updates = null;
     _client = null;
@@ -692,6 +770,10 @@ class _FrameTablePageState extends State<FrameTablePage> {
                 selected: _showSpectrum,
                 onSelected: _setShowSpectrum,
               ),
+            ],
+            if (_captureAvailable && _connected) ...[
+              const SizedBox(width: 6),
+              _buildCaptureControl(),
             ],
             const SizedBox(width: 12),
             ValueListenableBuilder(

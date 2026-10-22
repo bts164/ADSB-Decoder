@@ -6,6 +6,18 @@ class AdsbRecipe(ConanFile):
     name = "adsb"
     package_type = "application"
     settings = "os", "compiler", "build_type", "arch"
+    # with_hdf5=False leaves out adsb --debug-h5 and so HDF5, which can't be cross-built. with_uhd=True adds
+    # adsb uhd, for Ettus USRPs; off by default, as UHD brings Boost and is GPL-3.0.
+    options = {
+        "with_hdf5": [True, False],
+        "with_sidekiq": [True, False],
+        "with_uhd": [True, False]
+    }
+    default_options = {
+        "with_hdf5": True,
+        "with_sidekiq": False,
+        "with_uhd": True
+    }
     exports_sources = "CMakeLists.txt", "src/*", "proto/*", "tests/CMakeLists.txt", "tests/*.cpp", "scenarios/*"
 
     # No version attribute: this is developed and re-exported/rebuilt as
@@ -44,7 +56,13 @@ class AdsbRecipe(ConanFile):
         # adsb --debug-h5: per-frame IQ + demod state for offline debugging
         # (see frame_recorder.h). HighFive is a header-only C++ wrapper over
         # the HDF5 C library.
-        self.requires("highfive/2.10.0")
+        if self.options.with_hdf5:
+            self.requires("highfive/2.10.0")
+        if self.options.with_uhd:
+            self.requires("uhd/4.10.0.0")
+            # UHD's headers include Boost's, but its recipe doesn't pass them on. The same range as the UHD
+            # recipe's, so both resolve to one Boost; headers only, as libuhd links Boost itself.
+            self.requires("boost/[>=1.83.0 <2]", libs=False)
         # The UI API's messages (proto/adsb/api/v1/api.proto, doc/design/ui_api.md). The full library, not
         # lite: MessageDifferencer and the debug strings need it.
         self.requires("protobuf/7.36.2")
@@ -64,15 +82,24 @@ class AdsbRecipe(ConanFile):
         self.options["fftw"].precision_longdouble = False
         # Only HighFive's core API is used; skip its optional integrations
         # (boost in particular would be a large extra build).
-        for opt in ("with_boost", "with_eigen", "with_xtensor", "with_opencv"):
-            setattr(self.options["highfive"], opt, False)
+        if self.options.with_hdf5:
+            for opt in ("with_boost", "with_eigen", "with_xtensor", "with_opencv"):
+                setattr(self.options["highfive"], opt, False)
+        # A static libuhd registers its device drivers from static initializers, which a plain static link
+        # drops, so it would find no devices.
+        if self.options.with_uhd:
+            self.options["uhd"].shared = True
 
     def layout(self):
         cmake_layout(self)
 
     def generate(self):
         CMakeDeps(self).generate()
-        CMakeToolchain(self).generate()
+        tc = CMakeToolchain(self)
+        tc.cache_variables["ADSB_WITH_HDF5"] = bool(self.options.with_hdf5)
+        tc.cache_variables["ADSB_WITH_SIDEKIQ"] = bool(self.options.with_sidekiq)
+        tc.cache_variables["ADSB_WITH_UHD"] = bool(self.options.with_uhd)
+        tc.generate()
 
     def build(self):
         cmake = CMake(self)

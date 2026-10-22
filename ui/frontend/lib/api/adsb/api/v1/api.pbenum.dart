@@ -31,6 +31,8 @@ class Error_Code extends $pb.ProtobufEnum {
       Error_Code._(6, _omitEnumNames ? '' : 'RESOURCE_EXHAUSTED');
   static const Error_Code NO_LIVE_INPUT =
       Error_Code._(7, _omitEnumNames ? '' : 'NO_LIVE_INPUT');
+  static const Error_Code NO_CAPTURE =
+      Error_Code._(8, _omitEnumNames ? '' : 'NO_CAPTURE');
 
   static const $core.List<Error_Code> values = <Error_Code>[
     CODE_UNSPECIFIED,
@@ -41,14 +43,37 @@ class Error_Code extends $pb.ProtobufEnum {
     CANCELLED,
     RESOURCE_EXHAUSTED,
     NO_LIVE_INPUT,
+    NO_CAPTURE,
   ];
 
   static final $core.List<Error_Code?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 7);
+      $pb.ProtobufEnum.$_initByValueList(values, 8);
   static Error_Code? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
   const Error_Code._(super.value, super.name);
+}
+
+class CaptureRequest_Point extends $pb.ProtobufEnum {
+  static const CaptureRequest_Point POINT_UNSPECIFIED =
+      CaptureRequest_Point._(0, _omitEnumNames ? '' : 'POINT_UNSPECIFIED');
+  static const CaptureRequest_Point INPUT =
+      CaptureRequest_Point._(1, _omitEnumNames ? '' : 'INPUT');
+  static const CaptureRequest_Point ENVELOPE =
+      CaptureRequest_Point._(2, _omitEnumNames ? '' : 'ENVELOPE');
+
+  static const $core.List<CaptureRequest_Point> values = <CaptureRequest_Point>[
+    POINT_UNSPECIFIED,
+    INPUT,
+    ENVELOPE,
+  ];
+
+  static final $core.List<CaptureRequest_Point?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 2);
+  static CaptureRequest_Point? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const CaptureRequest_Point._(super.value, super.name);
 }
 
 class Aircraft_AltitudeSource extends $pb.ProtobufEnum {

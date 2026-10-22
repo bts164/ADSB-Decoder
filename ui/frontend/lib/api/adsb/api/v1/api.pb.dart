@@ -30,6 +30,7 @@ enum ClientMessage_Call {
   aircraftHistory,
   activity,
   heatmap,
+  capture,
   notSet
 }
 
@@ -44,6 +45,7 @@ class ClientMessage extends $pb.GeneratedMessage {
     AircraftHistoryRequest? aircraftHistory,
     ActivityRequest? activity,
     HeatmapRequest? heatmap,
+    CaptureRequest? capture,
   }) {
     final result = create();
     if (id != null) result.id = id;
@@ -55,6 +57,7 @@ class ClientMessage extends $pb.GeneratedMessage {
     if (aircraftHistory != null) result.aircraftHistory = aircraftHistory;
     if (activity != null) result.activity = activity;
     if (heatmap != null) result.heatmap = heatmap;
+    if (capture != null) result.capture = capture;
     return result;
   }
 
@@ -77,13 +80,14 @@ class ClientMessage extends $pb.GeneratedMessage {
     11: ClientMessage_Call.aircraftHistory,
     12: ClientMessage_Call.activity,
     13: ClientMessage_Call.heatmap,
+    14: ClientMessage_Call.capture,
     0: ClientMessage_Call.notSet
   };
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ClientMessage',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
       createEmptyInstance: create)
-    ..oo(0, [2, 3, 4, 5, 10, 11, 12, 13])
+    ..oo(0, [2, 3, 4, 5, 10, 11, 12, 13, 14])
     ..aI(1, _omitFieldNames ? '' : 'id', fieldType: $pb.PbFieldType.OU3)
     ..aOM<Cancel>(2, _omitFieldNames ? '' : 'cancel', subBuilder: Cancel.create)
     ..aOM<ServerInfoRequest>(3, _omitFieldNames ? '' : 'serverInfo',
@@ -100,6 +104,8 @@ class ClientMessage extends $pb.GeneratedMessage {
         subBuilder: ActivityRequest.create)
     ..aOM<HeatmapRequest>(13, _omitFieldNames ? '' : 'heatmap',
         subBuilder: HeatmapRequest.create)
+    ..aOM<CaptureRequest>(14, _omitFieldNames ? '' : 'capture',
+        subBuilder: CaptureRequest.create)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -131,6 +137,7 @@ class ClientMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(11)
   @$pb.TagNumber(12)
   @$pb.TagNumber(13)
+  @$pb.TagNumber(14)
   ClientMessage_Call whichCall() => _ClientMessage_CallByTag[$_whichOneof(0)]!;
   @$pb.TagNumber(2)
   @$pb.TagNumber(3)
@@ -140,6 +147,7 @@ class ClientMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(11)
   @$pb.TagNumber(12)
   @$pb.TagNumber(13)
+  @$pb.TagNumber(14)
   void clearCall() => $_clearField($_whichOneof(0));
 
   @$pb.TagNumber(1)
@@ -238,6 +246,17 @@ class ClientMessage extends $pb.GeneratedMessage {
   void clearHeatmap() => $_clearField(13);
   @$pb.TagNumber(13)
   HeatmapRequest ensureHeatmap() => $_ensure(8);
+
+  @$pb.TagNumber(14)
+  CaptureRequest get capture => $_getN(9);
+  @$pb.TagNumber(14)
+  set capture(CaptureRequest value) => $_setField(14, value);
+  @$pb.TagNumber(14)
+  $core.bool hasCapture() => $_has(9);
+  @$pb.TagNumber(14)
+  void clearCapture() => $_clearField(14);
+  @$pb.TagNumber(14)
+  CaptureRequest ensureCapture() => $_ensure(9);
 }
 
 enum ServerMessage_Body {
@@ -249,6 +268,7 @@ enum ServerMessage_Body {
   aircraftHistory,
   activity,
   heatmap,
+  capture,
   notSet
 }
 
@@ -264,6 +284,7 @@ class ServerMessage extends $pb.GeneratedMessage {
     AircraftHistory? aircraftHistory,
     Activity? activity,
     Heatmap? heatmap,
+    CaptureResult? capture,
   }) {
     final result = create();
     if (id != null) result.id = id;
@@ -276,6 +297,7 @@ class ServerMessage extends $pb.GeneratedMessage {
     if (aircraftHistory != null) result.aircraftHistory = aircraftHistory;
     if (activity != null) result.activity = activity;
     if (heatmap != null) result.heatmap = heatmap;
+    if (capture != null) result.capture = capture;
     return result;
   }
 
@@ -298,13 +320,14 @@ class ServerMessage extends $pb.GeneratedMessage {
     11: ServerMessage_Body.aircraftHistory,
     12: ServerMessage_Body.activity,
     13: ServerMessage_Body.heatmap,
+    14: ServerMessage_Body.capture,
     0: ServerMessage_Body.notSet
   };
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
       _omitMessageNames ? '' : 'ServerMessage',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
       createEmptyInstance: create)
-    ..oo(0, [3, 4, 5, 9, 10, 11, 12, 13])
+    ..oo(0, [3, 4, 5, 9, 10, 11, 12, 13, 14])
     ..aI(1, _omitFieldNames ? '' : 'id', fieldType: $pb.PbFieldType.OU3)
     ..aOB(2, _omitFieldNames ? '' : 'end')
     ..aOM<ServerInfo>(3, _omitFieldNames ? '' : 'serverInfo',
@@ -321,6 +344,8 @@ class ServerMessage extends $pb.GeneratedMessage {
         subBuilder: Activity.create)
     ..aOM<Heatmap>(13, _omitFieldNames ? '' : 'heatmap',
         subBuilder: Heatmap.create)
+    ..aOM<CaptureResult>(14, _omitFieldNames ? '' : 'capture',
+        subBuilder: CaptureResult.create)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -352,6 +377,7 @@ class ServerMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(11)
   @$pb.TagNumber(12)
   @$pb.TagNumber(13)
+  @$pb.TagNumber(14)
   ServerMessage_Body whichBody() => _ServerMessage_BodyByTag[$_whichOneof(0)]!;
   @$pb.TagNumber(3)
   @$pb.TagNumber(4)
@@ -361,6 +387,7 @@ class ServerMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(11)
   @$pb.TagNumber(12)
   @$pb.TagNumber(13)
+  @$pb.TagNumber(14)
   void clearBody() => $_clearField($_whichOneof(0));
 
   @$pb.TagNumber(1)
@@ -468,6 +495,17 @@ class ServerMessage extends $pb.GeneratedMessage {
   void clearHeatmap() => $_clearField(13);
   @$pb.TagNumber(13)
   Heatmap ensureHeatmap() => $_ensure(9);
+
+  @$pb.TagNumber(14)
+  CaptureResult get capture => $_getN(10);
+  @$pb.TagNumber(14)
+  set capture(CaptureResult value) => $_setField(14, value);
+  @$pb.TagNumber(14)
+  $core.bool hasCapture() => $_has(10);
+  @$pb.TagNumber(14)
+  void clearCapture() => $_clearField(14);
+  @$pb.TagNumber(14)
+  CaptureResult ensureCapture() => $_ensure(10);
 }
 
 class Cancel extends $pb.GeneratedMessage {
@@ -620,11 +658,15 @@ class ServerInfo extends $pb.GeneratedMessage {
     $core.bool? history,
     $core.bool? spectrum,
     $core.double? defaultIntervalS,
+    $core.bool? capture,
+    $core.double? captureMaxS,
   }) {
     final result = create();
     if (history != null) result.history = history;
     if (spectrum != null) result.spectrum = spectrum;
     if (defaultIntervalS != null) result.defaultIntervalS = defaultIntervalS;
+    if (capture != null) result.capture = capture;
+    if (captureMaxS != null) result.captureMaxS = captureMaxS;
     return result;
   }
 
@@ -644,6 +686,8 @@ class ServerInfo extends $pb.GeneratedMessage {
     ..aOB(1, _omitFieldNames ? '' : 'history')
     ..aOB(2, _omitFieldNames ? '' : 'spectrum')
     ..aD(3, _omitFieldNames ? '' : 'defaultIntervalS')
+    ..aOB(4, _omitFieldNames ? '' : 'capture')
+    ..aD(5, _omitFieldNames ? '' : 'captureMaxS')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -691,6 +735,24 @@ class ServerInfo extends $pb.GeneratedMessage {
   $core.bool hasDefaultIntervalS() => $_has(2);
   @$pb.TagNumber(3)
   void clearDefaultIntervalS() => $_clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.bool get capture => $_getBF(3);
+  @$pb.TagNumber(4)
+  set capture($core.bool value) => $_setBool(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasCapture() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearCapture() => $_clearField(4);
+
+  @$pb.TagNumber(5)
+  $core.double get captureMaxS => $_getN(4);
+  @$pb.TagNumber(5)
+  set captureMaxS($core.double value) => $_setDouble(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasCaptureMaxS() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearCaptureMaxS() => $_clearField(5);
 }
 
 class SubscribeRequest extends $pb.GeneratedMessage {
@@ -1100,6 +1162,210 @@ class SpectrumRow extends $pb.GeneratedMessage {
 
   @$pb.TagNumber(3)
   $pb.PbList<$core.double> get binsDb => $_getList(2);
+}
+
+/// Records one point in the pipeline to a SigMF recording in --capture-dir, from the next block on, for
+/// duration_s of stream time. One capture per point at a time; cancelling stops it, keeping what's written.
+class CaptureRequest extends $pb.GeneratedMessage {
+  factory CaptureRequest({
+    CaptureRequest_Point? point,
+    $core.double? durationS,
+    $core.String? name,
+  }) {
+    final result = create();
+    if (point != null) result.point = point;
+    if (durationS != null) result.durationS = durationS;
+    if (name != null) result.name = name;
+    return result;
+  }
+
+  CaptureRequest._();
+
+  factory CaptureRequest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory CaptureRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'CaptureRequest',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
+      createEmptyInstance: create)
+    ..aE<CaptureRequest_Point>(1, _omitFieldNames ? '' : 'point',
+        enumValues: CaptureRequest_Point.values)
+    ..aD(2, _omitFieldNames ? '' : 'durationS')
+    ..aOS(3, _omitFieldNames ? '' : 'name')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CaptureRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CaptureRequest copyWith(void Function(CaptureRequest) updates) =>
+      super.copyWith((message) => updates(message as CaptureRequest))
+          as CaptureRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static CaptureRequest create() => CaptureRequest._();
+  @$core.override
+  CaptureRequest createEmptyInstance() => create();
+  static $pb.PbList<CaptureRequest> createRepeated() =>
+      $pb.PbList<CaptureRequest>();
+  @$core.pragma('dart2js:noInline')
+  static CaptureRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<CaptureRequest>(create);
+  static CaptureRequest? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  CaptureRequest_Point get point => $_getN(0);
+  @$pb.TagNumber(1)
+  set point(CaptureRequest_Point value) => $_setField(1, value);
+  @$pb.TagNumber(1)
+  $core.bool hasPoint() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearPoint() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.double get durationS => $_getN(1);
+  @$pb.TagNumber(2)
+  set durationS($core.double value) => $_setDouble(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasDurationS() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearDurationS() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.String get name => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set name($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasName() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearName() => $_clearField(3);
+}
+
+/// Sent when the capture has covered its duration, or the input ended first.
+class CaptureResult extends $pb.GeneratedMessage {
+  factory CaptureResult({
+    $core.String? dataPath,
+    $core.String? datatype,
+    $core.double? rateHz,
+    $fixnum.Int64? startIndex,
+    $fixnum.Int64? samples,
+    $fixnum.Int64? missing,
+  }) {
+    final result = create();
+    if (dataPath != null) result.dataPath = dataPath;
+    if (datatype != null) result.datatype = datatype;
+    if (rateHz != null) result.rateHz = rateHz;
+    if (startIndex != null) result.startIndex = startIndex;
+    if (samples != null) result.samples = samples;
+    if (missing != null) result.missing = missing;
+    return result;
+  }
+
+  CaptureResult._();
+
+  factory CaptureResult.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory CaptureResult.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'CaptureResult',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'dataPath')
+    ..aOS(2, _omitFieldNames ? '' : 'datatype')
+    ..aD(3, _omitFieldNames ? '' : 'rateHz')
+    ..a<$fixnum.Int64>(
+        4, _omitFieldNames ? '' : 'startIndex', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$fixnum.Int64>(5, _omitFieldNames ? '' : 'samples', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$fixnum.Int64>(6, _omitFieldNames ? '' : 'missing', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CaptureResult clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CaptureResult copyWith(void Function(CaptureResult) updates) =>
+      super.copyWith((message) => updates(message as CaptureResult))
+          as CaptureResult;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static CaptureResult create() => CaptureResult._();
+  @$core.override
+  CaptureResult createEmptyInstance() => create();
+  static $pb.PbList<CaptureResult> createRepeated() =>
+      $pb.PbList<CaptureResult>();
+  @$core.pragma('dart2js:noInline')
+  static CaptureResult getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<CaptureResult>(create);
+  static CaptureResult? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get dataPath => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set dataPath($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasDataPath() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearDataPath() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get datatype => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set datatype($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasDatatype() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearDatatype() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.double get rateHz => $_getN(2);
+  @$pb.TagNumber(3)
+  set rateHz($core.double value) => $_setDouble(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasRateHz() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearRateHz() => $_clearField(3);
+
+  @$pb.TagNumber(4)
+  $fixnum.Int64 get startIndex => $_getI64(3);
+  @$pb.TagNumber(4)
+  set startIndex($fixnum.Int64 value) => $_setInt64(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasStartIndex() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearStartIndex() => $_clearField(4);
+
+  @$pb.TagNumber(5)
+  $fixnum.Int64 get samples => $_getI64(4);
+  @$pb.TagNumber(5)
+  set samples($fixnum.Int64 value) => $_setInt64(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasSamples() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearSamples() => $_clearField(5);
+
+  @$pb.TagNumber(6)
+  $fixnum.Int64 get missing => $_getI64(5);
+  @$pb.TagNumber(6)
+  set missing($fixnum.Int64 value) => $_setInt64(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasMissing() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearMissing() => $_clearField(6);
 }
 
 class InputStatus extends $pb.GeneratedMessage {

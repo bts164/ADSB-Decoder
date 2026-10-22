@@ -3,55 +3,87 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <memory>
 #include <numbers>
+#include <span>
+#include <type_traits>
+#include <utility>
 
+#include <coro/coro.h>
 #include <fftw3.h>
 #include <nlohmann/json.hpp>
 #include <xtensor/xbuilder.hpp>
 #include <xtensor/xjson.hpp>
 
-struct SpectrumComputer::Impl {
-    fftwf_complex* in;
-    fftwf_complex* out;
-    fftwf_plan plan;
-    xt::xtensor<float, 1> window;
+#include "common/log.h"
+#include "common/trace.h"
 
-    Impl() {
-        in = static_cast<fftwf_complex*>(fftwf_malloc(sizeof(fftwf_complex) * SpectrumComputer::kFftSize));
-        out = static_cast<fftwf_complex*>(fftwf_malloc(sizeof(fftwf_complex) * SpectrumComputer::kFftSize));
-        plan = fftwf_plan_dft_1d(SpectrumComputer::kFftSize, in, out, FFTW_FORWARD, FFTW_MEASURE);
-        window = xt::empty<float>(std::array<size_t, 1>{SpectrumComputer::kFftSize});
-        for (int i = 0; i < SpectrumComputer::kFftSize; i++) {
-            window[i] = 0.5f * (1.0f - std::cos(2.0f * std::numbers::pi_v<float> * i / (SpectrumComputer::kFftSize - 1)));
+namespace {
+
+constexpr size_t kFftSize = 4096;  // FFT length, in samples
+
+struct FftwFree {
+    void operator()(fftwf_complex* p) const { fftwf_free(p); }
+};
+using FftwBuffer = std::unique_ptr<fftwf_complex[], FftwFree>;
+
+struct FftwDestroyPlan {
+    void operator()(fftwf_plan p) const { fftwf_destroy_plan(p); }
+};
+using FftwPlan = std::unique_ptr<std::remove_pointer_t<fftwf_plan>, FftwDestroyPlan>;
+
+FftwBuffer fftw_buffer() {
+    return FftwBuffer(static_cast<fftwf_complex*>(fftwf_malloc(sizeof(fftwf_complex) * kFftSize)));
+}
+
+}  // namespace
+
+coro::CoroStream<SpectrumFrame> spectrum_rows(coro::CoroStream<IqBlock> in, std::chrono::milliseconds interval,
+                                              double rate_hz, double freq_hz) {
+    LOGF(INFO, "spectrum: a row of %zu bins at most every %lld ms, peak-held over the FFTs since the last",
+         kFftSize, static_cast<long long>(interval.count()));
+    FftwBuffer fft_in = fftw_buffer();
+    FftwBuffer fft_out = fftw_buffer();
+    const FftwPlan plan(fftwf_plan_dft_1d(kFftSize, fft_in.get(), fft_out.get(), FFTW_FORWARD, FFTW_MEASURE));
+    // fftwf_complex is float[2], so the input buffer is kFftSize interleaved I/Q pairs.
+    const std::span<float> iq(reinterpret_cast<float*>(fft_in.get()), 2 * kFftSize);
+    std::array<float, kFftSize> window;
+    for (size_t i = 0; i < kFftSize; i++)
+        window[i] = 0.5f * (1.0f - std::cos(2.0f * std::numbers::pi_v<float> * i / (kFftSize - 1)));
+    std::array<float, kFftSize> peak_mag2{};  // fftshifted
+    bool pending = false;
+
+    auto next_at = std::chrono::steady_clock::now() + interval;
+    while (auto block = co_await coro::next(in)) {
+        {
+            TRACE_ZONE("spectrum_compute");
+            const size_t lead = static_cast<size_t>(block->lead());
+            for (size_t first = 0; first + kFftSize <= block->n(); first += kFftSize) {
+                block->to_float(lead + first, iq);
+                for (size_t i = 0; i < kFftSize; i++) {
+                    fft_in[i][0] *= window[i];
+                    fft_in[i][1] *= window[i];
+                }
+                fftwf_execute(plan.get());
+                for (size_t i = 0; i < kFftSize; i++) {
+                    const size_t src = (i + kFftSize / 2) % kFftSize;  // fftshift
+                    const float re = fft_out[src][0], im = fft_out[src][1];
+                    peak_mag2[i] = std::max(peak_mag2[i], re * re + im * im);
+                }
+                pending = true;
+            }
+        }
+        if (const auto now = std::chrono::steady_clock::now(); now >= next_at && pending) {
+            next_at = now + interval;
+            xt::xtensor<float, 1> mag_db = xt::empty<float>(std::array<size_t, 1>{kFftSize});
+            for (size_t i = 0; i < kFftSize; i++) {
+                mag_db[i] = 10.0f * std::log10(std::max(peak_mag2[i], 1e-20f));
+                peak_mag2[i] = 0;
+            }
+            pending = false;
+            co_yield SpectrumFrame{std::move(mag_db), rate_hz, freq_hz};
         }
     }
-    ~Impl() {
-        fftwf_destroy_plan(plan);
-        fftwf_free(in);
-        fftwf_free(out);
-    }
-    Impl(const Impl&) = delete;
-    Impl& operator=(const Impl&) = delete;
-};
-
-SpectrumComputer::SpectrumComputer() : m_impl(std::make_unique<Impl>()) {}
-SpectrumComputer::~SpectrumComputer() = default;
-
-xt::xtensor<float, 1> SpectrumComputer::compute(std::span<const float, 2 * kFftSize> iq) {
-    auto& [in, out, plan, window] = *m_impl;
-    for (int i = 0; i < SpectrumComputer::kFftSize; i++) {
-        in[i][0] = iq[2 * i] * window[i];
-        in[i][1] = iq[2 * i + 1] * window[i];
-    }
-    fftwf_execute(plan);
-    xt::xtensor<float, 1> mag_db = xt::empty<float>(std::array<size_t, 1>{SpectrumComputer::kFftSize});
-    for (int i = 0; i < SpectrumComputer::kFftSize; i++) {
-        int src = (i + SpectrumComputer::kFftSize / 2) % SpectrumComputer::kFftSize;  // fftshift
-        float re = out[src][0], im = out[src][1];
-        float mag2 = re * re + im * im;
-        mag_db[i] = 10.0f * std::log10(std::max(mag2, 1e-20f));
-    }
-    return mag_db;
 }
 
 void to_json(nlohmann::json& j, const SpectrumFrame& s) {

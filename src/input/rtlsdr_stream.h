@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstdint>
-#include <memory>
 #include <optional>
 
 #include <coro/coro_stream.h>
@@ -30,19 +29,19 @@ struct RtlSdrStreamParams {
 };
 
 /**
- * Streams IqBlocks from an RTL-SDR until the stream is dropped. If the device is unplugged the stream pauses until it has
- * reconnected (RtlSdr::read_async), then resumes with block starts advanced by the samples missed.
+ * Streams IqBuffers from an RTL-SDR until the stream is dropped. If the device is unplugged the stream pauses until
+ * it has reconnected (RtlSdr::read_async), then resumes with block starts advanced by the samples missed.
  *
  * librtlsdr's own thread (inside rtlsdr_read_async) delivers raw uint8 I/Q buffers to a callback, which
- * converts each one to a guard-padded IqBlock and pushes it into a small channel this stream drains. One
+ * converts each one to a guard-padded IqBuffer and pushes it into a small channel this stream drains. One
  * block per librtlsdr buffer. If the demod falls behind and the channel fills, blocks are dropped rather
  * than stalling librtlsdr's USB thread.
- * @param radio the device, opened and tuned; the stream owns it, and its rate (RtlSdr::sample_rate_hz()) is the
- *        stream's
+ *
+ * The stream opens and tunes the device itself (RtlSdr), and owns it. Its samples are labeled with
+ * `params.tuning.rate_hz`, which the device's rate is within 100 ppm of.
+ * @param params the device, its tuning and librtlsdr's buffers
  * @param pad guard padding to allocate around each block (demod_padding())
- * @param buf_num librtlsdr async buffer count (default: librtlsdr's own)
- * @param buf_len librtlsdr async buffer length in bytes, a multiple of 512 (default: librtlsdr's own)
+ * @throws std::runtime_error from the stream, before its first block, if the device can't be opened, rejects the
+ *         rate or frequency, or rounds the rate by more than 100 ppm
  */
-coro::CoroStream<IqBlock> rtlsdr_iq_stream(std::unique_ptr<RtlSdr> radio, IqPadding pad,
-                                            std::optional<uint32_t> buf_num = std::nullopt,
-                                            std::optional<uint32_t> buf_len = std::nullopt);
+coro::CoroStream<IqBuffer> rtlsdr_iq_stream(RtlSdrStreamParams params, IqPadding pad);

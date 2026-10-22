@@ -21,7 +21,7 @@
 namespace {
 
 struct StreamCallbackCtx {
-    coro::MpscSender<IqBlock> tx;
+    coro::MpscSender<IqBuffer> tx;
     IqPadding pad;
     uint64_t next_start = 0;  // stream index of the next buffer's first sample, counting dropped ones
     uint64_t dropped = 0;
@@ -33,7 +33,7 @@ void rtlsdr_stream_cb(unsigned char* buf, uint32_t len, void* ctx_ptr) {
     if (n == 0) return;
     TRACE_ZONE_VALUE("rtlsdr_convert", n);
 
-    IqBlock block = IqBlock::uninitialized<iq::F32>(ctx->pad, n, ctx->next_start);
+    IqBuffer block = IqBuffer::uninitialized<iq::F32>(ctx->pad, n, ctx->next_start);
     ctx->next_start += n;
     // librtlsdr delivers unsigned 8-bit offset-binary samples (128 ==
     // zero) -- recenter to signed. The demodulator's per-block RMS
@@ -57,7 +57,7 @@ void rtlsdr_stream_cb(unsigned char* buf, uint32_t len, void* ctx_ptr) {
 
 }  // namespace
 
-// Streams raw IQ blocks off `radio`: librtlsdr's own event-handling
+// Streams raw IQ blocks off the device: librtlsdr's own event-handling
 // thread (inside RtlSdr::read_async, which blocks until the RtlSdr is destroyed, reconnecting
 // if the device is unplugged -- see rtlsdr_device.h) delivers raw uint8 I/Q buffers via
 // callback; the callback converts each buffer to a padded float I/Q
@@ -69,16 +69,17 @@ void rtlsdr_stream_cb(unsigned char* buf, uint32_t len, void* ctx_ptr) {
 // the read returns, for any reason, which is exactly when the
 // channel should close and let this generator's loop (and any consumer
 // draining it) see exhaustion instead of hanging forever.
-coro::CoroStream<IqBlock> rtlsdr_iq_stream(std::unique_ptr<RtlSdr> radio, IqPadding pad,
-                                            std::optional<uint32_t> buf_num, std::optional<uint32_t> buf_len) {
-    // A parameter, so it is destroyed after read_handle and the channel, as a local declared first would be:
-    // ~RtlSdr stops the read that read_handle's thread is in.
-    RtlSdr& device = *radio;
-    const double rate_hz = device.sample_rate_hz();
+coro::CoroStream<IqBuffer> rtlsdr_iq_stream(RtlSdrStreamParams params, IqPadding pad) {
+    // Declared first, so it is destroyed after read_handle and the channel: ~RtlSdr stops the read that
+    // read_handle's thread is in.
+    RtlSdr device(params.tuning);
+    const double rate_hz = params.tuning.rate_hz;
+    const std::optional<uint32_t> buf_num = params.buf_num;
+    const std::optional<uint32_t> buf_len = params.buf_len;
 
-    auto channel = coro::mpsc_channel<IqBlock>(4);
-    coro::MpscSender<IqBlock> tx = std::move(channel.first);
-    coro::MpscReceiver<IqBlock> rx = std::move(channel.second);
+    auto channel = coro::mpsc_channel<IqBuffer>(4);
+    coro::MpscSender<IqBuffer> tx = std::move(channel.first);
+    coro::MpscReceiver<IqBuffer> rx = std::move(channel.second);
 
     auto read_handle = coro::spawn_blocking(
         [&device, tx = std::move(tx), pad, buf_num, buf_len, rate_hz]() mutable {
@@ -112,7 +113,8 @@ void RtlSdrStreamParams::add_options(argparse::ArgumentParser& cmd) {
     cmd.add_argument("--buf-len").scan<'u', uint32_t>().help(
         "librtlsdr async transfer buffer length in bytes, multiple of 512 (default: librtlsdr's, "
         "16*32*512 = 262144 bytes, i.e. 131072 IQ sample pairs, ~54.6 ms at 2.4 Msps)");
-    cmd.add_argument("--rate").scan<'g', double>().default_value(2.4e6).help("sample rate in Hz");
+    cmd.add_argument("--rate").scan<'g', double>().default_value(2.4e6).help(
+        "sample rate in Hz; one librtlsdr rounds by more than 100 ppm is an error");
     cmd.add_argument("--freq").scan<'g', double>().default_value(1090e6).help("center frequency in Hz to tune to");
 }
 

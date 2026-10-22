@@ -259,22 +259,6 @@ HistoryPoint historyPointFromProto(api.AircraftHistory_Point p) => (
       selAltFt: p.hasSelectedAltitudeFt() ? p.selectedAltitudeFt : null,
     );
 
-/// One FFT snapshot of the raw pre-resample IQ, from a live update
-/// (api.SpectrumRow), in dB. `bins` is
-/// already fftshifted -- bin 0 is freqHz - rateHz/2, the last bin is
-/// freqHz + rateHz/2 -- so it plots directly against a linear frequency axis.
-class SpectrumFrame {
-  final double freqHz;
-  final double rateHz;
-  final List<double> bins;
-
-  SpectrumFrame({required this.freqHz, required this.rateHz, required this.bins});
-
-  factory SpectrumFrame.fromProto(api.SpectrumRow r) {
-    return SpectrumFrame(freqHz: r.freqHz, rateHz: r.rateHz, bins: List.of(r.binsDb));
-  }
-}
-
 // Downlink format codes ADS-B/Mode S actually defines. A frame decoded with
 // a df outside this set almost certainly came from a false-positive preamble
 // detection on noise, not a real transponder reply. df 24-31 all decode to

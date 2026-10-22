@@ -130,6 +130,7 @@ CMake cache options:
 |---|---|---|
 | `ADSB_SAMPLES_PER_SYMBOL` | 12 | Resampled rate in samples per 1 µs Mode S symbol. Compiled into the kernels. |
 | `ADSB_ISPC_TARGET` | *(autodetect)* | ispc `--target` override, e.g. `avx2-i32x8`, to compare against AVX-512. |
+| `ADSB_WITH_HDF5` | ON | Build `--debug-h5`, which needs HighFive and HDF5. Set by the Conan option `with_hdf5` (`-o "&:with_hdf5=False"`). |
 
 ### The UI
 
@@ -183,11 +184,11 @@ adsb/
   CMakeLists.txt, conanfile.py   the C++ build
   src/
     common/   constants, cpu_layout (CPU split), tasksys.cpp (ispc task runtime on OpenMP)
-    dsp/      demod, peak_select, filter_bank, spectrum, iq_block (block + stitcher), kernels.ispc
+    dsp/      demod, peak_select, filter_bank, spectrum, iq_block (buffer, block, stitch), kernels.ispc
     decode/   frame_decode (CRC, DF, ICAO), aircraft (callsign/altitude/CPR position/velocity, Comm-B)
     net/      UDP sending helpers: datagram_batch (GSO batches + buffer pool), gso
     vrt/      the VITA-49 (VRT) wire format: format, encode (sender), assembler (receiver reorder/gap-fill)
-    input/    file_stream, vita49_stream + iq_block_chunker, rtlsdr_stream + rtlsdr_device, sigmf_meta
+    input/    file_stream, vita49_stream + iq_block_chunker, rtlsdr_stream + rtlsdr_device, sidekiq_stream, uhd_stream, sigmf_meta
     output/   api_server (the UI's API over WebSocket), aircraft_history (SQLite), frame_recorder (debug HDF5)
     sim/      adsb_sim (Mode S signal simulator), sim_kernels.ispc
     apps/
@@ -228,9 +229,9 @@ coro runtime, each a stage that owns its state, connected by streams and
 channels. The diagrams below show each app's chain. The rules are:
 
 - **A stage is a task that owns its state.** The sink's `AircraftTracker`
-  and the demodulator's `BlockStitcher` belong to their tasks, and no stage
-  reaches into another's. Nothing is shared between stages, so nothing needs
-  a lock.
+  and `stitch()`'s `BlockStitcher` belong to their tasks, and no stage
+  reaches into another's. The only thing stages share is an `IqBlock`, which
+  is read-only, so nothing needs a lock.
 - **Stages are joined by bounded queues.** Where one stage just feeds the
   next, it is a buffered task stream (`build_task().buffer(n)`). Where a
   callback or a thread of its own produces, it is an mpsc channel. A queue's
@@ -266,16 +267,23 @@ flowchart TB
         FILE["<b>file</b><br/>file_read task<br/>reads one block per chunk"]
         VRT["<b>vita49</b><br/>vita49_receive task<br/>UDP recv, VRT reorder and gap fill"]
         RTL["<b>rtlsdr</b><br/>blocking thread<br/>librtlsdr callback, u8 to cf32"]
+        SKQ["<b>sidekiq</b><br/>blocking thread<br/>packets to cf32, gap fill"]
+        UHD["<b>uhd</b><br/>blocking thread<br/>packets as cf32, gap fill"]
     end
     subgraph dtask["demodulate task"]
-        TAP["spectrum_tap()<br/>passes every block on,<br/>FFTs one per 150 ms at most"]
-        DEMOD["demodulate()<br/>BlockStitcher: padding<br/>AdsbDemod: resample,<br/>preamble, slice"]
-        TAP --> DEMOD
+        STITCH["stitch()<br/>BlockStitcher: padding<br/>IqBuffer to IqBlock"]
+        TEE["tee()<br/>passes every block on,<br/>shares one with each<br/>branch that isn't full"]
+        DEMOD["demodulate()<br/>AdsbDemod: resample,<br/>preamble, slice"]
+        STITCH --> TEE --> DEMOD
     end
     PAR["coro::parallel() parts<br/>one per worker"]
-    SINK["<b>demod task</b><br/>run_demod_loop()<br/>handle_frame(): validate,<br/>decode, AircraftTracker"]
+    SINK["<b>run_demod_loop task</b><br/>run_demod_loop()<br/>handle_frame(): validate,<br/>decode, AircraftTracker"]
     REC["debug_h5 task<br/>FrameRecorder"]
+    SPEC["spectrum task<br/>peak-held FFTs<br/>while a client watches"]
     HIST["history actor<br/>blocking thread"]
+    CAPR["capture_calls task<br/>routes by point"]
+    CAPI["capture_input task<br/>SigMF writer"]
+    CAPE["capture_envelope task<br/>SigMF writer"]
     subgraph ws["WebSocket server"]
         direction LR
         ACC["ws_accept task"] --> CLI["ws_client task<br/>one per client<br/>reads, starts calls, writes"]
@@ -284,11 +292,14 @@ flowchart TB
     end
     H5[("HDF5")]
     DB[("SQLite")]
+    SIGMF[("SigMF")]
     UI(["UI"])
 
-    FILE -- "buffered, 4 blocks" --> TAP
-    VRT -- "mpsc, 64 MiB" --> TAP
-    RTL -- "mpsc, 4 blocks, drops when full" --> TAP
+    FILE -- "buffered, 4 blocks" --> STITCH
+    VRT -- "mpsc, 64 MiB" --> STITCH
+    RTL -- "mpsc, 4 blocks, drops when full" --> STITCH
+    SKQ -- "mpsc, 4 blocks, drops when full" --> STITCH
+    UHD -- "mpsc, 4 blocks, drops when full" --> STITCH
     DEMOD <-- "fork / join" --> PAR
     DEMOD -- "buffered, 64 blocks" --> SINK
     SINK -- "frames: broadcast, 64<br/>aircraft: watch" --> CALL
@@ -296,48 +307,65 @@ flowchart TB
     SINK -. "--debug-h5: mpsc, 4" .-> REC
     REC --> H5
     HIST <--> DB
-    TAP -. "spectrum: broadcast, 64" .-> CALL
-    CALL -. "settings: watch" .-> TAP
+    TEE -. "mpsc, 2 blocks, skips when full" .-> SPEC
+    SPEC -. "spectrum: broadcast, 64" .-> CALL
+    CALL -. "settings: watch" .-> SPEC
     VRT -. "input status: watch" .-> CALL
     CALL -. "queries, oneshot replies" .-> HIST
+    TEE -. "--capture-dir: mpsc, 8 blocks, skips when full" .-> CAPI
+    SINK -. "envelope while captured: mpsc, 8, skips when full" .-> CAPE
+    CAPE -. "copy envelope: watch" .-> DEMOD
+    CALL -. "capture calls: mpsc, 4, oneshot replies" .-> CAPR
+    CAPR -. "mpsc, 2" .-> CAPI
+    CAPR -. "mpsc, 2" .-> CAPE
+    CAPI --> SIGMF
+    CAPE --> SIGMF
     CLI <--> UI
 
     classDef optional stroke-dasharray: 5 5
-    class TAP,REC,HIST optional
+    class TEE,SPEC,REC,HIST,CAPR,CAPI,CAPE optional
 ```
 
 How to read the diagram:
 
-- **Boxes:** each box is a task. The two marked "blocking thread" run on
+- **Boxes:** each box is a task. The three marked "blocking thread" run on
   coro's blocking pool (`spawn_blocking`). The boxes inside the
   demodulate task are not tasks: each is a stage of the stream that task
   pulls, run in the task's polls, and the arrow between stages is a direct
-  call, with no queue. The stages listed in the demod task's box run in its
+  call, with no queue. The stages listed in the run_demod_loop task's box run in its
   polls in the same way.
 - **Arrows:** each arrow is labelled with its channel and its depth, in
   blocks or requests where no unit is given. A dashed arrow or box is there
-  only with the option it names. The spectrum tap and the input status are
+  only with the option it names. The tee, the spectrum task and the input status are
   for WebSocket clients, so they are there only with `--ws-port`; without it,
-  the source feeds `demodulate()` directly.
+  `stitch()` feeds `demodulate()` directly.
 - **`serve`:** the subcommand has no source and no demodulation. It runs only
   the history actor and the WebSocket server.
 
 The pieces fit together like this:
 
-1. A source turns its input into a `coro::CoroStream<IqBlock>`.
-2. A demodulate task on the same runtime pulls blocks from that stream.
-   With `--ws-port`, the first stage it pulls them through is the spectrum
-   tap (`spectrum_tap()` in [pipeline.cpp](src/apps/adsb/pipeline.cpp)). The
-   tap passes every block on unchanged. While a client has a spectrum call
-   open, which it reads from the server's settings watch, it also runs a
-   1024-point FFT of one block's raw IQ at most once every 150 ms, and
-   broadcasts the result, on its own clone of the frames' sender, to the
-   WebSocket clients for the waterfall. Then
-   `demodulate()` ([demod.h](src/dsp/demod.h)) stitches and demodulates each
-   block, splitting its resampling and preamble search across the runtime's
+1. A source turns its input into a `coro::CoroStream<IqBuffer>`.
+2. A demodulate task on the same runtime pulls buffers from that stream,
+   through `stitch()` ([iq_block.h](src/dsp/iq_block.h)) first. It fills
+   each buffer's padding from its neighbors and yields it as an `IqBlock`,
+   read-only and reference counted, so a stage that needs a block another
+   stage also reads takes a share of it rather than a copy. With
+   `--ws-port`, the next stage is `tee()` ([pipeline.cpp](src/apps/adsb/pipeline.cpp)). It passes every block
+   on unchanged, and hands a share of each to every side branch whose queue
+   isn't full. The one branch is the spectrum task, whose queue holds 2 blocks.
+   While a client has a spectrum call open, which it reads from the server's
+   settings watch, it runs 4096-point FFTs over every sample of the blocks it
+   gets, and keeps each bin's peak, so each burst
+   shows, however short. Every 50 ms it broadcasts the peaks, on its own clone
+   of the frames' sender, to the WebSocket clients for the waterfall. While it
+   is busy, blocks go to the demodulator alone, so the spectrum never holds
+   the demodulator back. With `--capture-dir`, a second branch, 8 blocks
+   deep, feeds the input capture task, which writes the blocks to a file while
+   a `capture` call is in progress and drops them otherwise. Then
+   `demodulate()` ([demod.h](src/dsp/demod.h)) demodulates each block, splitting its resampling and preamble search across the runtime's
    workers. The demodulate task can run ahead of the demod loop, through a
    buffered stream (4 blocks deep with `--debug-h5`, since each block then
-   holds its IQ).
+   holds its IQ buffer).
 3. The demod loop validates and decodes each block's frames in order, and
    keeps each aircraft's state in its `AircraftTracker`. It then hands the
    block's results to the outputs:
@@ -348,6 +376,8 @@ The pieces fit together like this:
     - with `--history-db`, one insert of the block's aircraft updates to the
       history actor, which owns the database and also answers the clients'
       history calls;
+    - with `--capture-dir`, while an envelope capture is in progress, the
+      block's envelope to the envelope capture task;
     - with `--debug-h5`, the frames and their IQ, to a recorder task, so
       writing the file doesn't hold up the loop.
 
@@ -371,7 +401,8 @@ the filter and picks the source. Every source then feeds the same
 | `--ws-port` | off | Serve the UI's API over WebSocket on this port (see [WebSocket](#websocket)) |
 | `--ws-interval` | 1.0 | Seconds between a subscription's live updates, unless it asks for another interval |
 | `--history-db` | off | SQLite file recording every aircraft update, for the UI's time scrubber |
-| `--debug-h5` | off | Write every decoded frame, with its IQ and everything needed to rerun the demodulator, to this HDF5 file (see [Debug HDF5](#debug-hdf5)) |
+| `--capture-dir` | off | With `--ws-port`, answer `capture` calls, which record the input IQ or the demodulator's envelope as SigMF into this existing directory (see [WebSocket](#websocket)) |
+| `--debug-h5` | off | Write every decoded frame, with its IQ and everything needed to rerun the demodulator, to this HDF5 file (see [Debug HDF5](#debug-hdf5)). Not in a build without `ADSB_WITH_HDF5`. |
 | `--debug-h5-failed-only` | | With `--debug-h5`, record only frames that fail CRC (not unchecked ones) |
 | `--log-level` | info | Least severe log message written to stderr: `info`, `warning`, `error`, `fatal`, or `none` |
 | `--log-file` | off | Also append log messages to this file |
@@ -383,9 +414,11 @@ the filter and picks the source. Every source then feeds the same
 | `file` | `--iq x.sigmf-data` (required), `--meta x.sigmf-meta` (default: the `--iq` file's sibling, if there is one), `--rate Hz`, `--freq Hz` |
 | `vita49` | `--port P` (required), `--bind addr` (0.0.0.0), `--stream-id N` (default: the first one seen), `--idle-timeout s` (2; 0 = never), `--rate Hz` (required), `--freq Hz` (1090e6) |
 | `rtlsdr` | `--device N` (0), `--gain dB` (negative = auto), `--buf-num N`, `--buf-len B` (0 = librtlsdr's defaults: 15 buffers of 256 KB), `--rate Hz` (2.4e6), `--freq Hz` (1090e6) |
+| `sidekiq` | Only in a build with `ADSB_WITH_SIDEKIQ`. `--lib path` (/usr/lib/epiq/libsidekiq.so.4.19.1), `--card N` (0), `--handle A1\|A2` (A1), `--port J1\|J2\|…` (libsidekiq's choice), `--gain index\|auto` (auto), `--rate Hz` (50e6), `--bandwidth Hz` (20e6), `--freq Hz` (1090e6), `--preselect-filter MHz-MHz` (libsidekiq's choice) |
+| `uhd` | Only in a build with `ADSB_WITH_UHD` (conan option `with_uhd`). `--args str` (the first USRP found), `--subdev spec` (UHD's), `--channel N` (0), `--antenna name` (UHD's), `--gain dB\|auto` (auto), `--rate Hz` (8e6), `--bandwidth Hz` (UHD's), `--freq Hz` (1090e6) |
 
 **Sample rate and center frequency.** The frequency is the tuner frequency
-for `rtlsdr`; otherwise it only labels the spectrum frames.
+for `rtlsdr`, `sidekiq` and `uhd`; otherwise it only labels the spectrum frames.
 
 - `file` reads them, and the sample format (`cf32_le` or `ci16_be`), from the
   SigMF metadata. `--rate` and `--freq` override it, with a warning when they
@@ -393,8 +426,17 @@ for `rtlsdr`; otherwise it only labels the spectrum frames.
   with a warning.
 - `vita49` uses `--rate`, which must match the sender's rate: an IF Context
   packet that gives a different rate is a fatal error.
-- `rtlsdr` tunes to `--rate` and `--freq`, and uses what the device actually
-  runs at, with a warning when that differs.
+- `rtlsdr` tunes to `--rate` and `--freq`. A device that runs more than 100
+  ppm from `--rate` is a fatal error, as every sample would be mislabelled;
+  closer than that, the samples are labelled with `--rate`, with a warning
+  when the device differs by a hertz or more. librtlsdr's rounding of its
+  usual rates is far smaller.
+- `sidekiq` does the same. The defaults are the X40's slowest profile, 50
+  Msps with 20 MHz of bandwidth. It goes lower only with the FPGA's
+  decimator, which not every bitstream has; the startup log and the error
+  give the handle's range of rates.
+- `uhd` does the same. `--rate` must divide the device's master clock; the
+  error for one that doesn't gives the rate the device would run at.
 
 **`serve` subcommand.** `serve` takes no input and has no options of its own.
 
@@ -407,8 +449,9 @@ for `rtlsdr`; otherwise it only labels the spectrum frames.
 
 ### Sources
 
-Every source yields `IqBlock`s ([iq_block.h](src/dsp/iq_block.h)) of
-128k samples. `rtlsdr` yields one block per librtlsdr buffer, which is the
+Every source yields `IqBuffer`s ([iq_block.h](src/dsp/iq_block.h)) of
+128k samples, which `stitch()` turns into the `IqBlock`s the rest of the
+pipeline reads. `rtlsdr` yields one buffer per librtlsdr buffer, which is the
 same size by default.
 
 - Each block is allocated with `demod_padding()` zeroed samples on either
@@ -487,13 +530,13 @@ The three sources:
 
 ### Demodulation
 
-Before a block is demodulated, a `BlockStitcher` fills its padding with the
-neighboring blocks' samples:
+Before a block is demodulated, `stitch()`'s `BlockStitcher` fills its padding
+with the neighboring blocks' samples:
 
-1. It holds each block until the next one arrives.
-2. It copies the head of the new block into the held block's trailing padding,
-   and the held block's tail into the new block's leading padding.
-3. It then demodulates the held block.
+1. It holds each buffer until the next one arrives.
+2. It copies the head of the new buffer into the held buffer's trailing
+   padding, and the held buffer's tail into the new buffer's leading padding.
+3. It then yields the held buffer, as an `IqBlock`, to be demodulated.
 
 This costs one block of latency (about 55 ms at 2.4 Msps) and copies a few
 hundred samples per block. Each block scans only the preamble positions
@@ -538,8 +581,11 @@ flowchart TD
      - Each filter row is zero-padded to a multiple of 16.
    - Partial sums are combined with a transpose-and-sum across the batch of
      outputs.
-   - The same pass also sums the squares of the raw input, which gives the
-     block RMS.
+   - The same pass also sums the squares of the block's own outputs, which
+     gives the block RMS. It is taken after the filter, so the thresholds
+     are relative to the noise in the band the filter passes. The raw input's
+     RMS would include the noise the filter removes, which with a 20 MHz
+     front end at 50 Msps is about 8 dB more.
    - The work is split into contiguous ranges, one per ispc task. The output
      count is rounded up to a multiple of 64, so every batch is full and the
      kernel has no bounds checks.
@@ -815,10 +861,11 @@ short:
 - A call that fails ends with an `Error`, whose code says why:
     - `NO_HISTORY`, a history call to an `adsb` without `--history-db`;
     - `NO_LIVE_INPUT`, a spectrum call to `adsb serve`;
+    - `NO_CAPTURE`, a capture call to an `adsb` without `--capture-dir`;
     - `INVALID_ARGUMENT`, a bad request, such as an `id` that isn't new or an
       empty heatmap area;
     - `RESOURCE_EXHAUSTED`, a ninth call while a connection already has 8 in
-      progress;
+      progress, or a capture of a point already being captured;
     - `UNIMPLEMENTED`, a call this `adsb` doesn't know;
     - `INTERNAL`, a failure `adsb` has logged.
 - A client that takes over 20 s to accept a message is disconnected.
@@ -826,11 +873,13 @@ short:
 The UI's [ApiClient](ui/frontend/lib/api_client.dart) makes each call a
 method, and the UI makes them in this order: `server_info`, `subscribe`, then
 with history a `snapshot` to backfill the sky. It makes a `spectrum` call
-while its Spectrum pane is shown.
+while its Spectrum pane is shown, and a `capture` call from its capture
+button.
 
 **`server_info`** says what this `adsb` serves: whether it answers the
 history calls (`--history-db`), whether it answers the spectrum call (any
-subcommand but `serve`), and its `--ws-interval`.
+subcommand but `serve`), whether it answers the capture call
+(`--capture-dir`) and for how long at most, and its `--ws-interval`.
 
 **`subscribe`** streams the live data. It sends an `Update` every
 `interval_s` (default `--ws-interval`, at least 0.1 s). An update holds:
@@ -844,6 +893,21 @@ An interval with none of these sends nothing.
 
 **`spectrum`** streams the spectrum rows for the waterfall, one `SpectrumRow`
 per reply. `adsb` computes them only while at least one spectrum call is open.
+
+**`capture`** records one point of the pipeline to `<name>.sigmf-data` and
+`<name>.sigmf-meta` in `--capture-dir`, for up to 60 s of stream time, and
+replies when it is done:
+
+- The point is `INPUT`, the IQ as the source delivered it, which `adsb file`
+  replays, or `ENVELOPE`, the demodulator's resampled magnitude as `rf32_le`
+  at 12 Msps.
+- It never overwrites a file, and takes one capture per point at a time.
+- Cancelling the call stops the capture, keeping what it has written.
+- The reply has the data file's path, its datatype and rate, the stream index
+  of its first sample, and the samples written and missing.
+- Samples the writer falls behind on are dropped, not waited for, so the
+  demodulator never slows. Each gap starts a new SigMF capture segment, at
+  the `core:global_index` where the samples resume, and is logged.
 
 A `Frame` is sent for every frame. Besides the frame itself it has:
 
@@ -895,7 +959,8 @@ fields it has:
   `last_seen_s`. In file playback it runs ahead of, or behind, the real
   clock.
 
-A `SpectrumRow` is a 1024-point FFT of the raw IQ, in dB.
+A `SpectrumRow` is the peak of each bin of 4096-point FFTs of the raw IQ
+since the last row, in dB.
 
 An `InputStatus` comes from the `vita49` source, every 2 s while packets
 arrive. It covers the last `window_s` of wall time:
@@ -997,7 +1062,8 @@ stores the history in one table:
 #### Debug HDF5
 
 `--debug-h5 <file>` ([frame_recorder.h](src/output/frame_recorder.h))
-records each frame `demodulate()` yields, whether or not it passes CRC.
+records each frame `demodulate()` yields, whether or not it passes CRC. A
+build with `ADSB_WITH_HDF5` off, such as a cross build, has no `--debug-h5`.
 
 - With each frame it stores the IQ the frame came from and everything needed
   to rerun the demodulator on it.
@@ -1353,7 +1419,8 @@ Compare its tables before and after a demodulator change.
   - `iq_block_chunker_test`: building padded blocks from appended samples;
   - `peak_select_test`;
   - `block_stitcher_test`: padding across contiguous, short and
-    non-contiguous blocks, in each sample format.
+    non-contiguous blocks, in each sample format, and a block's buffer going
+    back to its pool only once its last share is dropped.
 - **Reference capture.** `tests/data/adsb_cf32.sigmf-data` is a 12 Msps
   capture, not in git. It should decode 24 frames with
   `adsb --filter-taps 33 --filter-cutoff 6e6 file --iq tests/data/adsb_cf32.sigmf-data`.

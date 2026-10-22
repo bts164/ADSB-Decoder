@@ -18,12 +18,12 @@
  * @file
  * IqBlockChunker, the accumulator that backs vita49_stream.cpp's reorder-to-chunk pipeline:
  * vrt::Assembler::drain() appends reordered, gap-filled samples into it (it satisfies Assembler's Sink
- * concept, vrt/assembler.h), and completed, guard-padded IqBlocks come back out ready to send with no
+ * concept, vrt/assembler.h), and completed, guard-padded IqBuffers come back out ready to send with no
  * further copying.
  */
 
 /**
- * Accumulates samples of format F (iq_format.h) directly into fixed, `chunk_samples`-sized IqBlock slots,
+ * Accumulates samples of format F (iq_format.h) directly into fixed, `chunk_samples`-sized IqBuffer slots,
  * so a completed block is produced entirely in place: unlike an intermediate ring/linear buffer, there is
  * no separate copy from the accumulator into the block that gets sent. The samples are stored as they are
  * appended, with no conversion.
@@ -85,9 +85,9 @@ public:
      * Removes and returns the oldest completed block.
      * @throws std::logic_error if ready() == 0
      */
-    IqBlock pop() {
+    IqBuffer pop() {
         if (m_ready.empty()) throw std::logic_error("IqBlockChunker::pop: no block ready");
-        IqBlock b = std::move(m_ready.front());
+        IqBuffer b = std::move(m_ready.front());
         m_ready.pop_front();
         return b;
     }
@@ -106,7 +106,7 @@ public:
     }
 
 private:
-    IqBlock start_block() {
+    IqBuffer start_block() {
         // Only the guard padding is zeroed here: append()/append_zeros() are guaranteed to fully
         // overwrite the real-sample interior before this block is ever queued (fill() only queues it once
         // m_filled reaches m_chunk_samples), so leaving it uninitialized is safe and avoids the cost of
@@ -116,8 +116,7 @@ private:
         if (m_free) {
             if (auto recycled = m_free->try_recv()) buffer = std::move(*recycled);
         }
-        IqBlock b = IqBlock::uninitialized<F>(m_pad, m_chunk_samples, m_next_start, std::move(buffer));
-        b.pool = m_pool;
+        IqBuffer b = IqBuffer::uninitialized<F>(m_pad, m_chunk_samples, m_next_start, m_pool, std::move(buffer));
         m_next_start += m_chunk_samples;
         return b;
     }
@@ -145,7 +144,7 @@ private:
     IqBufferPool m_pool;
     std::optional<coro::MpscReceiver<iq::SamplesVariant>> m_free;
     uint64_t m_next_start = 0;
-    std::optional<IqBlock> m_building;
+    std::optional<IqBuffer> m_building;
     size_t m_filled = 0;  // real samples written into m_building so far
-    std::deque<IqBlock> m_ready;
+    std::deque<IqBuffer> m_ready;
 };

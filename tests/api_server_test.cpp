@@ -153,7 +153,7 @@ void run(uint16_t port, Test test, std::optional<std::vector<api::Aircraft>> his
                 // Queued ahead of every query, which the server sends on clones of its own.
                 if (db) co_await db->insert(std::move(*history));
             }
-            api_server_spawn(port, kDefaultInterval, live, std::move(receivers), std::move(db));
+            api_server_spawn(port, kDefaultInterval, live, false, std::move(receivers), std::move(db));
             coro::WsStream ws = co_await connect(port);
             co_await test(ws, senders);
         }(port, test, std::move(history), live));

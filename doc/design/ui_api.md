@@ -693,9 +693,10 @@ private:
 - **`ApiConnection::Settings::spectrum` becomes `live`:** whether there's a pipeline. `api_server_spawn()`'s
   `spectrum` parameter becomes `live` too.
 
-**The tap.** `spectrum_tap()` is always in the chain when there's a server, and takes a clone of
-`ws->settings`. Once per `kSpectrumInterval` it reads `spectrum_viewers`, and at 0 it skips the FFT and the
-send. When nobody is watching, the cost is that read: a shared lock every 150 ms.
+**The branch.** When there's a server, the tee in front of `demodulate()` sends a share of each block to the
+spectrum's own task, `publish_spectrum()`, which takes a clone of `ws->settings`. Its `while_viewed()` reads
+`spectrum_viewers` at most once per `kSpectrumInterval`, and at 0 drops the blocks before the FFTs. When
+nobody is watching, the cost is that read, a shared lock every 50 ms, and a share of each block.
 
 - **The check races with a call starting or ending,** which is harmless: a new viewer may wait one interval
   for its first row, and the last viewer's going may let one more row be computed and dropped.
@@ -712,6 +713,85 @@ send. When nobody is watching, the cost is that read: a shared lock every 150 ms
   mode it opens an empty pane.
 - **`_onUpdate` no longer handles spectrum rows.** The call's listener appends to `_spectrumHistory`
   instead, with the same cap of 150 rows.
+
+### Capture
+
+**The call.** A unary call that records one point of the pipeline to a SigMF recording on the server, and
+replies when the recording has covered its duration:
+
+```proto
+// ClientMessage's oneof
+CaptureRequest capture = 14;
+// ServerMessage's body
+CaptureResult capture = 14;
+
+message CaptureRequest {
+  enum Point {
+    POINT_UNSPECIFIED = 0;
+    INPUT = 1;     // the input IQ after stitching, as the source delivered it: replayable with `adsb file`
+    ENVELOPE = 2;  // the demodulator's resampled envelope magnitude, real float32 at its output rate
+  }
+  Point point = 1;
+  double duration_s = 2;  // stream time; over 0, and at most ServerInfo.capture_max_s
+  string name = 3;        // file name in --capture-dir: no '/', not starting with '.'; .sigmf-data/-meta added
+}
+
+message CaptureResult {
+  string data_path = 1;
+  string datatype = 2;     // SigMF core:datatype, e.g. "cf32_le"
+  double rate_hz = 3;
+  uint64 start_index = 4;  // the point's stream index of the first sample
+  uint64 samples = 5;      // samples written
+  uint64 missing = 6;      // samples of the duration not written
+}
+```
+
+- **`--capture-dir` turns it on.** `ServerInfo.capture` says the call is answered, and
+  `ServerInfo.capture_max_s` is the longest it takes, 60 s (`CaptureCall::kMaxDurationS`). Without the option
+  the call fails with `NO_CAPTURE`.
+- **A capture never overwrites a file.** The name is a bare file name, and a call for one that exists fails
+  with `INVALID_ARGUMENT`.
+- **One capture per point at a time.** A second call for the same point fails with `RESOURCE_EXHAUSTED`; the
+  input and the envelope can be captured at once.
+- **Cancelling the call stops the capture,** and keeps what it has written, with metadata that matches it.
+  So does the connection closing. Either way there's no reply to carry the result.
+
+**The points.**
+
+- **`INPUT`** is each block's own samples after `stitch()`, in the block's format: `cf32_le`, or `ci16_be`
+  from a VITA 49 source. It's `adsb file`'s input, at the input rate and center frequency, and its indexes
+  are `Frame.idx`'s.
+- **`ENVELOPE`** is the magnitude `demodulate()` resamples to its output rate (`demod_output_rate_hz()`,
+  12 Msps), as `rf32_le`. Each block owns the outputs up to its last scan position, so the runs join without
+  overlap.
+
+**The pipeline.** With `--capture-dir`, `run_demod_loop()` adds two capture tasks (`output/capture.h`) and a
+router that hands each call from `ApiSenders::captures` to its point's task, over a channel with a oneshot for
+the reply.
+
+- **The input task is a branch of the tee,** beside the spectrum's. It drops blocks it is behind on, like any
+  branch, so a slow disk loses samples rather than slowing the demodulator.
+- **The envelope task is fed by the sink,** which sends it each block's envelope with `try_send`. A copy of
+  the envelope is 48 MB/s, so `demodulate()` makes one only while an envelope capture is in progress: the
+  task sets a `watch<bool>` that `demodulate()` reads once per block.
+- **A gap starts a new SigMF capture segment,** whose `core:global_index` says where the samples resume. It
+  is logged at WARNING, at most once a second, and plotted (`capture input missing`, `capture envelope
+  missing`). `CaptureResult.missing` totals them.
+- **The metadata is written when the first samples arrive, at each new segment, and at the end,** so a
+  capture cut short by Ctrl+C has metadata for all it wrote.
+- **No file is opened exclusively:** `coro::File` has no `O_EXCL`, so the task checks that neither file
+  exists first. Only two captures of the same name racing each other get past the check.
+- **Each capture's start and end are logged at INFO,** with its path, sample count and samples missing.
+
+**The UI.** `ApiClient` gains `Stream<CaptureResult> capture(CaptureRequest)`. It is a stream, though the call
+is unary, so cancelling its subscription cancels the call.
+
+- **A capture button in the top bar** is shown while connected to a server whose `ServerInfo.capture` is
+  true. It opens a dialog for the point, the duration (up to `capture_max_s`) and the name, which defaults to
+  `capture_<date>_<time>`.
+- **While a capture is in progress,** the button is replaced by its progress, timed by the wall clock, and a
+  stop button that cancels the call.
+- **A SnackBar reports the result:** the path, samples, duration and samples missing, or the error.
 
 ### Later: settings a client sets
 

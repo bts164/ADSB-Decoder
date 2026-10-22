@@ -84,15 +84,15 @@ void FrameRecorder::record(const IqBlock& block, std::span<const float> y, float
     auto base = [&](int m) { return (static_cast<int64_t>(m) * p.pos_step + p.pos_offset) >> p.pos_frac_bits; };
     const int64_t i0 = base(e0) - p.window_lead;
     const int64_t i1 = base(e1 - 1) - p.window_lead + m_taps;
-    if (i0 < -block.lead || i1 > static_cast<int64_t>(block.n + block.trail()))
+    if (i0 < -block.lead() || i1 > static_cast<int64_t>(block.n() + block.trail()))
         throw std::logic_error("FrameRecorder: frame's IQ span outside the block");
 
     char name[32];
     std::snprintf(name, sizeof name, "%015llu", static_cast<unsigned long long>(fr.sample_index));
     HighFive::Group g = m_file->getGroup("frames").createGroup(name);
     g.createAttribute("sample_index", fr.sample_index);
-    g.createAttribute("block_start", block.start);
-    g.createAttribute("block_n", static_cast<uint64_t>(block.n));
+    g.createAttribute("block_start", block.start());
+    g.createAttribute("block_n", static_cast<uint64_t>(block.n()));
     g.createAttribute("output_index", fr.output_index);
     g.createAttribute("envelope_start", e0);
     g.createAttribute("iq_start", i0);
@@ -112,7 +112,7 @@ void FrameRecorder::record(const IqBlock& block, std::span<const float> y, float
     // The file's `iq` dataset is complex floats scaled to [-1, 1] whatever format the block is in, so the
     // samples are converted and their I/Q pairs paired up here.
     std::vector<float> x(2 * static_cast<size_t>(i1 - i0));
-    block.to_float(static_cast<size_t>(block.lead + i0), x);
+    block.to_float(static_cast<size_t>(block.lead() + i0), x);
     std::vector<std::complex<float>> iq(x.size() / 2);
     for (size_t i = 0; i < iq.size(); i++) iq[i] = {x[2 * i], x[2 * i + 1]};
     g.createDataSet("iq", iq);

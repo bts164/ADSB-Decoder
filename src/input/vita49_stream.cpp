@@ -31,7 +31,7 @@ constexpr size_t kMaxDatagramBytes = 65536;
 constexpr auto kPollInterval = std::chrono::milliseconds(250);  // how often to look at the idle state
 constexpr size_t kChannelBlocks = (64*1024*1024) / (Vita49StreamParams::kChunkSamples * sizeof(int16_t) * 2);  // 64 MiB of blocks, enough for 1 s at 12 MHz
 // Recycled block buffers kept for reuse: one for each block the channel holds, plus the few held outside it (the
-// chunker's, the stitcher's, the demodulator's). A buffer beyond that is just freed.
+// chunker's, the stitcher's, the demodulator's, the spectrum's). A buffer beyond that is just freed.
 constexpr size_t kPoolBuffers = kChannelBlocks + 8;
 constexpr auto kStatusInterval = std::chrono::seconds(2);
 // How far below real time a window may run before it counts as slow: packets arrive in bursts, so a window
@@ -175,9 +175,9 @@ namespace {
 
 // Binds the socket and reads datagrams until the idle timeout, or until it is cancelled because
 // vita49_iq_stream() was dropped (Ctrl+C is handled in main(), not here), cutting the assembled sample stream
-// into guard-padded IqBlocks. Owns `tx`, so the channel closes (ending the consumer's stream) when this returns
+// into guard-padded IqBuffers. Owns `tx`, so the channel closes (ending the consumer's stream) when this returns
 // or throws.
-coro::Coro<void> receive_loop(Vita49Options opts, coro::MpscSender<IqBlock> tx, IqPadding pad,
+coro::Coro<void> receive_loop(Vita49Options opts, coro::MpscSender<IqBuffer> tx, IqPadding pad,
                               uint32_t chunk_samples) {
     auto sock = co_await coro::UdpSocket::bind(opts.bind_host, opts.port);
     vrt::Assembler assembler({.sample_rate_hz = opts.sample_rate_hz, .stream_id = opts.stream_id});
@@ -186,7 +186,7 @@ coro::Coro<void> receive_loop(Vita49Options opts, coro::MpscSender<IqBlock> tx, 
          opts.sample_rate_hz);
 
     // Reordered, gap-filled samples land here (Assembler::drain() appends; see vrt/assembler.h's
-    // Sink concept), building chunk_samples-sized IqBlocks directly in place -- a completed block is
+    // Sink concept), building chunk_samples-sized IqBuffers directly in place -- a completed block is
     // moved straight out via pop() with no copy from an intermediate accumulator. The blocks hold the
     // packets' big-endian int16 as received; the resampler reads that format directly. Each block's buffer
     // comes back through the pool when the consumer (or send_ready(), for a dropped block) is done with it, so
@@ -208,8 +208,8 @@ coro::Coro<void> receive_loop(Vita49Options opts, coro::MpscSender<IqBlock> tx, 
     auto send_ready = [&] {
         TRACE_ZONE("vrt_send_ready");
         while (chunker.ready() > 0) {
-            IqBlock block = chunker.pop();
-            const size_t n = block.n;
+            IqBuffer block = chunker.pop();
+            const size_t n = block.n();
             // Never block here: stalling would leave the socket unread and the kernel would drop packets anyway.
             if (!tx.try_send(std::move(block))) {
                 TRACE_MESSAGE("vrt block dropped: demodulator behind");
@@ -319,10 +319,10 @@ coro::Coro<void> receive_loop(Vita49Options opts, coro::MpscSender<IqBlock> tx, 
 
 }  // namespace
 
-coro::CoroStream<IqBlock> vita49_iq_stream(Vita49Options opts, IqPadding pad, uint32_t chunk_samples) {
-    auto channel = coro::mpsc_channel<IqBlock>(kChannelBlocks);
-    coro::MpscSender<IqBlock> tx = std::move(channel.first);
-    coro::MpscReceiver<IqBlock> rx = std::move(channel.second);
+coro::CoroStream<IqBuffer> vita49_iq_stream(Vita49Options opts, IqPadding pad, uint32_t chunk_samples) {
+    auto channel = coro::mpsc_channel<IqBuffer>(kChannelBlocks);
+    coro::MpscSender<IqBuffer> tx = std::move(channel.first);
+    coro::MpscReceiver<IqBuffer> rx = std::move(channel.second);
 
     auto task = coro::build_task()
         .name("vita49_receive")

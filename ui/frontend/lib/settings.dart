@@ -1,3 +1,5 @@
+import 'dart:ui' show Color;
+
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -64,6 +66,32 @@ enum TimeZoneMode {
   final String label;
 }
 
+/// The spectrum waterfall's colors, from the bottom of its range to the top: stops spaced evenly and
+/// interpolated between.
+enum SpectrumColormap {
+  classic('Classic', [
+    Color(0xFF000030), Color(0xFF0000C0), Color(0xFF00C0C0), Color(0xFF00C000), Color(0xFFE0E000),
+    Color(0xFFE00000),
+  ]),
+  viridis('Viridis', [
+    Color(0xFF440154), Color(0xFF482878), Color(0xFF3E4A89), Color(0xFF31688E), Color(0xFF26828E),
+    Color(0xFF1F9E89), Color(0xFF35B779), Color(0xFF6DCD59), Color(0xFFB4DE2C), Color(0xFFFDE725),
+  ]),
+  inferno('Inferno', [
+    Color(0xFF000004), Color(0xFF1B0C41), Color(0xFF4A0C6B), Color(0xFF781C6D), Color(0xFFA52C60),
+    Color(0xFFCF4446), Color(0xFFED6925), Color(0xFFFB9B06), Color(0xFFF7D13D), Color(0xFFFCFFA4),
+  ]),
+  turbo('Turbo', [
+    Color(0xFF30123B), Color(0xFF4662D7), Color(0xFF36AAF9), Color(0xFF1AE4B6), Color(0xFF72FE5E),
+    Color(0xFFC8EF34), Color(0xFFFABA39), Color(0xFFF66B19), Color(0xFFCA2A04), Color(0xFF7A0403),
+  ]),
+  grayscale('Grayscale', [Color(0xFF000000), Color(0xFFFFFFFF)]);
+
+  const SpectrumColormap(this.label, this.stops);
+  final String label;
+  final List<Color> stops;
+}
+
 /// A set of units to switch to in one go. Leaves the clock and time zone alone.
 enum UnitPreset {
   aviation('Aviation', SpeedUnit.kt, AltitudeUnit.ft, VerticalRateUnit.fpm, DistanceUnit.nm, PressureUnit.hpa),
@@ -79,7 +107,7 @@ enum UnitPreset {
   final PressureUnit pressure;
 }
 
-/// How values are shown: units, clock and time zone. The backend sends
+/// How values are shown: units, clock, time zone and the spectrum's colors. The backend sends
 /// knots, feet, ft/min, NM and hPa, and the app keeps them that way (gauges
 /// and colours work on those); these settings only change the text, through
 /// the formatting methods below. Saved with shared_preferences when loaded
@@ -99,6 +127,18 @@ class DisplaySettings extends ChangeNotifier {
   PressureUnit _pressure = PressureUnit.hpa;
   ClockFormat _clock = ClockFormat.h24;
   TimeZoneMode _timeZone = TimeZoneMode.local;
+  SpectrumColormap _spectrumColormap = SpectrumColormap.classic;
+  double _spectrumLowDb = defaultSpectrumLowDb;
+  double _spectrumHighDb = defaultSpectrumHighDb;
+
+  // The spectrum's colors span its range in dB above the noise floor, rather than absolute dB: the bins aren't
+  // calibrated, so the floor moves with the radio and its gain, and a range relative to it stays right.
+  // Rather than scaled to the strongest bin either, so a row of noise stays dark and a burst stands out by its
+  // strength above the noise.
+  static const double spectrumMinDb = -20;
+  static const double spectrumMaxDb = 80;
+  static const double defaultSpectrumLowDb = -3;
+  static const double defaultSpectrumHighDb = 27;
 
   SpeedUnit get speed => _speed;
   AltitudeUnit get altitude => _altitude;
@@ -107,6 +147,11 @@ class DisplaySettings extends ChangeNotifier {
   PressureUnit get pressure => _pressure;
   ClockFormat get clock => _clock;
   TimeZoneMode get timeZone => _timeZone;
+  SpectrumColormap get spectrumColormap => _spectrumColormap;
+  /// Bottom of the spectrum's color range, in dB above the noise floor.
+  double get spectrumLowDb => _spectrumLowDb;
+  /// Top of the spectrum's color range, in dB above the noise floor.
+  double get spectrumHighDb => _spectrumHighDb;
 
   set speed(SpeedUnit v) => _set(_speedKey, () => _speed = v, v);
   set altitude(AltitudeUnit v) => _set(_altitudeKey, () => _altitude = v, v);
@@ -115,6 +160,17 @@ class DisplaySettings extends ChangeNotifier {
   set pressure(PressureUnit v) => _set(_pressureKey, () => _pressure = v, v);
   set clock(ClockFormat v) => _set(_clockKey, () => _clock = v, v);
   set timeZone(TimeZoneMode v) => _set(_timeZoneKey, () => _timeZone = v, v);
+  set spectrumColormap(SpectrumColormap v) => _set(_spectrumColormapKey, () => _spectrumColormap = v, v);
+
+  /// Sets the spectrum's color range, clamped to [spectrumMinDb, spectrumMaxDb].
+  void setSpectrumRange(double lowDb, double highDb) {
+    _spectrumLowDb = lowDb.clamp(spectrumMinDb, spectrumMaxDb);
+    _spectrumHighDb = highDb.clamp(_spectrumLowDb, spectrumMaxDb);
+    notifyListeners();
+    for (final (key, value) in [(_spectrumLowKey, _spectrumLowDb), (_spectrumHighKey, _spectrumHighDb)]) {
+      _prefs?.setDouble(key, value).catchError((Object e) => debugPrint('display settings: not saved: $e'));
+    }
+  }
 
   static const _speedKey = 'units.speed';
   static const _altitudeKey = 'units.altitude';
@@ -123,6 +179,9 @@ class DisplaySettings extends ChangeNotifier {
   static const _pressureKey = 'units.pressure';
   static const _clockKey = 'time.clock';
   static const _timeZoneKey = 'time.zone';
+  static const _spectrumColormapKey = 'spectrum.colormap';
+  static const _spectrumLowKey = 'spectrum.lowDb';
+  static const _spectrumHighKey = 'spectrum.highDb';
 
   /// The saved settings, or the defaults for any not saved (or if they
   /// can't be read).
@@ -139,6 +198,15 @@ class DisplaySettings extends ChangeNotifier {
       s._pressure = pick(PressureUnit.values, await prefs.getString(_pressureKey), s._pressure);
       s._clock = pick(ClockFormat.values, await prefs.getString(_clockKey), s._clock);
       s._timeZone = pick(TimeZoneMode.values, await prefs.getString(_timeZoneKey), s._timeZone);
+      s._spectrumColormap =
+          pick(SpectrumColormap.values, await prefs.getString(_spectrumColormapKey), s._spectrumColormap);
+      final low = await prefs.getDouble(_spectrumLowKey);
+      final high = await prefs.getDouble(_spectrumHighKey);
+      // Both or neither, and in range, so a bad pair can't leave the waterfall one flat color.
+      if (low != null && high != null && spectrumMinDb <= low && low < high && high <= spectrumMaxDb) {
+        s._spectrumLowDb = low;
+        s._spectrumHighDb = high;
+      }
     } catch (e) {
       debugPrint('display settings: using defaults, could not read saved ones: $e');
     }

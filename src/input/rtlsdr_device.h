@@ -48,8 +48,9 @@ public:
     /**
      * Opens the device, sets rate, frequency and gain, resets its buffer and logs the settings in effect. A
      * gain the device rejects, or one the tuner has no step for, is logged as a warning, and so is a rate the
-     * device rounds.
-     * @throws std::runtime_error if the device can't be opened, or rejects the rate or frequency
+     * device rounds by up to 100 ppm.
+     * @throws std::runtime_error if the device can't be opened, rejects the rate or frequency, or rounds the rate
+     *         by more than 100 ppm
      */
     explicit RtlSdr(const RtlSdrTuning& tuning);
 
@@ -78,12 +79,6 @@ public:
      */
     void close();
 
-    /** The sample rate the device runs at, which can differ from the one asked for: librtlsdr rounds it. */
-    double sample_rate_hz() const { return m_rate_hz; }
-
-    /** The center frequency the device is tuned to. */
-    double center_freq_hz() const { return m_freq_hz; }
-
 private:
     struct Relay;
 
@@ -96,8 +91,7 @@ private:
     bool reconnect(std::unique_lock<std::mutex>& lock);
 
     const RtlSdrTuning m_tuning;
-    double m_rate_hz = 0;
-    double m_freq_hz = 0;
+    double m_rate_hz = 0;  // the rate the device runs at, within 100 ppm of the one asked for
     std::mutex m_mutex;                 // guards m_dev and m_reading
     std::condition_variable m_cv;       // signals a stop request and the end of read_async()
     std::atomic<bool> m_stop = false;

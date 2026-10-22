@@ -3,6 +3,7 @@ from pathlib import Path
 
 from conan import ConanFile
 from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
+from conan.tools.gnu import PkgConfigDeps
 from conan.tools.files import copy, get
 from conan.tools.system.package_manager import Apt
 
@@ -78,6 +79,10 @@ class LibrtlsdrRecipe(ConanFile):
     def generate(self):
         deps = CMakeDeps(self)
         deps.generate()
+        # Upstream finds libusb with pkg_check_modules, not find_package, so
+        # without a libusb-1.0.pc here pkg-config falls through to the
+        # system's libusb -- the wrong architecture in a cross build.
+        PkgConfigDeps(self).generate()
         tc = CMakeToolchain(self)
         tc.cache_variables["DETACH_KERNEL_DRIVER"] = bool(self.options.detach_kernel_driver)
         tc.cache_variables["ENABLE_ZEROCOPY"] = bool(self.options.enable_zerocopy)

@@ -24,12 +24,12 @@ constexpr size_t kReadAheadBlocks = 4;
 // Each format is one the blocks hold as stored, so a file is read straight into the block.
 static_assert(std::endian::native == std::endian::little, "cf32_le is read as native floats");
 
-// coro::ByteBuffer view over the real samples of an IqBlock it owns, so
+// coro::ByteBuffer view over the real samples of an IqBuffer it owns, so
 // File::read_exact() writes straight into the guard-padded block instead of
 // a separate buffer that then gets copied.
 template<class Format>
 struct BlockReadBuf {
-    IqBlock block;
+    IqBuffer block;
 
     std::byte* begin() { return std::as_writable_bytes(block.iq<Format>()).data(); }
     std::byte* end() { return begin() + block.iq<Format>().size_bytes(); }
@@ -37,22 +37,22 @@ struct BlockReadBuf {
 
 // Reads the file chunk by chunk, one block per chunk.
 template<class Format>
-coro::CoroStream<IqBlock> read_blocks(std::string path, IqPadding pad, uint32_t chunk_samples) {
+coro::CoroStream<IqBuffer> read_blocks(std::string path, IqPadding pad, uint32_t chunk_samples) {
     // One sample in the file: an I and a Q.
     constexpr size_t kBytesPerSample = 2 * sizeof(typename Format::Sample);
     auto file = co_await coro::File::open(path, coro::FileMode::Read);
 
     for (uint64_t start = 0;;) {
-        BlockReadBuf<Format> buf{IqBlock::uninitialized<Format>(pad, chunk_samples, start)};
+        BlockReadBuf<Format> buf{IqBuffer::uninitialized<Format>(pad, chunk_samples, start)};
 
         auto [bytes_read, filled] = co_await file.read_exact(std::move(buf));
         if (bytes_read == 0) break;
 
         // Short read at EOF: cut off the unread tail of the chunk-sized
         // block, along with a stray partial trailing sample.
-        IqBlock block = std::move(filled.block);
-        if (const size_t n = bytes_read / kBytesPerSample; n != block.n) block.truncate(n);
-        start += block.n;
+        IqBuffer block = std::move(filled.block);
+        if (const size_t n = bytes_read / kBytesPerSample; n != block.n()) block.truncate(n);
+        start += block.n();
 
         const bool eof = bytes_read < chunk_samples * kBytesPerSample;  // short read -- EOF reached mid-chunk
         co_yield std::move(block);
@@ -72,9 +72,9 @@ const char* datatype_name(FileFormat format) {
     return format == FileFormat::Cf32Le ? "cf32_le" : "ci16_be";
 }
 
-coro::CoroStream<IqBlock> file_iq_stream(std::string path, FileFormat format, IqPadding pad, uint32_t chunk_samples) {
+coro::CoroStream<IqBuffer> file_iq_stream(std::string path, FileFormat format, IqPadding pad, uint32_t chunk_samples) {
     LOGF(INFO, "streaming from IQ file %s (%s, chunk=%u samples)", path, datatype_name(format), chunk_samples);
-    coro::CoroStream<IqBlock> blocks = format == FileFormat::Cf32Le
+    coro::CoroStream<IqBuffer> blocks = format == FileFormat::Cf32Le
                                            ? read_blocks<iq::F32>(std::move(path), pad, chunk_samples)
                                            : read_blocks<iq::I16Be>(std::move(path), pad, chunk_samples);
     // A task of its own, so reads overlap the demodulator's compute. Its next() rethrows a read_blocks()

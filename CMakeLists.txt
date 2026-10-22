@@ -28,7 +28,37 @@ find_package(nlohmann_json REQUIRED)
 find_package(FFTW3 REQUIRED)
 find_package(SQLite3 REQUIRED)
 find_package(xtensor REQUIRED)
-find_package(HighFive REQUIRED)
+
+# adsb --debug-h5. Off for a target HDF5 can't be cross-built for; conanfile.py's with_hdf5 sets it.
+option(ADSB_WITH_HDF5 "Build adsb --debug-h5 (needs HighFive and HDF5)" ON)
+if(ADSB_WITH_HDF5)
+    find_package(HighFive REQUIRED)
+endif()
+
+# adsb sidekiq, for Epiq Sidekiq radios. Off by default
+option(ADSB_WITH_SIDEKIQ "Build adsb sidekiq (needs the Sidekiq SDK's headers)" OFF)
+if(ADSB_WITH_SIDEKIQ)
+    # adsb sidekiq. Builds against the Sidekiq SDK's headers alone: libsidekiq itself is loaded at run time (see
+    # src/input/sidekiq_stream.h), so nothing from the SDK is linked.
+    # Guarded: under CMake 3.20's policies, set(CACHE) would erase the plain variable a Conan toolchain sets.
+    # The environment variable fills it only while it is empty, so a value given with -D, or cached, holds.
+    if(NOT SIDEKIQ_SDK_DIR)
+        set(SIDEKIQ_SDK_DIR "$ENV{SIDEKIQ_SDK_DIR}" CACHE PATH
+            "Sidekiq SDK root, the directory holding sidekiq_core/inc (default: $SIDEKIQ_SDK_DIR)" FORCE)
+    endif()
+    message(STATUS "Sidekiq SDK: ${SIDEKIQ_SDK_DIR}")
+    if(NOT EXISTS "${SIDEKIQ_SDK_DIR}/sidekiq_core/inc/sidekiq_api.h")
+        message(FATAL_ERROR "ADSB_WITH_SIDEKIQ needs SIDEKIQ_SDK_DIR set to the Sidekiq SDK's root: "
+                            "\"${SIDEKIQ_SDK_DIR}/sidekiq_core/inc/sidekiq_api.h\" doesn't exist")
+    endif()
+endif()
+
+# adsb uhd, for Ettus USRPs. Off by default: UHD brings Boost and is GPL-3.0. conanfile.py's with_uhd sets it.
+option(ADSB_WITH_UHD "Build adsb uhd (needs UHD)" ON)
+if(ADSB_WITH_UHD)
+    find_package(uhd REQUIRED)
+    find_package(Boost REQUIRED)
+endif()
 find_package(absl REQUIRED)
 # Also brings protobuf_generate() and the protobuf::protoc target, from the tool_requires protoc.
 find_package(protobuf CONFIG REQUIRED)
