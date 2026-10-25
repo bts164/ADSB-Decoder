@@ -1,0 +1,121 @@
+// The receiver's pipeline, shown in README.md as pipeline.svg. After editing, regenerate it from this directory:
+//
+//     dot -Tsvg pipeline.dot -o pipeline.svg
+//
+// Colours: blue, a task; amber, a task on a blocking thread; white in a grey frame, a stage run in its frame's
+// task, not a task of its own; grey cylinders, files. Dashed, there only with the option an arrow names.
+digraph pipeline {
+    graph [
+        rankdir=TB, newrank=true, compound=true, bgcolor="white", pad=0.3, nodesep=0.35, ranksep=0.5,
+        fontname="Helvetica,Arial,sans-serif", fontsize=13, fontcolor="#374151", labeljust=l
+    ];
+    node [
+        shape=box, style="rounded,filled", fillcolor="#dbeafe", color="#3b82f6", penwidth=1.2,
+        fontname="Helvetica,Arial,sans-serif", fontsize=12, fontcolor="#111827", margin="0.15,0.07"
+    ];
+    edge [
+        color="#4b5563", fontname="Helvetica,Arial,sans-serif", fontsize=10, fontcolor="#374151", arrowsize=0.7
+    ];
+
+    // Sources: one per subcommand. One node with a cell per source, so their order is fixed.
+    SRC [shape=plain, style="", label=<
+        <table border="1" color="#9ca3af" bgcolor="#f9fafb" style="rounded" cellspacing="12" cellpadding="6">
+        <tr><td colspan="5" align="left" border="0"><font point-size="13" color="#374151">source: one per subcommand</font></td></tr>
+        <tr>
+        <td port="file" border="1" color="#3b82f6" bgcolor="#dbeafe"><b>file</b><br/>file_read task<br/>reads one block<br/>per chunk</td>
+        <td port="vita49" border="1" color="#3b82f6" bgcolor="#dbeafe"><b>vita49</b><br/>vita49_receive task<br/>UDP recv, VRT reorder<br/>and gap fill</td>
+        <td port="rtlsdr" border="1" color="#d97706" bgcolor="#fef3c7"><b>rtlsdr</b><br/>blocking thread<br/>librtlsdr callback,<br/>u8 to cf32</td>
+        <td port="sidekiq" border="1" color="#d97706" bgcolor="#fef3c7"><b>sidekiq</b><br/>blocking thread<br/>packets to cf32,<br/>gap fill</td>
+        <td port="uhd" border="1" color="#d97706" bgcolor="#fef3c7"><b>uhd</b><br/>blocking thread<br/>packets as cf32,<br/>gap fill</td>
+        </tr>
+        </table>>];
+
+    subgraph cluster_demod {
+        label="demodulate task"; style="rounded,filled"; fillcolor="#f3f4f6"; color="#6b7280";
+        node [fillcolor="white", color="#6b7280"];
+        STITCH [label=<stitch()<br/>BlockStitcher: padding,<br/>IqBuffer to IqBlock>];
+        TEE [label=<tee()<br/>passes every block on, shares<br/>one with each branch that isn't full>,
+             style="rounded,filled,dashed"];
+        DEMOD [label=<demodulate()<br/>AdsbDemod: resample,<br/>preamble, slice>];
+    }
+    PAR [label=<coro::parallel() parts<br/>one per worker>];
+
+    SINK [label=<<b>run_demod_loop task</b><br/>handle_frame(): validate,<br/>decode, AircraftTracker>];
+
+    node [style="rounded,filled,dashed"];
+    REC [label=<<b>debug_h5 task</b><br/>FrameRecorder>];
+    HIST [label=<<b>history actor</b><br/>blocking thread>, fillcolor="#fef3c7", color="#d97706"];
+    SPEC [label=<<b>spectrum task</b><br/>peak-held FFTs<br/>while a client watches>];
+    CAPI [label=<<b>capture_input task</b><br/>SigMF writer>];
+    CAPR [label=<<b>capture_calls task</b><br/>routes by point>];
+    CAPE [label=<<b>capture_envelope task</b><br/>SigMF writer>];
+    node [style="rounded,filled"];
+
+    subgraph cluster_ws {
+        label="WebSocket server"; style="rounded,filled"; fillcolor="#f9fafb"; color="#9ca3af";
+        ACC [label=<<b>ws_accept task</b>>];
+        CALL [label=<<b>ws_call task</b><br/>one per call, at most 8>];
+        subgraph cluster_client {
+            label="ws_client task: one per client"; style="rounded,filled"; fillcolor="#f3f4f6"; color="#6b7280";
+            node [fillcolor="white", color="#6b7280"];
+            READ [label=<read_socket()<br/>starts, cancels<br/>and ends calls>];
+            WRITE [label=<write_socket()<br/>sends in the order queued>];
+        }
+    }
+
+    node [shape=cylinder, style=filled, fillcolor="#e5e7eb", color="#6b7280"];
+    H5 [label="HDF5"];
+    DB [label="SQLite"];
+    SIGMF [label="SigMF"];
+    UI [shape=box, style="rounded,filled", fillcolor="#dcfce7", color="#16a34a", label=<<b>UI</b>>];
+
+    // Rows, top to bottom.
+    { rank=same; TEE; SPEC; CAPI; }
+    { rank=same; PAR -> SINK [style=invis]; CAPR; }
+    { rank=same; REC -> HIST [style=invis]; CALL; ACC; CAPE; }
+
+    // The main chain.
+    SRC:file:s -> STITCH [label="buffered,\n4 blocks"];
+    SRC:vita49:s -> STITCH [label="mpsc, 64 MiB"];
+    SRC:rtlsdr:s -> STITCH [label="mpsc, 4 blocks,\ndrops when full"];
+    SRC:sidekiq:s -> STITCH [label="mpsc, 4 blocks,\ndrops when full"];
+    SRC:uhd:s -> STITCH [label="mpsc, 4 blocks,\ndrops when full"];
+    STITCH -> TEE;
+    TEE -> DEMOD;
+    TEE -> SPEC [label="mpsc, 2 blocks,\nskips when full", style=dashed];
+    TEE -> CAPI [label="--capture-dir: mpsc, 8 blocks,\nskips when full", style=dashed];
+    DEMOD -> PAR [label="fork / join", dir=both];
+    DEMOD -> SINK [label="buffered, 64 blocks"];
+
+    // The demod loop's outputs.
+    SINK -> REC [label="--debug-h5:\nmpsc, 4", style=dashed];
+    SINK -> HIST [label="--history-db:\nmpsc, 16", style=dashed];
+    SINK -> CALL [label="frames: broadcast, 64\naircraft: watch"];
+    SINK -> CAPE [label="envelope while captured:\nmpsc, 8, skips when full", style=dashed];
+    REC -> H5;
+    HIST -> DB [dir=both];
+
+    // Capture.
+    CAPR -> CAPI [label="mpsc, 2", style=dashed, constraint=false];
+    CAPR -> CAPE [label="mpsc, 2", style=dashed];
+    CAPE -> DEMOD [label="copy envelope:\nwatch", style=dashed, constraint=false];
+    CAPI -> SIGMF;
+    CAPE -> SIGMF;
+
+    // Into and out of the WebSocket server.
+    SPEC -> CALL [label="spectrum:\nbroadcast, 64", style=dashed];
+    SRC:vita49:s -> CALL [label="input status: watch", style=dashed, constraint=false];
+    CALL -> SPEC [label="settings: watch", style=dashed, constraint=false];
+    CALL -> HIST [label="queries,\noneshot replies", style=dashed, constraint=false];
+    CALL -> CAPR [label="capture calls: mpsc, 4,\noneshot replies", style=dashed, constraint=false];
+
+    // Inside it.
+    ACC -> READ [lhead=cluster_client];
+    CALL -> READ [label="outcome: JoinSet"];
+    READ -> CALL [label="request, cancel; a client\nstream's later requests:\nmpsc, 16", constraint=false];
+    CALL -> WRITE [label="replies: mpsc, 16"];
+    READ -> WRITE [label="ends, refusals:\nthe same mpsc"];
+    { rank=same; READ; WRITE; }
+    READ -> UI [label="ClientMessage", dir=back];
+    WRITE -> UI [label="ServerMessage"];
+}

@@ -276,92 +276,19 @@ channels. The diagrams below show each app's chain. The rules are:
 
 ## The receiver (`adsb`)
 
-```mermaid
-flowchart TB
-    subgraph source["source: one per subcommand"]
-        direction LR
-        FILE["<b>file</b><br/>file_read task<br/>reads one block per chunk"]
-        VRT["<b>vita49</b><br/>vita49_receive task<br/>UDP recv, VRT reorder and gap fill"]
-        RTL["<b>rtlsdr</b><br/>blocking thread<br/>librtlsdr callback, u8 to cf32"]
-        SKQ["<b>sidekiq</b><br/>blocking thread<br/>packets to cf32, gap fill"]
-        UHD["<b>uhd</b><br/>blocking thread<br/>packets as cf32, gap fill"]
-    end
-    subgraph dtask["demodulate task"]
-        STITCH["stitch()<br/>BlockStitcher: padding<br/>IqBuffer to IqBlock"]
-        TEE["tee()<br/>passes every block on,<br/>shares one with each<br/>branch that isn't full"]
-        DEMOD["demodulate()<br/>AdsbDemod: resample,<br/>preamble, slice"]
-        STITCH --> TEE --> DEMOD
-    end
-    PAR["coro::parallel() parts<br/>one per worker"]
-    SINK["<b>run_demod_loop task</b><br/>run_demod_loop()<br/>handle_frame(): validate,<br/>decode, AircraftTracker"]
-    REC["debug_h5 task<br/>FrameRecorder"]
-    SPEC["spectrum task<br/>peak-held FFTs<br/>while a client watches"]
-    HIST["history actor<br/>blocking thread"]
-    CAPR["capture_calls task<br/>routes by point"]
-    CAPI["capture_input task<br/>SigMF writer"]
-    CAPE["capture_envelope task<br/>SigMF writer"]
-    subgraph ws["WebSocket server"]
-        direction LR
-        ACC["ws_accept task"]
-        subgraph client["ws_client task: one per client"]
-            READ["read_socket()<br/>starts, cancels<br/>and ends calls"]
-            WRITE["write_socket()<br/>sends in the order queued"]
-        end
-        CALL["ws_call task<br/>one per call, at most 8"]
-        ACC --> client
-        READ -- "request, cancel;<br/>a client stream's later<br/>requests: mpsc, 16" --> CALL
-        CALL -- "outcome: JoinSet" --> READ
-        CALL -- "replies: mpsc, 16" --> WRITE
-        READ -- "ends, refusals:<br/>the same mpsc" --> WRITE
-    end
-    H5[("HDF5")]
-    DB[("SQLite")]
-    SIGMF[("SigMF")]
-    UI(["UI"])
-
-    FILE -- "buffered, 4 blocks" --> STITCH
-    VRT -- "mpsc, 64 MiB" --> STITCH
-    RTL -- "mpsc, 4 blocks, drops when full" --> STITCH
-    SKQ -- "mpsc, 4 blocks, drops when full" --> STITCH
-    UHD -- "mpsc, 4 blocks, drops when full" --> STITCH
-    DEMOD <-- "fork / join" --> PAR
-    DEMOD -- "buffered, 64 blocks" --> SINK
-    SINK -- "frames: broadcast, 64<br/>aircraft: watch" --> CALL
-    SINK -. "--history-db: mpsc, 16" .-> HIST
-    SINK -. "--debug-h5: mpsc, 4" .-> REC
-    REC --> H5
-    HIST <--> DB
-    TEE -. "mpsc, 2 blocks, skips when full" .-> SPEC
-    SPEC -. "spectrum: broadcast, 64" .-> CALL
-    CALL -. "settings: watch" .-> SPEC
-    VRT -. "input status: watch" .-> CALL
-    CALL -. "queries, oneshot replies" .-> HIST
-    TEE -. "--capture-dir: mpsc, 8 blocks, skips when full" .-> CAPI
-    SINK -. "envelope while captured: mpsc, 8, skips when full" .-> CAPE
-    CAPE -. "copy envelope: watch" .-> DEMOD
-    CALL -. "capture calls: mpsc, 4, oneshot replies" .-> CAPR
-    CAPR -. "mpsc, 2" .-> CAPI
-    CAPR -. "mpsc, 2" .-> CAPE
-    CAPI --> SIGMF
-    CAPE --> SIGMF
-    UI -- "ClientMessage" --> READ
-    WRITE -- "ServerMessage" --> UI
-
-    classDef optional stroke-dasharray: 5 5
-    class TEE,SPEC,REC,HIST,CAPR,CAPI,CAPE optional
-```
+![The receiver's pipeline: sources, the demodulate task, the demod loop and its outputs, and the WebSocket server](doc/images/pipeline.svg)
 
 How to read the diagram:
 
-- **Boxes:** each box is a task. The four marked "blocking thread" run on
-  coro's blocking pool (`spawn_blocking`). The boxes inside the
-  demodulate task are not tasks: each is a stage of the stream that task
+- **Boxes:** each blue box is a task. The amber ones, marked "blocking
+  thread", run on coro's blocking pool (`spawn_blocking`). The white boxes
+  inside the demodulate task are not tasks: each is a stage of the stream that task
   pulls, run in the task's polls, and the arrow between stages is a direct
   call, with no queue. The stages listed in the run_demod_loop task's box run in its
-  polls in the same way. The two boxes inside the ws_client task are not tasks
+  polls in the same way. The two white boxes inside the ws_client task are not tasks
   either: they are its reader and its writer, run together with
   `coro::join()`, and whichever ends first, on a disconnect or a send that
-  takes over 20 s, cancels the other.
+  takes over 20 s, cancels the other. The grey cylinders are files.
 - **Arrows:** each arrow is labelled with its channel and its depth, in
   blocks or requests where no unit is given. A dashed arrow or box is there
   only with the option it names. The tee, the spectrum task and the input status are
