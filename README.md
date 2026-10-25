@@ -173,6 +173,22 @@ build/Release/adsb_sim_eval --scenario scenarios/boston.json --snr-db 20 --durat
 `<program> <subcommand> --help` lists a source's options. Ctrl+C stops either
 program cleanly.
 
+`--version` prints what went into a build, for `adsb`, `vita49_send` and
+`adsb_sim_eval`, and exits. Its level is optional:
+
+- `summary`, the default: the git version, the compiler, the build type, the
+  options and the direct dependencies;
+- `deps`: also the Conan profiles and every dependency and build tool, with
+  its options;
+- `full`: also each one's recipe revision, package ID and package revision,
+  and every shared object the program loaded;
+- `json`: all of it as JSON.
+
+Every level also lists the versions of the libraries loaded at run time, UHD
+and libsidekiq, in a build with them. A library that won't load is reported
+as unavailable. At startup, `adsb` and `vita49_send` log the summary's first
+line, and `adsb_sim_eval` prints it above its report.
+
 ## Repository layout
 
 ```
@@ -286,9 +302,17 @@ flowchart TB
     CAPE["capture_envelope task<br/>SigMF writer"]
     subgraph ws["WebSocket server"]
         direction LR
-        ACC["ws_accept task"] --> CLI["ws_client task<br/>one per client<br/>reads, starts calls, writes"]
-        CLI -- "requests, cancels" --> CALL["ws_call task<br/>one per call, at most 8"]
-        CALL -- "replies: mpsc, 16" --> CLI
+        ACC["ws_accept task"]
+        subgraph client["ws_client task: one per client"]
+            READ["read_socket()<br/>starts, cancels<br/>and ends calls"]
+            WRITE["write_socket()<br/>sends in the order queued"]
+        end
+        CALL["ws_call task<br/>one per call, at most 8"]
+        ACC --> client
+        READ -- "request, cancel;<br/>a client stream's later<br/>requests: mpsc, 16" --> CALL
+        CALL -- "outcome: JoinSet" --> READ
+        CALL -- "replies: mpsc, 16" --> WRITE
+        READ -- "ends, refusals:<br/>the same mpsc" --> WRITE
     end
     H5[("HDF5")]
     DB[("SQLite")]
@@ -320,7 +344,8 @@ flowchart TB
     CAPR -. "mpsc, 2" .-> CAPE
     CAPI --> SIGMF
     CAPE --> SIGMF
-    CLI <--> UI
+    UI -- "ClientMessage" --> READ
+    WRITE -- "ServerMessage" --> UI
 
     classDef optional stroke-dasharray: 5 5
     class TEE,SPEC,REC,HIST,CAPR,CAPI,CAPE optional
@@ -328,12 +353,15 @@ flowchart TB
 
 How to read the diagram:
 
-- **Boxes:** each box is a task. The three marked "blocking thread" run on
+- **Boxes:** each box is a task. The four marked "blocking thread" run on
   coro's blocking pool (`spawn_blocking`). The boxes inside the
   demodulate task are not tasks: each is a stage of the stream that task
   pulls, run in the task's polls, and the arrow between stages is a direct
   call, with no queue. The stages listed in the run_demod_loop task's box run in its
-  polls in the same way.
+  polls in the same way. The two boxes inside the ws_client task are not tasks
+  either: they are its reader and its writer, run together with
+  `coro::join()`, and whichever ends first, on a disconnect or a send that
+  takes over 20 s, cancels the other.
 - **Arrows:** each arrow is labelled with its channel and its depth, in
   blocks or requests where no unit is given. A dashed arrow or box is there
   only with the option it names. The tee, the spectrum task and the input status are
@@ -414,7 +442,7 @@ the filter and picks the source. Every source then feeds the same
 | `file` | `--iq x.sigmf-data` (required), `--meta x.sigmf-meta` (default: the `--iq` file's sibling, if there is one), `--rate Hz`, `--freq Hz` |
 | `vita49` | `--port P` (required), `--bind addr` (0.0.0.0), `--stream-id N` (default: the first one seen), `--idle-timeout s` (2; 0 = never), `--rate Hz` (required), `--freq Hz` (1090e6) |
 | `rtlsdr` | `--device N` (0), `--gain dB` (negative = auto), `--buf-num N`, `--buf-len B` (0 = librtlsdr's defaults: 15 buffers of 256 KB), `--rate Hz` (2.4e6), `--freq Hz` (1090e6) |
-| `sidekiq` | Only in a build with `ADSB_WITH_SIDEKIQ`. `--lib path` (/usr/lib/epiq/libsidekiq.so.4.19.1), `--card N` (0), `--handle A1\|A2` (A1), `--port J1\|J2\|…` (libsidekiq's choice), `--gain index\|auto` (auto), `--rate Hz` (50e6), `--bandwidth Hz` (20e6), `--freq Hz` (1090e6), `--preselect-filter MHz-MHz` (libsidekiq's choice) |
+| `sidekiq` | Only in a build with `ADSB_WITH_SIDEKIQ`. `--lib path` (libsidekiq.so, searched for on LD_LIBRARY_PATH), `--card N` (0), `--handle A1\|A2` (A1), `--port J1\|J2\|…` (libsidekiq's choice), `--gain index\|auto` (auto), `--rate Hz` (50e6), `--bandwidth Hz` (20e6), `--freq Hz` (1090e6), `--preselect-filter MHz-MHz` (libsidekiq's choice) |
 | `uhd` | Only in a build with `ADSB_WITH_UHD` (conan option `with_uhd`). `--args str` (the first USRP found), `--subdev spec` (UHD's), `--channel N` (0), `--antenna name` (UHD's), `--gain dB\|auto` (auto), `--rate Hz` (8e6), `--bandwidth Hz` (UHD's), `--freq Hz` (1090e6) |
 
 **Sample rate and center frequency.** The frequency is the tuner frequency
@@ -815,7 +843,7 @@ The log is for watching the receiver, not for reading its results: those are
 in the WebSocket messages, the history database and the
 [debug HDF5](#debug-hdf5). At `info` it tells the story of the run:
 
-- the settings in effect, at startup;
+- the version and the settings in effect, at startup;
 - each WebSocket client connecting and disconnecting, and each streaming call,
   such as the UI's subscription and spectrum, starting and ending;
 - the spectrum starting and stopping, as clients open and close it;
@@ -856,16 +884,23 @@ short:
   client, or a `ServerMessage` from `adsb`.
 - A client starts a call by sending its request with a new `id`, larger than
   every earlier one on the connection. Each reply carries the call's `id`.
-- A unary call has one reply. A streaming call replies until a message with
-  `end` set, and a client stops one early by sending a `cancel` with its `id`.
+- Every call ends with exactly one message with `end` set: a unary call's
+  reply, a streaming call's last message, or an `Error`. A client stops a
+  call early by sending a `cancel` with its `id`. The call then ends with a
+  `CANCELLED` error, unless its `end` was already on its way.
+- A call can also be one the client streams. Its later requests carry the
+  call's `id`, and the client's last message has `end` set. The protocol
+  supports these, though none of today's calls is one.
 - A call that fails ends with an `Error`, whose code says why:
     - `NO_HISTORY`, a history call to an `adsb` without `--history-db`;
     - `NO_LIVE_INPUT`, a spectrum call to `adsb serve`;
     - `NO_CAPTURE`, a capture call to an `adsb` without `--capture-dir`;
-    - `INVALID_ARGUMENT`, a bad request, such as an `id` that isn't new or an
-      empty heatmap area;
+    - `INVALID_ARGUMENT`, a bad request, such as an `id` that isn't new, an
+      empty heatmap area, or a client stream's message for another kind of
+      call;
     - `RESOURCE_EXHAUSTED`, a ninth call while a connection already has 8 in
-      progress, or a capture of a point already being captured;
+      progress, a capture of a point already being captured, or a client
+      stream that sent more than 16 messages ahead of its call;
     - `UNIMPLEMENTED`, a call this `adsb` doesn't know;
     - `INTERNAL`, a failure `adsb` has logged.
 - A client that takes over 20 s to accept a message is disconnected.
