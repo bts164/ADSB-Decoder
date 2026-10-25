@@ -1,0 +1,8 @@
+// Generated from version_info_git.cpp.in by version_info_git.cmake; see version_info.h.
+#include "common/version_info.h"
+
+namespace adsb::version_info {
+
+std::string_view git_describe() { return "@describe@"; }
+
+}  // namespace adsb::version_info

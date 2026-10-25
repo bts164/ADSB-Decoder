@@ -25,6 +25,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <argparse/argparse.hpp>
 
@@ -37,6 +38,8 @@
 #include "apps/adsb/pipeline.h"
 #include "apps/filter_options.h"
 #include "apps/log_options.h"
+#include "apps/version_options.h"
+#include "common/version_info.h"
 #include "dsp/filter_bank.h"
 #include "input/file_stream.h"
 #include "input/rtlsdr_stream.h"
@@ -93,6 +96,7 @@ void add_options(argparse::ArgumentParser& program, Commands& cmds) {
                        "                               demod loop's throughput every second (0: off)\n"
                        "  ADSB_NTASKS=N                split each block's kernels into N parts instead of one per\n"
                        "                               runtime worker");
+    VersionOptions::add_options(program);
     FilterOptions::add_options(program);
     add_log_options(program,
                     "1 adds a line for each websocket call, 2 for each aircraft change, 3 for every decoded frame");
@@ -122,11 +126,29 @@ void add_options(argparse::ArgumentParser& program, Commands& cmds) {
         program.add_subparser(*cmd);
 }
 
+// The libraries loaded at run time that report their version, for --version. libsidekiq is the one --lib's
+// default finds; one that can't be loaded is reported as such, and the rest still are.
+std::vector<adsb::version_info::RuntimeLibrary> runtime_libraries() {
+    std::vector<adsb::version_info::RuntimeLibrary> libraries;
+#ifdef ADSB_WITH_UHD
+    libraries.push_back({"uhd", uhd_library_version()});
+#endif
+#ifdef ADSB_WITH_SIDEKIQ
+    try {
+        libraries.push_back({"libsidekiq", sidekiq_library_version(SidekiqStreamParams::kDefaultLib)});
+    } catch (const std::exception& err) {
+        libraries.push_back({"libsidekiq", std::string("unavailable: ") + err.what()});
+    }
+#endif
+    return libraries;
+}
+
 // Parses the command line and starts logging. On an error prints it, with the usage of the parser the bad
-// argument belonged to, and returns false.
+// argument belonged to, and returns false. With --version prints the report and exits.
 bool parse_command_line(argparse::ArgumentParser& program, const Commands& cmds, int argc, char** argv) {
     try {
         program.parse_args(argc, argv);
+        VersionOptions::exit_if_given(program, "adsb", runtime_libraries);
         if (!program.is_subcommand_used(cmds.file) && !program.is_subcommand_used(cmds.vita49) &&
             !program.is_subcommand_used(cmds.rtlsdr) && !program.is_subcommand_used(cmds.serve)
 #ifdef ADSB_WITH_SIDEKIQ
@@ -182,6 +204,7 @@ bool parse_command_line(argparse::ArgumentParser& program, const Commands& cmds,
         }
 #endif
     } catch (const std::exception& err) {
+        VersionOptions::exit_if_given(program, "adsb", runtime_libraries);
         std::cerr << err.what() << "\n";
         if (program.is_subcommand_used(cmds.file)) {
             std::cerr << cmds.file;
@@ -219,10 +242,11 @@ std::string command_line(int argc, char** argv) {
 }
 
 coro::Coro<int> async_main(int argc, char** argv) {
-    argparse::ArgumentParser program("adsb");
+    argparse::ArgumentParser program("adsb", "", argparse::default_arguments::help);
     Commands cmds;
     add_options(program, cmds);
     if (!parse_command_line(program, cmds, argc, argv)) co_return 1;
+    LOGF(INFO, "adsb %s", adsb::version_info::summary_line());
 
     const std::optional<uint16_t> ws_port = program.present<uint16_t>("--ws-port");
     const auto ws_interval = std::chrono::duration_cast<std::chrono::nanoseconds>(

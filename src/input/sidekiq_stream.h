@@ -29,8 +29,13 @@ enum class SidekiqHandle { A1, A2 };
 struct SidekiqStreamParams {
     /** Block size for sidekiq_iq_stream(), the same as FileStreamParams::kChunkSamples. */
     static constexpr size_t kChunkSamples = 128 * 1024;
+    /**
+     * --lib's default: a file name with no directory, so dlopen() searches LD_LIBRARY_PATH and then the system's
+     * library paths, and finds libsidekiq where its own dependencies are found.
+     */
+    static constexpr const char* kDefaultLib = "libsidekiq.so";
 
-    std::string lib_path;            ///< libsidekiq.so to load
+    std::string lib_path;            ///< libsidekiq to load: a path, or a file name dlopen() searches for
     int card;
     SidekiqHandle handle;
     std::optional<std::string> port; ///< RF port, such as "J2"; unset for libsidekiq's choice
@@ -72,3 +77,11 @@ struct SidekiqStreamParams {
  *         fails
  */
 coro::CoroStream<IqBuffer> sidekiq_iq_stream(SidekiqStreamParams params, IqPadding pad, size_t chunk_samples);
+
+/**
+ * The version the libsidekiq at `path` reports and the file it was loaded from, such as
+ * "4.19.1, /usr/lib/epiq/libsidekiq.so.4.19.1", for --version. Loads it as sidekiq_iq_stream() does, but
+ * initializes no card.
+ * @throws std::runtime_error if it can't be loaded or has no skiq_read_libsidekiq_version()
+ */
+std::string sidekiq_library_version(const std::string& path);

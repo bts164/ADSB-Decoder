@@ -10,8 +10,11 @@ package adsb.api.v1;
 // ---- Envelopes ----
 
 message ClientMessage {
-  uint32 id = 1;  // larger than every earlier id on this connection; for cancel, the call to cancel
-  oneof call {
+  // A new call's: larger than every earlier id on this connection. For cancel, the call to cancel; for a later
+  // message of a client-streaming call, that call.
+  uint32 id = 1;
+  bool end = 15;  // a client-streaming call's last message: the client sends no more on it
+  oneof call {    // unset only on an `end` with no last request
     Cancel cancel = 2;
     ServerInfoRequest server_info = 3;
     SubscribeRequest subscribe = 4;
@@ -46,11 +49,12 @@ message Error {
   enum Code {
     CODE_UNSPECIFIED = 0;
     UNIMPLEMENTED = 1;       // a call this server doesn't know
-    INVALID_ARGUMENT = 2;    // e.g. an id not larger than the last, or an empty heatmap area
+    INVALID_ARGUMENT = 2;    // e.g. an id not larger than the last, an empty heatmap area, or a client stream's
+                             // message for another kind of call
     NO_HISTORY = 3;          // a history call without --history-db
     INTERNAL = 4;            // the handler failed; the server logged why
     CANCELLED = 5;           // the client cancelled it
-    RESOURCE_EXHAUSTED = 6;  // kClientCalls calls already in progress
+    RESOURCE_EXHAUSTED = 6;  // kClientCalls calls already in progress, or a client stream sent too far ahead
     NO_LIVE_INPUT = 7;       // a spectrum call to a server with no live input (`serve`)
     NO_CAPTURE = 8;          // a capture call without --capture-dir
   }

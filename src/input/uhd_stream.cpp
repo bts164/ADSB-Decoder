@@ -29,6 +29,7 @@
 #include <uhd/usrp/subdev_spec.hpp>
 #include <uhd/utils/log.hpp>
 #include <uhd/utils/log_add.hpp>
+#include <uhd/version.hpp>
 
 #include <coro/coro.h>
 #include <coro/coro_stream.h>
@@ -373,6 +374,8 @@ coro::CoroStream<IqBuffer> uhd_iq_stream(UhdStreamParams params, IqPadding pad, 
     // receiving fails; this rethrows that failure.
     co_await read_handle;
 }
+
+std::string uhd_library_version() { return uhd::get_version_string(); }
 
 void UhdStreamParams::add_options(argparse::ArgumentParser& cmd) {
     cmd.add_description("Stream from an Ettus USRP through UHD.");

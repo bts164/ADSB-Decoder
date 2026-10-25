@@ -28,9 +28,11 @@
 #include <argparse/argparse.hpp>
 
 #include "apps/log_options.h"
+#include "apps/version_options.h"
 #include "apps/vita49_send/packet_sender.h"
 #include "apps/vita49_send/rtlsdr_source.h"
 #include "apps/vita49_send/sim_source.h"
+#include "common/version_info.h"
 #include "net/gso.h"
 #include "vrt/encode.h"
 
@@ -68,18 +70,21 @@ void add_options(argparse::ArgumentParser& program) {
         "IQ sample pairs per VRT packet (default 360, chosen to keep the packet under one "
         "Ethernet MTU -- see doc/design/vita49-format.md's \"UDP framing\" section)");
     add_log_options(program, "2 adds a line for every send, sim render step and drop");
+    VersionOptions::add_options(program);
 }
 
 // Parses the command line and starts logging. On an error prints it, with the usage of the parser the bad
-// argument belonged to, and returns false.
+// argument belonged to, and returns false. With --version prints the report and exits.
 bool parse_command_line(argparse::ArgumentParser& program, const argparse::ArgumentParser& rtl_cmd,
                         const argparse::ArgumentParser& sim_cmd, int argc, char** argv) {
     try {
         program.parse_args(argc, argv);
+        VersionOptions::exit_if_given(program, "vita49_send");
         if (!program.is_subcommand_used(rtl_cmd) && !program.is_subcommand_used(sim_cmd)) {
             throw std::runtime_error("a source subcommand is required: rtlsdr or sim");
         }
     } catch (const std::exception& err) {
+        VersionOptions::exit_if_given(program, "vita49_send");
         std::cerr << err.what() << "\n";
         if (program.is_subcommand_used(rtl_cmd)) {
             std::cerr << rtl_cmd;
@@ -102,7 +107,7 @@ bool parse_command_line(argparse::ArgumentParser& program, const argparse::Argum
 coro::Coro<int> async_main(int argc, char** argv) {
     // Options every source shares go before the subcommand, each source's own after it:
     //   vita49_send --dest-port 4991 sim --scenario boston.json
-    argparse::ArgumentParser program("vita49_send");
+    argparse::ArgumentParser program("vita49_send", "", argparse::default_arguments::help);
     argparse::ArgumentParser rtl_cmd("rtlsdr");
     argparse::ArgumentParser sim_cmd("sim");
     add_options(program);
@@ -111,6 +116,7 @@ coro::Coro<int> async_main(int argc, char** argv) {
     program.add_subparser(rtl_cmd);
     program.add_subparser(sim_cmd);
     if (!parse_command_line(program, rtl_cmd, sim_cmd, argc, argv)) co_return 1;
+    LOGF(INFO, "vita49_send %s", adsb::version_info::summary_line());
 
     const double rate_hz = program.get<double>("--rate");
     const double freq_hz = program.get<double>("--freq");

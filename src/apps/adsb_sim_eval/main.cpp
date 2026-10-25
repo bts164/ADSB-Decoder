@@ -30,6 +30,8 @@
 #include "dsp/demod.h"
 #include "dsp/filter_bank.h"
 #include "apps/filter_options.h"
+#include "apps/version_options.h"
+#include "common/version_info.h"
 #include "decode/frame_decode.h"
 
 namespace {
@@ -98,12 +100,13 @@ coro::CoroStream<IqBuffer> sim_blocks(adsb_sim::Simulator& sim, IqPadding pad, s
 }  // namespace
 
 int main(int argc, char** argv) {
-    argparse::ArgumentParser program("adsb_sim_eval");
+    argparse::ArgumentParser program("adsb_sim_eval", "", argparse::default_arguments::help);
     program.add_description("Runs the ADS-B simulator into the demodulator and reports detection statistics "
                             "against the simulator's ground truth.");
     program.add_epilog("Environment variables, for profiling (each is logged when set):\n"
                        "  ADSB_TIMING=1  log the demodulator's stage times for every block (0: off)\n"
                        "  ADSB_NTASKS=N  split each block's kernels into N parts instead of one per runtime worker");
+    VersionOptions::add_options(program);
     FilterOptions::add_options(program);
     program.add_argument("--scenario").required().help("simulator scenario JSON (see scenarios/boston.json)");
     program.add_argument("--rate").scan<'g', double>().default_value(2.4e6).help("sample rate in Hz");
@@ -121,7 +124,9 @@ int main(int argc, char** argv) {
         "max distance between a candidate and a transmission's start to count as the same frame");
     try {
         program.parse_args(argc, argv);
+        VersionOptions::exit_if_given(program, "adsb_sim_eval");
     } catch (const std::exception& err) {
+        VersionOptions::exit_if_given(program, "adsb_sim_eval");
         std::cerr << err.what() << "\n" << program;
         return 1;
     }
@@ -252,6 +257,7 @@ int main(int argc, char** argv) {
     }
 
     const double seconds = static_cast<double>(total) / rate;
+    std::printf("adsb_sim_eval %s\n", adsb::version_info::summary_line().c_str());
     std::printf("%.1f s at %.3f Msps, SNR %.1f dB, seed %llu, block %zu: %zu transmissions\n\n", seconds, rate / 1e6,
                 cfg.snr_db, static_cast<unsigned long long>(cfg.seed), block, truth.size());
     std::printf("  %-26s %7s  %7s  %7s  %7s  %7s  %7s  %7s  %s\n", "transmissions", "count", "preamb", "output",

@@ -1,6 +1,7 @@
 #include "input/sidekiq_stream.h"
 
 #include <dlfcn.h>
+#include <link.h>
 
 #include <algorithm>
 #include <array>
@@ -208,6 +209,13 @@ void on_critical_error(int32_t status, void* /*user*/) {
     std::exit(EXIT_FAILURE);
 }
 
+// The file dlopen() loaded for `path`, which may be a file name it searched for.
+std::string loaded_file(void* lib, const std::string& path) {
+    const link_map* map = nullptr;
+    if (dlinfo(lib, RTLD_DI_LINKMAP, &map) != 0 || nullptr == map || map->l_name[0] == '\0') return path;
+    return map->l_name;
+}
+
 std::unique_ptr<const Sidekiq::Api> Sidekiq::Api::load(const std::string& path) {
     // RTLD_LOCAL, so libsidekiq's own protobuf and gRPC stay its own; see sidekiq_stream.h. Never dlclose()d: gRPC
     // keeps threads running inside it until the process exits.
@@ -221,7 +229,7 @@ std::unique_ptr<const Sidekiq::Api> Sidekiq::Api::load(const std::string& path) 
         throw std::runtime_error(absl::StrFormat("%s has no %s; is it libsidekiq 4.19 or newer?", path, #name));
     SIDEKIQ_FUNCTIONS(SIDEKIQ_LOOKUP)
 #undef SIDEKIQ_LOOKUP
-    LOGF(INFO, "loaded %s", path);
+    LOGF(INFO, "loaded %s", loaded_file(lib, path));
     return api;
 }
 
@@ -613,10 +621,28 @@ coro::CoroStream<IqBuffer> sidekiq_iq_stream(SidekiqStreamParams params, IqPaddi
     co_await read_handle;
 }
 
+std::string sidekiq_library_version(const std::string& path) {
+    // RTLD_LOCAL and never dlclose()d, for the same reasons as in Sidekiq::Api::load(). If an `adsb sidekiq` run
+    // later loads the same path, it gets this same handle.
+    void* lib = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (nullptr == lib) throw std::runtime_error(dlerror());
+    const auto read_version = reinterpret_cast<decltype(&skiq_read_libsidekiq_version)>(
+        dlsym(lib, "skiq_read_libsidekiq_version"));
+    if (nullptr == read_version) throw std::runtime_error(path + " has no skiq_read_libsidekiq_version");
+    uint8_t major = 0, minor = 0, patch = 0;
+    const char* label = nullptr;
+    if (const int32_t rc = read_version(&major, &minor, &patch, &label); rc != 0)
+        throw std::runtime_error(absl::StrFormat("skiq_read_libsidekiq_version failed (status %d)", rc));
+    std::string version = absl::StrFormat("%d.%d.%d", major, minor, patch);
+    if (label != nullptr && label[0] != '\0') absl::StrAppend(&version, " (", label, ")");
+    absl::StrAppend(&version, ", ", loaded_file(lib, path));
+    return version;
+}
+
 void SidekiqStreamParams::add_options(argparse::ArgumentParser& cmd) {
     cmd.add_description("Stream from an Epiq Sidekiq card, such as the Matchstiq X40's.");
-    cmd.add_argument("--lib").default_value(std::string("/usr/lib/epiq/libsidekiq.so.4.19.1")).help(
-        "libsidekiq to load");
+    cmd.add_argument("--lib").default_value(std::string(SidekiqStreamParams::kDefaultLib)).help(
+        "libsidekiq to load: a path, or a file name to search LD_LIBRARY_PATH and the system's library paths for");
     cmd.add_argument("--card").scan<'d', int>().default_value(0).help("libsidekiq card number");
     cmd.add_argument("--handle").default_value(std::string("A1")).help(
         "receive handle, A1 or A2: the two the X40's FPGA decimates on");

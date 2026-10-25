@@ -60,3 +60,6 @@ struct UhdStreamParams {
  *         gain was given, a gain is outside the device's range, the LO doesn't lock, or receiving fails
  */
 coro::CoroStream<IqBuffer> uhd_iq_stream(UhdStreamParams params, IqPadding pad, size_t chunk_samples);
+
+/** The version of the libuhd loaded, which can differ from the one built against, for --version. */
+std::string uhd_library_version();

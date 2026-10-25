@@ -2,14 +2,18 @@
 
 #include <cstddef>
 #include <exception>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <unordered_map>
+#include <utility>
 
 #include <coro/coro.h>
 #include <coro/coro_stream.h>
+#include <coro/defer.h>
 #include <coro/io/ws_listener.h>
 #include <coro/io/ws_stream.h>
 #include <coro/stream.h>
@@ -20,6 +24,7 @@
 #include <coro/sync/select.h>
 #include <coro/sync/timeout.h>
 #include <coro/sync/when.h>
+#include <coro/task/cancel_handle.h>
 #include <coro/task/join_handle.h>
 #include <coro/task/join_set.h>
 #include <coro/task/spawn_builder.h>
@@ -35,8 +40,8 @@ using google::protobuf::util::MessageDifferencer;
 // Blocks' frames and spectrum rows the live channel holds for a call that hasn't taken them yet.
 constexpr size_t kLiveQueueItems = 64;
 
-// Client messages read from the socket and not yet routed.
-constexpr size_t kReadQueue = 4;
+// A client-streaming call's messages waiting for its handler. One more fails the call, once it has handled these.
+constexpr size_t kCallInputQueue = 16;
 
 // Serialized messages waiting for the connection's writer, from all its calls.
 constexpr size_t kWriteQueue = 16;
@@ -109,43 +114,29 @@ void put(api::ServerMessage& m, api::Activity r) { *m.mutable_activity() = std::
 void put(api::ServerMessage& m, api::Heatmap r) { *m.mutable_heatmap() = std::move(r); }
 void put(api::ServerMessage& m, api::CaptureResult r) { *m.mutable_capture() = std::move(r); }
 
-bool has_anything(const api::Update& update) {
-    return update.frames_size() > 0 || update.aircraft_size() > 0 || update.has_input_status();
-}
-
-// Counts one spectrum call in PipelineSettings::spectrum_viewers, from its construction to its destruction. A
-// local of the call's handler, so the count comes down however the call ends: each way destroys its frame.
-class SpectrumViewer {
-public:
-    explicit SpectrumViewer(coro::WatchSender<PipelineSettings> settings) : m_settings(std::move(settings)) {
-        m_settings.send_if_modified([](PipelineSettings& s) {
-            ++s.spectrum_viewers;
-            return true;
-        });
-    }
-    ~SpectrumViewer() {
-        m_settings.send_if_modified([](PipelineSettings& s) {
-            --s.spectrum_viewers;
-            return true;
-        });
-    }
-    SpectrumViewer(const SpectrumViewer&) = delete;
-    SpectrumViewer& operator=(const SpectrumViewer&) = delete;
-
-private:
-    coro::WatchSender<PipelineSettings> m_settings;
-};
+// Every call a client can make: its case in ClientMessage's oneof, its field, and its request type. The switch in
+// ApiConnection::read_socket() has a case for each and no default, so -Wswitch flags a call missing here.
+#define ADSB_API_CALLS(CALL)                                       \
+    CALL(kServerInfo, server_info, ServerInfoRequest)              \
+    CALL(kSubscribe, subscribe, SubscribeRequest)                  \
+    CALL(kSpectrum, spectrum, SpectrumRequest)                     \
+    CALL(kSnapshot, snapshot, SnapshotRequest)                     \
+    CALL(kAircraftHistory, aircraft_history, AircraftHistoryRequest) \
+    CALL(kActivity, activity, ActivityRequest)                     \
+    CALL(kHeatmap, heatmap, HeatmapRequest)                        \
+    CALL(kCapture, capture, CaptureRequest)
 
 /**
- * One client's connection: its calls, each answered by the Handle() overload for its request type.
+ * The API's calls: a Handle() overload for each request type in ClientMessage, which answers the call. To add a
+ * call, add its request to ClientMessage in api.proto, its Handle here, and its line to ADSB_API_CALLS below;
+ * ApiConnection runs it.
  *
- * Each call runs in a task of its own (run_call()), which sends every message of the call, `end` last, on
- * `m_out`. Only that task sends its `end`, so a call gets exactly one: a cancel only signals the task.
- * Since the calls run at once, a handler takes its own clone of anything that is for one task at a time.
- *
- * The calls' tasks use this object, so it must outlive run(): see handle_connection().
+ * A Handle takes the call's request, or a coro::CoroStream of them for a call the client streams, and returns a
+ * coro::Coro of its reply, or a coro::CoroStream of replies for a call the server streams. Its signature is all
+ * ApiConnection needs to run the call. A handler fails by throwing a CallError. Since the calls run at once, a
+ * handler takes its own clone of anything that is for one task at a time.
  */
-class ApiConnection {
+class ApiHandlers {
 public:
     struct Settings {
         std::chrono::nanoseconds default_interval;  // --ws-interval
@@ -153,177 +144,13 @@ public:
         bool capture;                               // whether the pipeline takes capture calls
     };
 
-    // Most calls one connection may have in progress at once.
-    static constexpr size_t kClientCalls = 8;
     // Shortest time between a subscription's updates; a request for less gets this.
     static constexpr double kMinUpdateIntervalS = 0.1;
     // Longest time between a subscription's updates; a request for more is refused.
     static constexpr double kMaxUpdateIntervalS = 3600;
 
-    ApiConnection(ApiReceivers live, std::optional<AircraftHistory> history, Settings settings,
-                  coro::MpscSender<std::string> out)
-        : m_live(std::move(live)), m_history(std::move(history)), m_settings(settings), m_out(std::move(out)) {
-        auto [done_tx, done_rx] = coro::mpsc_channel<uint32_t>(kClientCalls);
-        m_done_tx = std::move(done_tx);
-        m_done_rx.emplace(std::move(done_rx));
-    }
-
-    /**
-     * Reads each serialized ClientMessage from `in` and acts on it, until `in` closes. Calls still in
-     * progress then are cancelled. A call's task reports on `m_done_rx` when it finishes, and is forgotten
-     * then.
-     */
-    coro::Coro<void> run(coro::MpscReceiver<std::vector<std::byte>> in) {
-        // A local, not a member: run()'s frame is destroyed however it ends, dropping each call's task,
-        // which cancels it, while this object, which the tasks use, still exists.
-        Calls calls;
-        for (;;) {
-            auto woke = co_await coro::select(in.recv(),
-                                              coro::when(!calls.empty(), [&] { return m_done_rx->recv(); }));
-            if (woke.index() == 1) {
-                if (const auto& id = std::get<1>(woke).value) calls.erase(*id);
-                continue;
-            }
-            auto& bytes = std::get<0>(woke).value;
-            if (!bytes) co_return;
-            api::ClientMessage msg;
-            if (!msg.ParseFromArray(bytes->data(), static_cast<int>(bytes->size()))) {
-                LOGF(WARNING, "ignoring a websocket client message that isn't a ClientMessage (%zu bytes)",
-                     bytes->size());
-                continue;
-            }
-            VLOGF(2, "websocket client sent: %s", msg.ShortDebugString());
-            // An error reply waits here for room in `m_out`, holding the reader back; only a client that sends
-            // bad calls faster than it reads replies is held back by it.
-            if (auto reply = route(calls, msg)) co_await send(m_out, *reply);
-        }
-    }
-
-private:
-    struct Call {
-        coro::JoinHandle<void> task;       // dropped on disconnect, cancelling the call
-        coro::OneshotSender<void> cancel;  // sent by cancel()
-    };
-    using Calls = std::unordered_map<uint32_t, Call>;
-
-    // Acts on one message: starts a call, or cancels one. Returns the reply to send for a call refused at once.
-    std::optional<api::ServerMessage> route(Calls& calls, const api::ClientMessage& msg) {
-        using api::ClientMessage;
-        const uint32_t id = msg.id();
-        // No default: a call added to the .proto and not routed here is a -Wswitch warning.
-        switch (msg.call_case()) {
-        case ClientMessage::kCancel: cancel(calls, id); return std::nullopt;
-        case ClientMessage::kServerInfo: return serve(calls, id, msg.server_info());
-        case ClientMessage::kSubscribe: return serve(calls, id, msg.subscribe());
-        case ClientMessage::kSpectrum: return serve(calls, id, msg.spectrum());
-        case ClientMessage::kSnapshot: return serve(calls, id, msg.snapshot());
-        case ClientMessage::kAircraftHistory: return serve(calls, id, msg.aircraft_history());
-        case ClientMessage::kActivity: return serve(calls, id, msg.activity());
-        case ClientMessage::kHeatmap: return serve(calls, id, msg.heatmap());
-        case ClientMessage::kCapture: return serve(calls, id, msg.capture());
-        case ClientMessage::CALL_NOT_SET:  // a call newer than this server, or none at all
-            return error_message(id, api::Error::UNIMPLEMENTED, "unknown call");
-        }
-        return error_message(id, api::Error::UNIMPLEMENTED, "unknown call");
-    }
-
-    // Starts the call `id` in a task of its own, with the adapter for its handler's kind: a handler that
-    // returns a coro::Stream is server streaming, and any other is unary.
-    template <typename Request>
-    std::optional<api::ServerMessage> serve(Calls& calls, uint32_t id, const Request& request) {
-        if (id <= m_last_id) {
-            return error_message(id, api::Error::INVALID_ARGUMENT,
-                                 "call id " + std::to_string(id) + " isn't larger than the last, " +
-                                     std::to_string(m_last_id));
-        }
-        m_last_id = id;
-        if (calls.size() >= kClientCalls) {
-            return error_message(id, api::Error::RESOURCE_EXHAUSTED,
-                                 std::to_string(kClientCalls) + " calls are already in progress");
-        }
-        using Result = decltype(Handle(request));
-        coro::Coro<void> adapter = [&] {
-            if constexpr (coro::Stream<Result>) return stream_call(id, request);
-            else return unary_call(id, request);
-        }();
-        auto [cancel_tx, cancel_rx] = coro::oneshot_channel<void>();
-        coro::JoinHandle<void> task =
-            coro::build_task()
-                .name("ws_call")
-                .spawn(run_call(id, std::move(adapter), std::move(cancel_rx), m_out.clone(), m_done_tx->clone()));
-        calls.emplace(id, Call{std::move(task), std::move(cancel_tx)});
-        // A streaming call is something a client turned on, such as the spectrum, as is a capture; a unary call
-        // is one of many, such as each seek of the history scrubber.
-        const std::string args = request.ShortDebugString();
-        const auto name = Request::descriptor()->name();
-        if constexpr (coro::Stream<Result> || std::is_same_v<Request, api::CaptureRequest>)
-            LOGF(INFO, "websocket call %u: %s started%s%s", id, name, args.empty() ? "" : ": ", args);
-        else
-            VLOGF(1, "websocket call %u: %s started%s%s", id, name, args.empty() ? "" : ": ", args);
-        return std::nullopt;
-    }
-
-    // An id that isn't in progress is ignored: its `end` is already queued.
-    static void cancel(Calls& calls, uint32_t id) {
-        auto it = calls.find(id);
-        if (it != calls.end()) (void)it->second.cancel.send();
-    }
-
-    // One call: its adapter, unless the client cancels it first. The adapter sends the call's `end`, unless
-    // the cancel wins; then select() drops and drains the adapter, stopping the handler, before this sends
-    // `end` with CANCELLED. Either way, nothing of the call is sent after its `end`.
-    static coro::Coro<void> run_call(uint32_t id, coro::Coro<void> adapter, coro::OneshotReceiver<void> cancel,
-                                     coro::MpscSender<std::string> out, coro::MpscSender<uint32_t> done) {
-        auto won = co_await coro::select(std::move(adapter), cancel.recv());
-        if (won.index() == 1) {
-            // The cancel's sender is only dropped without sending on disconnect, when this task is dropped too.
-            if (!std::get<1>(won).value) co_return;
-            co_await send(out, error_message(id, api::Error::CANCELLED, "cancelled"));
-            LOGF(INFO, "websocket call %u: cancelled", id);
-        }
-        (void)co_await done.send(id);
-    }
-
-    // `request` lives in this frame, so the handler can keep a reference to it.
-    template <typename Request>
-    coro::Coro<void> unary_call(uint32_t id, Request request) {
-        coro::MpscSender<std::string> out = m_out.clone();
-        api::ServerMessage reply;
-        reply.set_id(id);
-        reply.set_end(true);
-        try {
-            put(reply, co_await Handle(request));
-        } catch (...) {
-            set_error(reply, std::current_exception());
-        }
-        co_await send(out, reply);
-        VLOGF(1, "websocket call %u: ended%s", id, reply.has_error() ? " with an error" : "");
-    }
-
-    // Each item goes out before the handler is asked for the next, so a client that reads slowly holds the
-    // handler back at its co_yield.
-    template <typename Request>
-    coro::Coro<void> stream_call(uint32_t id, Request request) {
-        coro::MpscSender<std::string> out = m_out.clone();
-        api::ServerMessage last;
-        last.set_id(id);
-        last.set_end(true);
-        try {
-            auto stream = Handle(request);
-            while (auto item = co_await coro::next(stream)) {
-                api::ServerMessage msg;
-                msg.set_id(id);
-                put(msg, std::move(*item));
-                if (!co_await send(out, msg)) co_return;
-            }
-        } catch (...) {
-            set_error(last, std::current_exception());
-        }
-        co_await send(out, last);
-        LOGF(INFO, "websocket call %u: ended%s", id, last.has_error() ? " with an error" : "");
-    }
-
-    // --- The handlers, one per request type in ClientMessage. A handler fails by throwing a CallError. ---
+    ApiHandlers(ApiReceivers live, std::optional<AircraftHistory> history, Settings settings)
+        : m_live(std::move(live)), m_history(std::move(history)), m_settings(settings) {}
 
     coro::Coro<api::ServerInfo> Handle(const api::ServerInfoRequest&) {
         api::ServerInfo info;
@@ -391,7 +218,8 @@ private:
                 sent_aircraft = std::move(now_aircraft);
                 sent_status = std::move(now_status);
             }
-            if (has_anything(update)) co_yield std::exchange(update, api::Update{});
+            if (update.frames_size() > 0 || update.aircraft_size() > 0 || update.has_input_status())
+                co_yield std::exchange(update, api::Update{});
         }
     }
 
@@ -399,7 +227,17 @@ private:
     coro::CoroStream<api::SpectrumRow> Handle(const api::SpectrumRequest&) {
         if (!m_settings.live) throw CallError(api::Error::NO_LIVE_INPUT, "the server has no live input");
         auto live = m_live.live.resubscribe();
-        SpectrumViewer viewer(m_live.settings.clone());
+        coro::WatchSender<PipelineSettings> settings = m_live.settings.clone();
+        settings.send_if_modified([](PipelineSettings& s) {
+            ++s.spectrum_viewers;
+            return true;
+        });
+        coro::Defer uncount([&settings] {
+            settings.send_if_modified([](PipelineSettings& s) {
+                --s.spectrum_viewers;
+                return true;
+            });
+        });
         for (;;) {
             // As in the subscription, a slow client holds this at its co_yield until the ring overtakes it.
             auto item = co_await live.recv();
@@ -439,91 +277,328 @@ private:
     }
 
     coro::Coro<api::Snapshot> Handle(const api::SnapshotRequest& request) {
-        AircraftHistory db = history();
-        co_return answered(co_await db.snapshot(request));
+        if (!m_history) throw CallError(api::Error::NO_HISTORY, "the server has no history database");
+        AircraftHistory db = m_history->clone();
+        auto reply = co_await db.snapshot(request);
+        if (!reply) throw CallError(api::Error::INTERNAL, "the history query failed");  // the history task logged why
+        co_return std::move(*reply);
     }
 
     coro::Coro<api::AircraftHistory> Handle(const api::AircraftHistoryRequest& request) {
-        AircraftHistory db = history();
-        co_return answered(co_await db.aircraft(request));
+        if (!m_history) throw CallError(api::Error::NO_HISTORY, "the server has no history database");
+        AircraftHistory db = m_history->clone();
+        auto reply = co_await db.aircraft(request);
+        if (!reply) throw CallError(api::Error::INTERNAL, "the history query failed");  // the history task logged why
+        co_return std::move(*reply);
     }
 
     coro::Coro<api::Activity> Handle(const api::ActivityRequest& request) {
-        AircraftHistory db = history();
-        co_return answered(co_await db.activity(request));
+        if (!m_history) throw CallError(api::Error::NO_HISTORY, "the server has no history database");
+        AircraftHistory db = m_history->clone();
+        auto reply = co_await db.activity(request);
+        if (!reply) throw CallError(api::Error::INTERNAL, "the history query failed");  // the history task logged why
+        co_return std::move(*reply);
     }
 
     coro::Coro<api::Heatmap> Handle(const api::HeatmapRequest& request) {
-        AircraftHistory db = history();
+        if (!m_history) throw CallError(api::Error::NO_HISTORY, "the server has no history database");
+        AircraftHistory db = m_history->clone();
         if (!(request.east() > request.west()) || !(request.north() > request.south())) {  // NaN too
             throw CallError(api::Error::INVALID_ARGUMENT,
                             "the heatmap's area is empty: east must be over west, and north over south");
         }
-        co_return answered(co_await db.heatmap(request));
+        auto reply = co_await db.heatmap(request);
+        if (!reply) throw CallError(api::Error::INTERNAL, "the history query failed");  // the history task logged why
+        co_return std::move(*reply);
     }
 
-    // For the history calls: a clone of m_history, or CallError NO_HISTORY without one.
-    AircraftHistory history() const {
-        if (!m_history) throw CallError(api::Error::NO_HISTORY, "the server has no history database");
-        return m_history->clone();
-    }
-
-    // A history query's reply, or CallError INTERNAL for a query that failed: the history task has logged why.
-    template <typename Reply>
-    static Reply answered(std::optional<Reply> reply) {
-        if (!reply) throw CallError(api::Error::INTERNAL, "the history query failed");
-        return std::move(*reply);
-    }
-
+private:
     ApiReceivers m_live;
     std::optional<AircraftHistory> m_history;
     Settings m_settings;
+};
+
+/**
+ * One client's connection: reads its ClientMessages, runs each call's Handle in a task of its own, and writes what
+ * the calls send.
+ *
+ * Each call's task is tagged with its id. The task sends the call's other messages on `m_out` and returns its last;
+ * read_socket() sends that as the call's `end`, or an Error if the task failed or was cancelled. So every call gets
+ * exactly one `end`, after the rest of its messages.
+ *
+ * The calls' tasks use this object, so it must outlive read_socket(): see serve().
+ */
+class ApiConnection {
+public:
+    // Most calls one connection may have in progress at once.
+    static constexpr size_t kClientCalls = 8;
+
+    ApiConnection(ApiHandlers handlers, coro::MpscSender<std::string> out)
+        : m_handlers(std::move(handlers)), m_out(std::move(out)) {}
+
+    // Serves the client on `ws` until it disconnects or a send times out. `conn` is a parameter, not a local, since
+    // its calls are drained after this body finishes: a parameter is destroyed after that, and a local before.
+    // `out` is what `conn` sends on.
+    static coro::Coro<void> serve(coro::WsStream ws, ApiConnection conn, coro::MpscReceiver<std::string> out) {
+        try {
+            // Whichever throws first, on disconnect or a slow send, cancels the other.
+            co_await coro::join(conn.read_socket(ws), write_socket(ws, std::move(out)));
+        } catch (const std::exception& e) {
+            LOGF(INFO, "websocket client ended: %s", e.what());
+        }
+    }
+
+private:
+    // A client stream's requests, for its handler: `first`, from the message that started the call, then each
+    // later message's, up to the client's `end`. Input that ends without one was cut off: read_socket() closed the
+    // call's queue when it was full.
+    template<typename Request>
+    static coro::CoroStream<Request> client_requests(Request first, bool end,
+                                                     coro::MpscReceiver<api::ClientMessage> in) {
+        co_yield std::move(first);
+        while (!end) {
+            auto msg = co_await in.recv();
+            if (!msg) {
+                throw CallError(api::Error::RESOURCE_EXHAUSTED,
+                                "the client sent more than " + std::to_string(kCallInputQueue) +
+                                    " messages ahead of the call");
+            }
+            end = msg->end();
+            if (end && msg->call_case() == api::ClientMessage::CALL_NOT_SET) co_return;
+            Request* request = nullptr;
+#define ADSB_REQUEST_OF(CASE, FIELD, TYPE)                                                           \
+    if constexpr (std::is_same_v<Request, api::TYPE>) {                                              \
+        if (msg->call_case() == api::ClientMessage::CASE) request = msg->mutable_##FIELD();          \
+    }
+            ADSB_API_CALLS(ADSB_REQUEST_OF)
+#undef ADSB_REQUEST_OF
+            if (!request) throw CallError(api::Error::INVALID_ARGUMENT, "a message for another kind of call");
+            co_yield std::move(*request);
+        }
+    }
+
+    /**
+     * The connection's only reader: acts on each ClientMessage the client sends on `ws`, and sends each call's
+     * `end` when its task finishes, until the client disconnects, which throws. Calls still in progress then are
+     * cancelled.
+     */
+    coro::Coro<void> read_socket(coro::WsStream& ws) {
+        struct Call {
+            coro::CancelHandle task;
+            // A client stream's input, until the client's `end` or a full queue closes it; unset for other calls.
+            std::optional<coro::MpscSender<api::ClientMessage>> in;
+            bool notable = false;  // logged at INFO, not VLOGF(1)
+        };
+        // A local, not a member: read_socket()'s frame is destroyed however it ends, dropping each call's task,
+        // which cancels it, while this object, which the tasks use, still exists.
+        coro::JoinSet<api::ServerMessage, uint32_t> tasks;  // each tagged with its call's id
+        std::unordered_map<uint32_t, Call> active;           // each call until read_socket() has its outcome
+        for (;;) {
+            // Dropping a pending receive() loses nothing: a message that arrives meanwhile waits for the next.
+            auto woke = co_await coro::select(
+                ws.receive(), coro::when(!tasks.empty(), [&] { return coro::next(tasks); }));
+            if (woke.index() == 1) {
+                // when() skips an empty set, so there's an outcome.
+                coro::JoinResult<api::ServerMessage, uint32_t> done = std::move(*std::get<1>(woke).value);
+                const uint32_t id = done.tag();
+                const bool notable = active.at(id).notable;
+                active.erase(id);
+                api::ServerMessage last;
+                if (done.has_value()) last = std::move(done).value();
+                last.set_id(id);
+                last.set_end(true);
+                if (std::exception_ptr e = done.exception()) set_error(last, e);
+                if (done.is_cancelled()) last = error_message(id, api::Error::CANCELLED, "cancelled by the client");
+                const char* how = done.is_cancelled() ? " cancelled" : last.has_error() ? " with an error" : "";
+                if (notable)
+                    LOGF(INFO, "websocket call %u: ended%s", id, how);
+                else
+                    VLOGF(1, "websocket call %u: ended%s", id, how);
+                co_await send(m_out, last);
+                continue;
+            }
+
+            coro::WsStream::Message& frame = std::get<0>(woke).value;
+            if (frame.is_text) {
+                LOGF(WARNING, "ignoring a websocket text message (%zu bytes): the API's messages are binary",
+                     frame.data.size());
+                continue;
+            }
+            api::ClientMessage msg;
+            if (!msg.ParseFromArray(frame.data.data(), static_cast<int>(frame.data.size()))) {
+                LOGF(WARNING, "ignoring a websocket client message that isn't a ClientMessage (%zu bytes)",
+                     frame.data.size());
+                continue;
+            }
+            VLOGF(2, "websocket client sent: %s", msg.ShortDebugString());
+            const uint32_t id = msg.id();
+            const bool end = msg.end();
+
+            // A cancel's id is the call to cancel. One not in progress is ignored: its `end` is already queued.
+            if (msg.call_case() == api::ClientMessage::kCancel) {
+                if (auto it = active.find(id); it != active.end()) it->second.task.cancel();
+                continue;
+            }
+
+            // A later message of a client-streaming call: the call's own task unwraps it.
+            if (auto it = active.find(id); it != active.end()) {
+                Call& call = it->second;
+                if (!call.in) {
+                    LOGF(WARNING, "ignoring a websocket client message for call %u, which takes no more input", id);
+                    continue;
+                }
+                // Not send(): waiting for room would hold back every call on the connection, including a cancel
+                // of this one.
+                auto sent = call.in->try_send(std::move(msg));
+                if (!sent && sent.error().kind == coro::TrySendError<api::ClientMessage>::Kind::Full) {
+                    TRACE_PLOT("ws call input dropped", int64_t{1});
+                    LOGF(WARNING, "websocket call %u: the client sent more than %zu messages ahead of it, so it fails "
+                         "once it has handled those",
+                         id, kCallInputQueue);
+                }
+                // Closing the queue ends the call's input once it has taken what's queued.
+                if (!sent || end) call.in.reset();
+                continue;
+            }
+
+            // A new call: start it in a task of its own, tagged with its id. One whose Handle takes a stream of
+            // requests gets them through a queue; any other gets its request. Returns the reply refusing the call,
+            // if it's refused.
+            auto start = [&]<typename Request>(Request request) -> std::optional<api::ServerMessage> {
+                if (id <= m_last_id) {
+                    return error_message(id, api::Error::INVALID_ARGUMENT,
+                                         "call id " + std::to_string(id) + " isn't larger than the last, " +
+                                             std::to_string(m_last_id));
+                }
+                m_last_id = id;
+                if (active.size() >= kClientCalls) {
+                    return error_message(id, api::Error::RESOURCE_EXHAUSTED,
+                                         std::to_string(kClientCalls) + " calls are already in progress");
+                }
+                const std::string args = request.ShortDebugString();
+                // A streaming call is something a client turned on, such as the spectrum, as is a capture; a
+                // unary call is one of many, such as each seek of the history scrubber.
+                Call call{.task = {},
+                          .in = std::nullopt,
+                          .notable = kTakesStream<Request> || kReturnsStream<Request> ||
+                                     std::is_same_v<Request, api::CaptureRequest>};
+                if constexpr (kTakesStream<Request>) {
+                    auto [in_tx, in_rx] = coro::mpsc_channel<api::ClientMessage>(kCallInputQueue);
+                    if (!end) call.in = std::move(in_tx);
+                    call.task = tasks
+                                    .build_task(id, run_call(id, client_requests(std::move(request), end,
+                                                                                 std::move(in_rx))))
+                                    .name("ws_call")
+                                    .spawn();
+                } else {
+                    call.task = tasks.build_task(id, run_call(id, std::move(request))).name("ws_call").spawn();
+                }
+                const auto name = Request::descriptor()->name();
+                if (call.notable)
+                    LOGF(INFO, "websocket call %u: %s started%s%s", id, name, args.empty() ? "" : ": ", args);
+                else
+                    VLOGF(1, "websocket call %u: %s started%s%s", id, name, args.empty() ? "" : ": ", args);
+                active.emplace(id, std::move(call));
+                return std::nullopt;
+            };
+            std::optional<api::ServerMessage> refused;
+            // No default: a call added to the .proto and missing from ADSB_API_CALLS is a -Wswitch warning.
+            switch (msg.call_case()) {
+#define ADSB_START_CALL(CASE, FIELD, TYPE) \
+    case api::ClientMessage::CASE: refused = start(std::move(*msg.mutable_##FIELD())); break;
+                ADSB_API_CALLS(ADSB_START_CALL)
+#undef ADSB_START_CALL
+            case api::ClientMessage::kCancel: break;  // handled above
+            case api::ClientMessage::CALL_NOT_SET:    // a call newer than this server, or none at all
+                refused = error_message(id, api::Error::UNIMPLEMENTED, "unknown call");
+                break;
+            }
+            // A refusal waits here for room in `m_out`, holding the reader back; only a client that sends bad
+            // calls faster than it reads replies is held back by it.
+            if (refused) co_await send(m_out, *refused);
+        }
+    }
+
+    // The connection's only writer: sends each message the calls queue, in the order they queued them. Throws
+    // when a send takes over kSendTimeout.
+    static coro::Coro<void> write_socket(coro::WsStream& ws, coro::MpscReceiver<std::string> out) {
+        while (auto msg = co_await out.recv()) {
+            auto sent = co_await coro::timeout(kSendTimeout, ws.send(std::as_bytes(std::span(*msg))));
+            if (sent.index() != 0) {
+                throw std::runtime_error("a send took over " + std::to_string(kSendTimeout.count()) +
+                                         " s, so the client is closed");
+            }
+        }
+    }
+
+    // A call's kind comes from its Handle: whether it takes a stream of requests, and whether it returns a
+    // coro::Stream.
+    template<typename Request>
+    static constexpr bool kTakesRequest = requires(ApiHandlers& h, const Request& r) { h.Handle(r); };
+    template<typename Request>
+    static constexpr bool kTakesStream =
+        requires(ApiHandlers& h, coro::CoroStream<Request> in) { h.Handle(std::move(in)); };
+    template<typename Request>
+    static constexpr bool kReturnsStream =
+        requires(ApiHandlers& h, const Request& r) {
+            { h.Handle(r) } -> coro::Stream;
+        } || requires(ApiHandlers& h, coro::CoroStream<Request> in) {
+            { h.Handle(std::move(in)) } -> coro::Stream;
+        };
+
+    // The run_call() overloads, one per kind of call, each return the call's last message for read_socket() to send
+    // as its `end`. The request or requests live in the frame, so the handler can keep a reference to them.
+
+    template<typename Request>
+        requires(kTakesRequest<Request> && !kReturnsStream<Request>)
+    coro::Coro<api::ServerMessage> run_call(uint32_t, Request request) {
+        api::ServerMessage reply;
+        put(reply, co_await m_handlers.Handle(request));
+        co_return reply;
+    }
+
+    template<typename Request>
+        requires(kTakesRequest<Request> && kReturnsStream<Request>)
+    coro::Coro<api::ServerMessage> run_call(uint32_t id, Request request) {
+        co_return co_await send_items(id, m_handlers.Handle(request));
+    }
+
+    template<typename Request>
+        requires(kTakesStream<Request> && !kReturnsStream<Request>)
+    coro::Coro<api::ServerMessage> run_call(uint32_t, coro::CoroStream<Request> requests) {
+        api::ServerMessage reply;
+        put(reply, co_await m_handlers.Handle(std::move(requests)));
+        co_return reply;
+    }
+
+    template<typename Request>
+        requires(kTakesStream<Request> && kReturnsStream<Request>)
+    coro::Coro<api::ServerMessage> run_call(uint32_t id, coro::CoroStream<Request> requests) {
+        co_return co_await send_items(id, m_handlers.Handle(std::move(requests)));
+    }
+
+    // A streaming handler's items, each sent before it's asked for the next, so a client that reads slowly holds
+    // the handler back at its co_yield. Returns the stream's `end`, which has no body.
+    template<coro::Stream Items>
+    coro::Coro<api::ServerMessage> send_items(uint32_t id, Items items) {
+        coro::MpscSender<std::string> out = m_out.clone();
+        while (auto item = co_await coro::next(items)) {
+            api::ServerMessage msg;
+            msg.set_id(id);
+            put(msg, std::move(*item));
+            if (!co_await send(out, msg)) break;
+        }
+        co_return api::ServerMessage{};
+    }
+
+    ApiHandlers m_handlers;
     coro::MpscSender<std::string> m_out;
-    std::optional<coro::MpscSender<uint32_t>> m_done_tx;  // optional only to be filled in the constructor
-    std::optional<coro::MpscReceiver<uint32_t>> m_done_rx;
     uint32_t m_last_id = 0;
 };
 
-// Queues each binary message for the connection. Throws when the client disconnects.
-coro::Coro<void> read_socket(coro::WsStream& ws, coro::MpscSender<std::vector<std::byte>> in) {
-    for (;;) {
-        coro::WsStream::Message msg = co_await ws.receive();
-        if (msg.is_text) {
-            LOGF(WARNING, "ignoring a websocket text message (%zu bytes): the API's messages are binary",
-                 msg.data.size());
-            continue;
-        }
-        if (!co_await in.send(std::move(msg.data))) co_return;
-    }
-}
+#undef ADSB_API_CALLS
 
-// The connection's only writer: sends each message the calls queue, in the order they queued them. Throws
-// when a send takes over kSendTimeout.
-coro::Coro<void> write_socket(coro::WsStream& ws, coro::MpscReceiver<std::string> out) {
-    while (auto msg = co_await out.recv()) {
-        auto sent = co_await coro::timeout(kSendTimeout, ws.send(std::as_bytes(std::span(*msg))));
-        if (sent.index() != 0) {
-            throw std::runtime_error("a send took over " + std::to_string(kSendTimeout.count()) +
-                                     " s, so the client is closed");
-        }
-    }
-}
-
-// `conn` is a parameter, not a local, since its calls are drained after this body finishes: a parameter is
-// destroyed after that, and a local before. `out` is what `conn` sends on.
-coro::Coro<void> handle_connection(coro::WsStream ws, ApiConnection conn, coro::MpscReceiver<std::string> out) {
-    try {
-        auto [in_tx, in_rx] = coro::mpsc_channel<std::vector<std::byte>>(kReadQueue);
-        // Whichever throws first, on disconnect or a slow send, cancels the others.
-        co_await coro::join(read_socket(ws, std::move(in_tx)),
-                            conn.run(std::move(in_rx)),
-                            write_socket(ws, std::move(out)));
-    } catch (const std::exception& e) {
-        LOGF(INFO, "websocket client ended: %s", e.what());
-    }
-}
-
-coro::Coro<void> run(uint16_t port, ApiReceivers inputs, ApiConnection::Settings settings,
+coro::Coro<void> run(uint16_t port, ApiReceivers inputs, ApiHandlers::Settings settings,
                      std::optional<AircraftHistory> history) {
     coro::WsListener listener = co_await coro::WsListener::bind("0.0.0.0", port);
     LOGF(INFO, "websocket listening on port %u: an update every %g s unless a subscription asks otherwise, %s, %s, "
@@ -547,12 +622,9 @@ coro::Coro<void> run(uint16_t port, ApiReceivers inputs, ApiConnection::Settings
                                            inputs.input_status.clone(), inputs.settings.clone(),
                                            inputs.captures.clone()};
                 auto [out_tx, out_rx] = coro::mpsc_channel<std::string>(kWriteQueue);
-                clients
-                    .build_task(handle_connection(
-                        std::move(ws),
-                        ApiConnection(std::move(client_inputs), std::move(client_history), settings,
-                                      std::move(out_tx)),
-                        std::move(out_rx)))
+                ApiConnection conn(ApiHandlers(std::move(client_inputs), std::move(client_history), settings),
+                                   std::move(out_tx));
+                clients.build_task(ApiConnection::serve(std::move(ws), std::move(conn), std::move(out_rx)))
                     .name("ws_client")
                     .spawn();
                 LOGF(INFO, "websocket client connected");
@@ -585,7 +657,7 @@ void api_server_spawn(uint16_t port, std::chrono::nanoseconds default_interval, 
     // Detached: run() accepts clients until the runtime's destructor cancels and drains it.
     coro::build_task()
         .name("ws_accept")
-        .spawn(run(port, std::move(inputs), ApiConnection::Settings{default_interval, live, capture},
+        .spawn(run(port, std::move(inputs), ApiHandlers::Settings{default_interval, live, capture},
                    std::move(history)))
         .detach();
 }

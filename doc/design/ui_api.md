@@ -1,6 +1,6 @@
 # UI API: protobuf calls over the WebSocket
 
-Status: proposal, revised after a first review.
+Status: implemented.
 
 This replaces the JSON between `adsb` and the UI with protobuf messages defined in one `.proto` file, and
 turns everything the UI and `adsb` say to each other into calls. A call is a request message with an id,
@@ -53,20 +53,23 @@ or a `ServerMessage` from `adsb`. Text frames are refused (logged and dropped).
 **Everything is a call.** Nothing is sent unasked. On connect, the UI calls `server_info` to learn what this
 server offers, `subscribe` for live updates, and `snapshot` for the history if there is one.
 
-**Two kinds of call, for now:**
+**Four kinds of call:**
 
-- **Unary:** one request, one reply. `server_info` and the history queries.
+- **Unary:** one request, one reply. `server_info`, `capture` and the history queries.
 - **Server streaming:** one request, then replies until the server ends the call or the client cancels it.
-  `subscribe`, whose replies are the live updates.
+  `subscribe`, whose replies are the live updates, and `spectrum`.
+- **Client streaming:** requests until the client ends its side, then one reply.
+- **Bidirectional:** requests and replies, each side ending its own.
 
-Client streaming and bidirectional calls fit the same envelope (see
-[Later: client streams](#later-client-streams)) and are left out until a call needs one.
+The server supports all four, though no call streams from the client yet. See
+[Client streams](#client-streams) for how a client sends one.
 
 **The rules:**
 
 - **Ids strictly increase** within a connection, starting at 1. The UI uses a counter. The server rejects
-  an id that isn't larger than the last one it saw with `INVALID_ARGUMENT`. Since an id is never reused,
-  a late message about a finished call can never be mistaken for a newer one.
+  a new call whose id isn't larger than the last one it saw with `INVALID_ARGUMENT`. Since an id is never
+  reused, a late message about a finished call can never be mistaken for a newer one. A cancel, and a
+  client stream's later messages, carry the id of the call they belong to.
 - **Every call ends with exactly one message marked `end`.** It's the reply of a unary call, or the last
   message of a stream. That message holds a reply, an `Error`, or, for a stream that simply finished,
   nothing. The UI can clear its record of a call on `end`, whatever else the message holds.
@@ -118,8 +121,11 @@ package adsb.api.v1;
 // ---- Envelopes ----
 
 message ClientMessage {
-  uint32 id = 1;  // larger than every earlier id on this connection; for cancel, the call to cancel
-  oneof call {
+  // A new call's: larger than every earlier id on this connection. For cancel, the call to cancel; for a later
+  // message of a client-streaming call, that call.
+  uint32 id = 1;
+  bool end = 15;  // a client-streaming call's last message: the client sends no more on it
+  oneof call {    // unset only on an `end` with no last request
     Cancel cancel = 2;
     ServerInfoRequest server_info = 3;
     SubscribeRequest subscribe = 4;
@@ -150,11 +156,12 @@ message Error {
   enum Code {
     CODE_UNSPECIFIED = 0;
     UNIMPLEMENTED = 1;       // a call this server doesn't know
-    INVALID_ARGUMENT = 2;    // e.g. an id not larger than the last, or an empty heatmap area
+    INVALID_ARGUMENT = 2;    // e.g. an id not larger than the last, an empty heatmap area, or a client stream's
+                             // message for another kind of call
     NO_HISTORY = 3;          // a history call without --history-db
     INTERNAL = 4;            // the handler failed; the server logged why
     CANCELLED = 5;           // the client cancelled it
-    RESOURCE_EXHAUSTED = 6;  // kClientCalls calls already in progress
+    RESOURCE_EXHAUSTED = 6;  // kClientCalls calls already in progress, or a client stream sent too far ahead
   }
   Code code = 1;
   string message = 2;
@@ -348,175 +355,193 @@ Choices in the sketch worth a look:
 - **`Update` groups by kind.** Today's update interleaves frames and spectrum rows in published order. The
   UI handles them separately, so nothing depends on that.
 
-### Later: client streams
+### Client streams
 
-A client-streaming or bidirectional call would send several `ClientMessage`s with the call's id, the
-first one starting it. That needs two more things:
+A client-streaming or bidirectional call is several `ClientMessage`s with the call's id:
 
-- an exception to the strictly increasing ids, for a call's later messages;
-- `bool end` in `ClientMessage`, for the client's half-close.
-
-Neither costs anything to add when a call first needs it, so neither is in the sketch.
+- **The first starts the call,** with a new id, as any call does.
+- **Each later one carries the next request** in the same `oneof` case. One for another kind of call fails
+  the call with `INVALID_ARGUMENT`.
+- **`end` is the client's half-close.** The message that sets it may carry a last request, or none, with
+  `call` unset. A call whose first message sets `end` has just the one request.
+- **The server queues up to `kCallInputQueue` (16) requests** for the call's handler. A client that sends
+  more before the handler takes them has its queue closed: the call fails with `RESOURCE_EXHAUSTED` once it
+  has handled the 16. The reader never waits for room, so a full queue can't hold back the connection's
+  other calls, or a cancel.
+- **A later message for a call that takes no more input,** one that doesn't stream from the client or has
+  already sent `end`, is logged and dropped. A reply with its id would collide with the call's own `end`.
 
 ## The server
 
 All of it is in `src/output/api_server.cpp`, replacing `ws_publisher.*`. Its header has only what the rest
 of the program uses: the channels the pipeline publishes on, and `api_server_spawn()`. Everything else is
-in the `.cpp`'s anonymous namespace:
+in the `.cpp`'s anonymous namespace, in this order:
 
-- **The transport:** the listener, one task per connection, and the connection's reader and single writer.
-- **`ApiConnection`,** one per connection: the routing, the calls in progress and their cancellation, the
-  turning of handlers' results into replies, and the handlers themselves, as private `Handle()` overloads.
+- **`ApiHandlers`:** the calls, as `Handle()` overloads. They know nothing of the transport.
+- **`ADSB_API_CALLS`:** the list of calls, an X-macro.
+- **`ApiConnection`,** one per connection: the reader and the single writer, the routing, the calls in
+  progress and their cancellation, and the turning of handlers' results into replies.
+- **The listener,** with one task per connection.
 
-The handlers are methods of the connection, not a class of their own. coro's gRPC example keeps them apart
-because it has to fit gRPC's generated code; here all of the code is ours, so one class keeps it simple.
+The handlers come first, as the part a new call adds to. coro's gRPC example keeps its handlers apart from
+its transport for the same reason.
 
 ### Handlers
 
-A handler is a coroutine member of `ApiConnection` that takes its request. What it returns decides what kind
-of call it serves. Every handler is called `Handle`: the requests are all different message types, so they
-overload on the parameter.
+A handler is a coroutine member of `ApiHandlers` that takes its request, or a stream of them. What it takes
+and what it returns decide what kind of call it serves. Every handler is called `Handle`: the requests are
+all different message types, so they overload on the parameter.
 
 | Call kind | Handler |
 |---|---|
 | unary | `coro::Coro<Reply> Handle(const Request&)` |
 | server streaming | `coro::CoroStream<Reply> Handle(const Request&)` |
-| client streaming (later) | `coro::Coro<Reply> Handle(coro::CoroStream<Request>)` |
-| bidirectional (later) | `coro::CoroStream<Reply> Handle(coro::CoroStream<Request>)` |
+| client streaming | `coro::Coro<Reply> Handle(coro::CoroStream<Request>)` |
+| bidirectional | `coro::CoroStream<Reply> Handle(coro::CoroStream<Request>)` |
 
 ```cpp
 // Every call runs in a task of its own, so a handler takes its own clone of anything that is for one task
 // at a time.
-class ApiConnection {
+class ApiHandlers {
 public:
     struct Settings {
         std::chrono::nanoseconds default_interval;  // --ws-interval
-        bool spectrum;
+        bool live;                                  // whether a pipeline publishes on the channels
+        bool capture;                               // whether the pipeline takes capture calls
     };
 
-    ApiConnection(ApiReceivers live, std::optional<AircraftHistory> history, Settings settings,
-                  coro::MpscSender<std::string> out);
-    coro::Coro<void> run(coro::MpscReceiver<std::vector<std::byte>> in);
-
-private:
-    // ...routing, calls in progress, and the adapters...
+    ApiHandlers(ApiReceivers live, std::optional<AircraftHistory> history, Settings settings);
 
     coro::Coro<api::ServerInfo> Handle(const api::ServerInfoRequest&);
     coro::CoroStream<api::Update> Handle(const api::SubscribeRequest&);
+    coro::CoroStream<api::SpectrumRow> Handle(const api::SpectrumRequest&);
+    coro::Coro<api::CaptureResult> Handle(const api::CaptureRequest&);
     coro::Coro<api::Snapshot> Handle(const api::SnapshotRequest&);
     coro::Coro<api::AircraftHistory> Handle(const api::AircraftHistoryRequest&);
     coro::Coro<api::Activity> Handle(const api::ActivityRequest&);
     coro::Coro<api::Heatmap> Handle(const api::HeatmapRequest&);
 
-    // For the history calls: a clone of m_history, or CallError NO_HISTORY without one.
-    AircraftHistory history() const;
-    ...
+private:
+    ApiReceivers m_live;
+    std::optional<AircraftHistory> m_history;
+    Settings m_settings;
 };
 ```
 
 - **A handler fails by throwing.** `CallError{code, message}` becomes that `Error`, such as `NO_HISTORY`
   or `INVALID_ARGUMENT`. Any other exception is logged and becomes `INTERNAL`. The return types stay plain
   replies, as in coro's example.
-- **The history calls are two lines each:**
+- **The history calls are a few lines each:**
 
     ```cpp
-    AircraftHistory db = history();
-    co_return answered(co_await db.snapshot(request));
+    if (!m_history) throw CallError(api::Error::NO_HISTORY, "the server has no history database");
+    AircraftHistory db = m_history->clone();
+    auto reply = co_await db.snapshot(request);
+    if (!reply) throw CallError(api::Error::INTERNAL, "the history query failed");  // the history task logged why
+    co_return std::move(*reply);
     ```
 
     The `AircraftHistory` queries take request messages and return replies, built on the actor's thread.
-    A query returns `nullopt` when it fails, and `answered()` turns that into `INTERNAL`. The history code
+    A query returns `nullopt` when it fails, which the handler turns into `INTERNAL`. The history code
     knows nothing of the API's error codes.
 
 ### Routing
 
-The connection's reader decodes each binary message as a `ClientMessage`, checks its id, and switches on its
-`call_case()`. Each case is one line:
+All the routing is in one loop, the connection's reader, `read_socket()`. It decodes each binary message as
+a `ClientMessage` and acts on it in this order:
+
+1. **A `cancel`** cancels the call its id names.
+2. **An id of a call in progress** is a client stream's later message. The reader passes it whole to the
+   call's input queue with `try_send()`, and the call's own task unwraps it.
+3. **Anything else is a new call.** A `switch` on its `call_case()` starts it, or refuses it.
+
+The `switch` is generated from one list of the calls, `ADSB_API_CALLS`, one line per call:
 
 ```cpp
-using api::ClientMessage;
+#define ADSB_API_CALLS(CALL)                                         \
+    CALL(kServerInfo, server_info, ServerInfoRequest)                \
+    CALL(kSubscribe, subscribe, SubscribeRequest)                    \
+    ...
+    CALL(kCapture, capture, CaptureRequest)
+
 switch (msg.call_case()) {
-case ClientMessage::kCancel: cancel(calls, id); return std::nullopt;
-case ClientMessage::kServerInfo: return serve(calls, id, msg.server_info());
-case ClientMessage::kSubscribe: return serve(calls, id, msg.subscribe());
-case ClientMessage::kSnapshot: return serve(calls, id, msg.snapshot());
-case ClientMessage::kAircraftHistory: return serve(calls, id, msg.aircraft_history());
-case ClientMessage::kActivity: return serve(calls, id, msg.activity());
-case ClientMessage::kHeatmap: return serve(calls, id, msg.heatmap());
-case ClientMessage::CALL_NOT_SET:  // a call newer than this server, or none at all
-    return error_message(id, api::Error::UNIMPLEMENTED, "unknown call");
+#define ADSB_START_CALL(CASE, FIELD, TYPE) \
+    case api::ClientMessage::CASE: refused = start(std::move(*msg.mutable_##FIELD())); break;
+    ADSB_API_CALLS(ADSB_START_CALL)
+#undef ADSB_START_CALL
+case api::ClientMessage::kCancel: break;  // handled above
+case api::ClientMessage::CALL_NOT_SET:    // a call newer than this server, or none at all
+    refused = error_message(id, api::Error::UNIMPLEMENTED, "unknown call");
+    break;
 }
 ```
 
-- **No `default`,** so a call added to the `.proto` and not routed here is a `-Wswitch` warning.
-- **A call refused at once,** for its id or the cap, comes back as the `Error` for the reader to send.
-  Every other `end` is sent by the call's own task.
-- **`serve()` is written once,** as a template. It finds the handler by overload, and picks the adapter by
-  the handler's return type:
-
-  ```cpp
-  template <typename Request>
-  std::optional<api::ServerMessage> serve(Calls& calls, uint32_t id, const Request& request) {
-      // ...refuse a repeated id, or one over the cap...
-      using Result = decltype(Handle(request));
-      coro::Coro<void> adapter = [&] {
-          if constexpr (coro::Stream<Result>) return stream_call(id, request);
-          else return unary_call(id, request);
-      }();
-      // ...spawn run_call(id, std::move(adapter), ...) and keep it in calls...
-  }
-  ```
-
-    - `coro::Stream` is coro's concept for a stream, which `CoroStream` satisfies.
-    - `unary_call()` awaits the handler and sends its reply with `end`.
-    - `stream_call()` sends each item the handler yields, then an empty message with `end`.
-    - Both catch what the handler throws and send the matching `Error` with `end`.
-    - Both take the request by value, so it lives in the call's own frame for the handler to read.
+- **No `default`,** so a call added to the `.proto` and missing from the list is a `-Wswitch` warning.
+- **A call refused at once,** for its id or the cap, gets its `Error` from the reader.
+- **`start()` is written once,** as a generic lambda over the request type. It refuses a repeated id or one
+  over the cap, then spawns the call's task. A call whose handler takes a stream of requests gets them from
+  a queue of its own; any other gets its request.
+- **A call's kind comes from two facts about its `Handle`:** whether it takes a request or a stream of them
+  (`kTakesStream`), and whether it returns a `coro::Stream` (`kReturnsStream`). They pick one of four
+  `run_call()` overloads, one per kind:
+    - a unary or client-streaming call awaits the handler and returns its reply;
+    - a server-streaming or bidirectional call sends each item the handler yields, and returns an empty
+      message;
+    - each takes its request, or stream of requests, by value, so it lives in the call's own frame for the
+      handler to read.
+- **A call's task returns its last message,** for the reader to send as the call's `end`. It never sends its
+  own `end`; see [Calls in progress and cancellation](#calls-in-progress-and-cancellation).
 - **`put()` puts a reply in its envelope.** A small overload set, `put(api::ServerMessage&, api::Snapshot)`
   and so on, picks the `body` case. A reply type without one is a compile error.
-- **A handler that doesn't exist for a request** is a compile error in `serve()`, at the case that routes
-  to it.
+- **A handler that doesn't exist for a request** is a compile error in `start()`, at the line of the list
+  that names it.
 
 ### Calls in progress and cancellation
 
-Each connection keeps its calls in a map, a local of `run()`:
+The reader keeps the calls' tasks in a JoinSet, each tagged with its call's id, and a map of the calls in
+progress beside it. Both are locals of `read_socket()`:
 
 ```cpp
 struct Call {
-    coro::JoinHandle<void> task;       // dropped on disconnect, cancelling the call
-    coro::OneshotSender<void> cancel;  // sent by cancel()
+    coro::CancelHandle task;
+    // A client stream's input, until the client's `end` or a full queue closes it; unset for other calls.
+    std::optional<coro::MpscSender<api::ClientMessage>> in;
+    bool notable = false;  // logged at INFO, not VLOGF(1)
 };
-using Calls = std::unordered_map<uint32_t, Call>;
+coro::JoinSet<api::ServerMessage, uint32_t> tasks;  // each tagged with its call's id
+std::unordered_map<uint32_t, Call> active;           // each call until read_socket() has its outcome
 ```
 
-- **Only a call's own task sends its `end`,** so every call gets exactly one, after everything else it sent.
-- **`serve()`** spawns the call's task, named `ws_call`, and keeps it under its id. The task selects
-  between its adapter and the cancel oneshot. If the cancel wins, the adapter is dropped, which stops the
-  handler at its next `co_await`, and the task sends `end` with `CANCELLED`. If the adapter wins, its `end`
-  is already queued and the cancel is never looked at.
-- **A finished call** sends its id on a small channel back to the reader, which erases it. The reader
-  selects between the socket and that channel.
-- **`cancel(id)`** sends on the call's cancel oneshot. An id that isn't in the map is ignored: its `end` is
-  already queued. The reader never queues an `end` itself, because a cancel can arrive after a call queued
-  its `end` and before the reader has erased it.
-- **On disconnect,** the map's destructor drops every task still in progress, cancelling it. Nothing is
-  left to send to.
-- **The map is a local, not a member,** because the calls' tasks use the connection. When `run()` ends,
-  however it ends, its frame is destroyed and the dropped tasks are drained while the connection still
-  exists. For the same reason the connection is a parameter of the connection's task, not a local: a
-  parameter is destroyed after that drain, a local before it. As a member, the map would be dropped with
+- **The reader sends every call's `end`,** from the call's outcome, so no call can miss it by failing or
+  being cancelled. It selects between the socket and the JoinSet's next outcome. When one arrives, its tag
+  names the call, and the reader erases the call from `active` and sends the `end`:
+    - **finished:** the message the task returned, a unary call's reply or a stream's empty `end`;
+    - **failed:** an `Error`, with a `CallError`'s code, or else `INTERNAL`;
+    - **cancelled:** `CANCELLED`.
+- **The `end` follows the call's other messages.** The task sent them on the writer's queue before it
+  finished, and the reader sends the `end` on the same queue after.
+- **A cancel** calls the call's `CancelHandle`, which stops the handler at its next `co_await`. A cancel
+  that arrives after the task finished, before the reader has its outcome, changes nothing: the call ends
+  as it finished. An id that isn't in `active` is ignored, since its `end` is already queued.
+- **On disconnect,** `read_socket()` throws and its frame is destroyed. The JoinSet's destructor cancels
+  every task still in progress and drains them. Nothing is left to send to.
+- **The JoinSet is a local, not a member,** because the calls' tasks use the connection. However
+  `read_socket()` ends, its frame is destroyed and the tasks are drained while the connection still exists.
+  For the same reason the connection is a parameter of the connection's task, `serve()`, not a local: a
+  parameter is destroyed after that drain, a local before it. As a member, the set would be dropped with
   the connection, and the tasks drained after it was gone.
-- **The cap** is the map's size: `serve()` with `kClientCalls` calls in progress fails at once with
-  `RESOURCE_EXHAUSTED`. A cancel gets through even at the cap: the reader waits only to queue its own
-  refusals, so only a client that sends bad calls faster than it reads replies holds it back.
-
-This replaces the JoinSet in today's `read_requests()`. A JoinSet can't cancel one of its tasks, and the
-map can. Calls catch everything their handlers throw, so no exception ever reaches a `JoinHandle`.
+- **The cap** is the size of `active`: a new call with `kClientCalls` calls in progress fails at once with
+  `RESOURCE_EXHAUSTED`. A call counts until the reader has its outcome. A cancel gets through even at the
+  cap: the reader waits only to queue the `end`s and its own refusals, so only a client that stops reading
+  replies holds it back.
 
 ### One writer per connection
 
-Every call sends its serialized `ServerMessage`s into one bounded channel, `kWriteQueue` (16) deep. The
-connection's writer task is the only one that sends on the socket, in the order they were queued.
+Every call sends its serialized `ServerMessage`s into one bounded channel, `kWriteQueue` (16) deep, as does
+the reader with each `end` and refusal. The connection's writer, `write_socket()`, is the only one that
+sends on the socket, in the order they were queued. It runs beside the reader in the connection's task,
+joined with `coro::join()`, so whichever throws first, on a disconnect or a send timeout, cancels the
+other.
 
 - **The waiting happens in each call's own task.** Calls run in the background for as long as they take,
   and the reader goes on reading and starting calls. When the client reads slowly, the channel fills, and a
@@ -579,13 +604,14 @@ coro::CoroStream<api::Update> Handle(const api::SubscribeRequest& request) {
 
 - **The handler's signature decides the kind of call,** and the handler never sees the transport.
 - **One adapter per kind of call,** written once and picked at compile time (`HandleNextRequest`'s tag
-  dispatch there, `serve()`'s `if constexpr` here).
+  dispatch there, the constraints on the `run_call()` overloads here).
 - **Writes paced by the client:** a stream isn't asked for its next item until the last one is on its way.
 - **A task per call,** as both designs already have.
 
 And where we differ:
 
-- **Registration is the `oneof` switch,** not method pointers, since there is no generated service.
+- **Registration is the `oneof` switch,** generated from `ADSB_API_CALLS`, not method pointers, since there
+  is no generated service.
 - **One handler name.** The example needs `Handle`, `Generate` and `Process`, because a gRPC method pointer
   fixes the parameter types and C++ can't overload on return type alone. Our requests are all different
   types, so every handler can be `Handle`.
@@ -608,7 +634,7 @@ The JSON `to_json` overloads for frames, aircraft and spectrum stay, though noth
 
 ## Pipeline settings
 
-Status: proposal, not yet implemented.
+Status: implemented, but for [Later: settings a client sets](#later-settings-a-client-sets).
 
 The spectrum becomes a call: the pipeline computes it only while at least one client is watching the
 waterfall, and `--spectrum` goes. The mechanism is a watch of settings that the server writes and the
@@ -663,34 +689,32 @@ message SpectrumRequest {}
 
 ```cpp
 coro::CoroStream<api::SpectrumRow> Handle(const api::SpectrumRequest&) {
-    if (!m_settings.live) throw CallError(api::Error::NO_LIVE_INPUT, "no live input to compute it from");
+    if (!m_settings.live) throw CallError(api::Error::NO_LIVE_INPUT, "the server has no live input");
     auto live = m_live.live.resubscribe();
-    SpectrumViewer viewer(m_live.settings.clone());
+    coro::WatchSender<PipelineSettings> settings = m_live.settings.clone();
+    settings.send_if_modified([](PipelineSettings& s) {
+        ++s.spectrum_viewers;
+        return true;
+    });
+    coro::Defer uncount([&settings] {
+        settings.send_if_modified([](PipelineSettings& s) {
+            --s.spectrum_viewers;
+            return true;
+        });
+    });
     for (;;) {
         auto item = co_await live.recv();
         // on Lagged: log and plot, as the subscription does; on closed: co_return
         if (auto* row = std::get_if<std::shared_ptr<const api::SpectrumRow>>(&*item)) co_yield **row;
     }
 }
-
-// Counts one spectrum call in PipelineSettings::spectrum_viewers, from its construction to its destruction.
-class SpectrumViewer {
-public:
-    explicit SpectrumViewer(coro::WatchSender<PipelineSettings> settings);  // adds 1
-    ~SpectrumViewer();                                                     // takes 1 away
-    SpectrumViewer(const SpectrumViewer&) = delete;
-    SpectrumViewer& operator=(const SpectrumViewer&) = delete;
-
-private:
-    coro::WatchSender<PipelineSettings> m_settings;
-};
 ```
 
-- **The guard is a local of the handler's frame,** so the count comes down however the call ends: its own
-  end, a cancel, the connection closing, or the send timeout. Each of those destroys the frame.
+- **The `coro::Defer` is a local of the handler's frame,** so the count comes down however the call ends:
+  its own end, a cancel, the connection closing, or the send timeout. Each of those destroys the frame.
 - **The rows stay on the `live` broadcast,** beside the frames, and the handler skips the frames. Splitting
   them onto a channel of their own isn't needed for this: the watch, not the channel, gates the work.
-- **`ApiConnection::Settings::spectrum` becomes `live`:** whether there's a pipeline. `api_server_spawn()`'s
+- **`ApiHandlers::Settings::spectrum` becomes `live`:** whether there's a pipeline. `api_server_spawn()`'s
   `spectrum` parameter becomes `live` too.
 
 **The branch.** When there's a server, the tee in front of `demodulate()` sends a share of each block to the
@@ -829,7 +853,7 @@ Open questions, for when the first such setting is designed:
 - `src/output/api_server.h`, `.cpp`:
     - `PipelineSettings`, and the watch in `api_channels()`;
     - the settings ends in the channel structs;
-    - `SpectrumViewer` and the spectrum handler;
+    - the spectrum handler;
     - the subscription without spectrum rows;
     - `Settings::live`.
 - `src/apps/adsb/pipeline.h`, `.cpp`: the tap reads the watch, and `--spectrum` and `enable_spectrum` go.
@@ -906,10 +930,10 @@ CREATE TABLE aircraft_updates (
 
 ## Debugging
 
-- **In `adsb`:** at `-v 2`, each connection logs every message it sends and receives as
+- **In `adsb`:** at `--verbosity 2`, each connection logs every message it sends and receives as
   `ShortDebugString()`. That's per message, which the logging guidelines put at `VLOGF(2)`. Each
   streaming call's start and end, with its id, kind, request and outcome, are logged at INFO, and each unary
-  call's at `-v 1`: the history scrubber makes one per seek.
+  call's at `--verbosity 1`: the history scrubber makes one per seek.
 - **Captures:** `protoc --decode=adsb.api.v1.ServerMessage proto/adsb/api/v1/api.proto < msg.bin` reads
   a saved message.
 - **A printing proxy** between the UI and `adsb` is a later, separate tool. It needs nothing from this
@@ -996,7 +1020,8 @@ Old formats aren't kept, so the server and the UI switch together in the second.
 1. **Our own calls over the WebSocket, not gRPC.** Recommended, for the reasons above.
 2. **Everything is a call,** including server info and the live updates, and nothing is pushed.
    Recommended: one mechanism, and the client chooses what it gets.
-3. **Unary and server streaming now,** client streaming and bidirectional when a call needs them.
+3. **All four kinds of call,** each deduced from its `Handle`'s signature, though only unary and server
+   streaming have a call yet.
 4. **A connection's ninth call is refused,** rather than the reader pausing as it does today. Recommended,
    so a cancel always gets through. `kClientCalls` is 8: a subscription and one of each history call is 5.
 5. **Ids strictly increase,** so they're never reused and a stale message can't match a newer call.
