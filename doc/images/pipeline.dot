@@ -70,10 +70,11 @@ digraph pipeline {
     UI [shape=box, style="rounded,filled", fillcolor="#dcfce7", color="#16a34a", label=<<b>UI</b>>];
 
     // Rows, top to bottom.
-    { rank=same; TEE; SPEC; CAPI; }
-    { rank=same; PAR -> SINK [style=invis]; CAPR; }
-    { rank=same; REC -> HIST [style=invis]; CALL; ACC; CAPE; }
-
+    { rank=same; TEE; }
+    { rank=same; PAR -> SINK [style=invis]; SPEC; CAPR; }
+    { rank=same; CALL; ACC; }
+    { rank=same; READ; WRITE; REC -> HIST [style=invis]; CAPI; CAPE; }
+    { rank=same; H5; DB; SIGMF; UI; }
     // The main chain.
     SRC:file:s -> STITCH [label="buffered,\n4 blocks"];
     SRC:vita49:s -> STITCH [label="mpsc, 64 MiB"];
@@ -96,15 +97,14 @@ digraph pipeline {
     HIST -> DB [dir=both];
 
     // Capture.
-    CAPR -> CAPI [label="mpsc, 2", style=dashed, constraint=false];
+    CAPR -> CAPI [label="mpsc, 2", style=dashed];
     CAPR -> CAPE [label="mpsc, 2", style=dashed];
-    CAPE -> DEMOD [label="copy envelope:\nwatch", style=dashed, constraint=false];
     CAPI -> SIGMF;
     CAPE -> SIGMF;
 
     // Into and out of the WebSocket server.
     SPEC -> CALL [label="spectrum:\nbroadcast, 64", style=dashed];
-    SRC:vita49:s -> CALL [label="input status: watch", style=dashed, constraint=false];
+    //SRC:vita49:s -> CALL [label="input status: watch", style=dashed, constraint=false];
     CALL -> SPEC [label="settings: watch", style=dashed, constraint=false];
     CALL -> HIST [label="queries,\noneshot replies", style=dashed, constraint=false];
     CALL -> CAPR [label="capture calls: mpsc, 4,\noneshot replies", style=dashed, constraint=false];
