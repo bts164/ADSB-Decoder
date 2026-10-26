@@ -7,6 +7,7 @@ from conan.errors import ConanException
 from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
 from conan.tools.files import load, save, update_conandata
 from conan.tools.scm import Git
+from conan.tools.system import PyEnv
 
 
 class AdsbRecipe(ConanFile):
@@ -25,7 +26,8 @@ class AdsbRecipe(ConanFile):
         "with_sidekiq": False,
         "with_uhd": True
     }
-    exports_sources = "CMakeLists.txt", "src/*", "proto/*", "tests/CMakeLists.txt", "tests/*.cpp", "scenarios/*"
+    exports_sources = ("CMakeLists.txt", "src/*", "proto/*", "tests/CMakeLists.txt", "tests/*.cpp", "tests/*.proto",
+                       "tools/protoc-gen-wsrpc", "scenarios/*")
 
     # No version attribute: this is developed and re-exported/rebuilt as
     # often as coro is (see requirements() below), so pass --version
@@ -112,7 +114,11 @@ class AdsbRecipe(ConanFile):
 
     def generate(self):
         CMakeDeps(self).generate()
+        # tools/protoc-gen-wsrpc runs on the build machine, with the Python protobuf at protoc's version.
+        pyenv = PyEnv(self)
+        pyenv.install([f"protobuf=={self.dependencies.build['protobuf'].ref.version}"])
         tc = CMakeToolchain(self)
+        tc.cache_variables["Python3_EXECUTABLE"] = pyenv.env_exe
         tc.cache_variables["ADSB_WITH_HDF5"] = bool(self.options.with_hdf5)
         tc.cache_variables["ADSB_WITH_SIDEKIQ"] = bool(self.options.with_sidekiq)
         tc.cache_variables["ADSB_WITH_UHD"] = bool(self.options.with_uhd)

@@ -10,6 +10,7 @@
 // ignore_for_file: deprecated_member_use_from_same_package, library_prefixes
 // ignore_for_file: non_constant_identifier_names
 
+import 'dart:async' as $async;
 import 'dart:core' as $core;
 
 import 'package:fixnum/fixnum.dart' as $fixnum;
@@ -21,742 +22,130 @@ export 'package:protobuf/protobuf.dart' show GeneratedMessageGenericExtensions;
 
 export 'api.pbenum.dart';
 
-enum ClientMessage_Call {
-  cancel,
-  serverInfo,
-  subscribe,
-  spectrum,
-  snapshot,
-  aircraftHistory,
-  activity,
-  heatmap,
-  capture,
-  notSet
-}
+class GetReceiverInfoRequest extends $pb.GeneratedMessage {
+  factory GetReceiverInfoRequest() => create();
 
-class ClientMessage extends $pb.GeneratedMessage {
-  factory ClientMessage({
-    $core.int? id,
-    Cancel? cancel,
-    ServerInfoRequest? serverInfo,
-    SubscribeRequest? subscribe,
-    SpectrumRequest? spectrum,
-    SnapshotRequest? snapshot,
-    AircraftHistoryRequest? aircraftHistory,
-    ActivityRequest? activity,
-    HeatmapRequest? heatmap,
-    CaptureRequest? capture,
-  }) {
-    final result = create();
-    if (id != null) result.id = id;
-    if (cancel != null) result.cancel = cancel;
-    if (serverInfo != null) result.serverInfo = serverInfo;
-    if (subscribe != null) result.subscribe = subscribe;
-    if (spectrum != null) result.spectrum = spectrum;
-    if (snapshot != null) result.snapshot = snapshot;
-    if (aircraftHistory != null) result.aircraftHistory = aircraftHistory;
-    if (activity != null) result.activity = activity;
-    if (heatmap != null) result.heatmap = heatmap;
-    if (capture != null) result.capture = capture;
-    return result;
-  }
+  GetReceiverInfoRequest._();
 
-  ClientMessage._();
-
-  factory ClientMessage.fromBuffer($core.List<$core.int> data,
+  factory GetReceiverInfoRequest.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
       create()..mergeFromBuffer(data, registry);
-  factory ClientMessage.fromJson($core.String json,
-          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
-
-  static const $core.Map<$core.int, ClientMessage_Call>
-      _ClientMessage_CallByTag = {
-    2: ClientMessage_Call.cancel,
-    3: ClientMessage_Call.serverInfo,
-    4: ClientMessage_Call.subscribe,
-    5: ClientMessage_Call.spectrum,
-    10: ClientMessage_Call.snapshot,
-    11: ClientMessage_Call.aircraftHistory,
-    12: ClientMessage_Call.activity,
-    13: ClientMessage_Call.heatmap,
-    14: ClientMessage_Call.capture,
-    0: ClientMessage_Call.notSet
-  };
-  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
-      _omitMessageNames ? '' : 'ClientMessage',
-      package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
-      createEmptyInstance: create)
-    ..oo(0, [2, 3, 4, 5, 10, 11, 12, 13, 14])
-    ..aI(1, _omitFieldNames ? '' : 'id', fieldType: $pb.PbFieldType.OU3)
-    ..aOM<Cancel>(2, _omitFieldNames ? '' : 'cancel', subBuilder: Cancel.create)
-    ..aOM<ServerInfoRequest>(3, _omitFieldNames ? '' : 'serverInfo',
-        subBuilder: ServerInfoRequest.create)
-    ..aOM<SubscribeRequest>(4, _omitFieldNames ? '' : 'subscribe',
-        subBuilder: SubscribeRequest.create)
-    ..aOM<SpectrumRequest>(5, _omitFieldNames ? '' : 'spectrum',
-        subBuilder: SpectrumRequest.create)
-    ..aOM<SnapshotRequest>(10, _omitFieldNames ? '' : 'snapshot',
-        subBuilder: SnapshotRequest.create)
-    ..aOM<AircraftHistoryRequest>(11, _omitFieldNames ? '' : 'aircraftHistory',
-        subBuilder: AircraftHistoryRequest.create)
-    ..aOM<ActivityRequest>(12, _omitFieldNames ? '' : 'activity',
-        subBuilder: ActivityRequest.create)
-    ..aOM<HeatmapRequest>(13, _omitFieldNames ? '' : 'heatmap',
-        subBuilder: HeatmapRequest.create)
-    ..aOM<CaptureRequest>(14, _omitFieldNames ? '' : 'capture',
-        subBuilder: CaptureRequest.create)
-    ..hasRequiredFields = false;
-
-  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  ClientMessage clone() => deepCopy();
-  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  ClientMessage copyWith(void Function(ClientMessage) updates) =>
-      super.copyWith((message) => updates(message as ClientMessage))
-          as ClientMessage;
-
-  @$core.override
-  $pb.BuilderInfo get info_ => _i;
-
-  @$core.pragma('dart2js:noInline')
-  static ClientMessage create() => ClientMessage._();
-  @$core.override
-  ClientMessage createEmptyInstance() => create();
-  static $pb.PbList<ClientMessage> createRepeated() =>
-      $pb.PbList<ClientMessage>();
-  @$core.pragma('dart2js:noInline')
-  static ClientMessage getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ClientMessage>(create);
-  static ClientMessage? _defaultInstance;
-
-  @$pb.TagNumber(2)
-  @$pb.TagNumber(3)
-  @$pb.TagNumber(4)
-  @$pb.TagNumber(5)
-  @$pb.TagNumber(10)
-  @$pb.TagNumber(11)
-  @$pb.TagNumber(12)
-  @$pb.TagNumber(13)
-  @$pb.TagNumber(14)
-  ClientMessage_Call whichCall() => _ClientMessage_CallByTag[$_whichOneof(0)]!;
-  @$pb.TagNumber(2)
-  @$pb.TagNumber(3)
-  @$pb.TagNumber(4)
-  @$pb.TagNumber(5)
-  @$pb.TagNumber(10)
-  @$pb.TagNumber(11)
-  @$pb.TagNumber(12)
-  @$pb.TagNumber(13)
-  @$pb.TagNumber(14)
-  void clearCall() => $_clearField($_whichOneof(0));
-
-  @$pb.TagNumber(1)
-  $core.int get id => $_getIZ(0);
-  @$pb.TagNumber(1)
-  set id($core.int value) => $_setUnsignedInt32(0, value);
-  @$pb.TagNumber(1)
-  $core.bool hasId() => $_has(0);
-  @$pb.TagNumber(1)
-  void clearId() => $_clearField(1);
-
-  @$pb.TagNumber(2)
-  Cancel get cancel => $_getN(1);
-  @$pb.TagNumber(2)
-  set cancel(Cancel value) => $_setField(2, value);
-  @$pb.TagNumber(2)
-  $core.bool hasCancel() => $_has(1);
-  @$pb.TagNumber(2)
-  void clearCancel() => $_clearField(2);
-  @$pb.TagNumber(2)
-  Cancel ensureCancel() => $_ensure(1);
-
-  @$pb.TagNumber(3)
-  ServerInfoRequest get serverInfo => $_getN(2);
-  @$pb.TagNumber(3)
-  set serverInfo(ServerInfoRequest value) => $_setField(3, value);
-  @$pb.TagNumber(3)
-  $core.bool hasServerInfo() => $_has(2);
-  @$pb.TagNumber(3)
-  void clearServerInfo() => $_clearField(3);
-  @$pb.TagNumber(3)
-  ServerInfoRequest ensureServerInfo() => $_ensure(2);
-
-  @$pb.TagNumber(4)
-  SubscribeRequest get subscribe => $_getN(3);
-  @$pb.TagNumber(4)
-  set subscribe(SubscribeRequest value) => $_setField(4, value);
-  @$pb.TagNumber(4)
-  $core.bool hasSubscribe() => $_has(3);
-  @$pb.TagNumber(4)
-  void clearSubscribe() => $_clearField(4);
-  @$pb.TagNumber(4)
-  SubscribeRequest ensureSubscribe() => $_ensure(3);
-
-  @$pb.TagNumber(5)
-  SpectrumRequest get spectrum => $_getN(4);
-  @$pb.TagNumber(5)
-  set spectrum(SpectrumRequest value) => $_setField(5, value);
-  @$pb.TagNumber(5)
-  $core.bool hasSpectrum() => $_has(4);
-  @$pb.TagNumber(5)
-  void clearSpectrum() => $_clearField(5);
-  @$pb.TagNumber(5)
-  SpectrumRequest ensureSpectrum() => $_ensure(4);
-
-  @$pb.TagNumber(10)
-  SnapshotRequest get snapshot => $_getN(5);
-  @$pb.TagNumber(10)
-  set snapshot(SnapshotRequest value) => $_setField(10, value);
-  @$pb.TagNumber(10)
-  $core.bool hasSnapshot() => $_has(5);
-  @$pb.TagNumber(10)
-  void clearSnapshot() => $_clearField(10);
-  @$pb.TagNumber(10)
-  SnapshotRequest ensureSnapshot() => $_ensure(5);
-
-  @$pb.TagNumber(11)
-  AircraftHistoryRequest get aircraftHistory => $_getN(6);
-  @$pb.TagNumber(11)
-  set aircraftHistory(AircraftHistoryRequest value) => $_setField(11, value);
-  @$pb.TagNumber(11)
-  $core.bool hasAircraftHistory() => $_has(6);
-  @$pb.TagNumber(11)
-  void clearAircraftHistory() => $_clearField(11);
-  @$pb.TagNumber(11)
-  AircraftHistoryRequest ensureAircraftHistory() => $_ensure(6);
-
-  @$pb.TagNumber(12)
-  ActivityRequest get activity => $_getN(7);
-  @$pb.TagNumber(12)
-  set activity(ActivityRequest value) => $_setField(12, value);
-  @$pb.TagNumber(12)
-  $core.bool hasActivity() => $_has(7);
-  @$pb.TagNumber(12)
-  void clearActivity() => $_clearField(12);
-  @$pb.TagNumber(12)
-  ActivityRequest ensureActivity() => $_ensure(7);
-
-  @$pb.TagNumber(13)
-  HeatmapRequest get heatmap => $_getN(8);
-  @$pb.TagNumber(13)
-  set heatmap(HeatmapRequest value) => $_setField(13, value);
-  @$pb.TagNumber(13)
-  $core.bool hasHeatmap() => $_has(8);
-  @$pb.TagNumber(13)
-  void clearHeatmap() => $_clearField(13);
-  @$pb.TagNumber(13)
-  HeatmapRequest ensureHeatmap() => $_ensure(8);
-
-  @$pb.TagNumber(14)
-  CaptureRequest get capture => $_getN(9);
-  @$pb.TagNumber(14)
-  set capture(CaptureRequest value) => $_setField(14, value);
-  @$pb.TagNumber(14)
-  $core.bool hasCapture() => $_has(9);
-  @$pb.TagNumber(14)
-  void clearCapture() => $_clearField(14);
-  @$pb.TagNumber(14)
-  CaptureRequest ensureCapture() => $_ensure(9);
-}
-
-enum ServerMessage_Body {
-  serverInfo,
-  update,
-  spectrum,
-  error,
-  snapshot,
-  aircraftHistory,
-  activity,
-  heatmap,
-  capture,
-  notSet
-}
-
-class ServerMessage extends $pb.GeneratedMessage {
-  factory ServerMessage({
-    $core.int? id,
-    $core.bool? end,
-    ServerInfo? serverInfo,
-    Update? update,
-    SpectrumRow? spectrum,
-    Error? error,
-    Snapshot? snapshot,
-    AircraftHistory? aircraftHistory,
-    Activity? activity,
-    Heatmap? heatmap,
-    CaptureResult? capture,
-  }) {
-    final result = create();
-    if (id != null) result.id = id;
-    if (end != null) result.end = end;
-    if (serverInfo != null) result.serverInfo = serverInfo;
-    if (update != null) result.update = update;
-    if (spectrum != null) result.spectrum = spectrum;
-    if (error != null) result.error = error;
-    if (snapshot != null) result.snapshot = snapshot;
-    if (aircraftHistory != null) result.aircraftHistory = aircraftHistory;
-    if (activity != null) result.activity = activity;
-    if (heatmap != null) result.heatmap = heatmap;
-    if (capture != null) result.capture = capture;
-    return result;
-  }
-
-  ServerMessage._();
-
-  factory ServerMessage.fromBuffer($core.List<$core.int> data,
-          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
-  factory ServerMessage.fromJson($core.String json,
-          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
-
-  static const $core.Map<$core.int, ServerMessage_Body>
-      _ServerMessage_BodyByTag = {
-    3: ServerMessage_Body.serverInfo,
-    4: ServerMessage_Body.update,
-    5: ServerMessage_Body.spectrum,
-    9: ServerMessage_Body.error,
-    10: ServerMessage_Body.snapshot,
-    11: ServerMessage_Body.aircraftHistory,
-    12: ServerMessage_Body.activity,
-    13: ServerMessage_Body.heatmap,
-    14: ServerMessage_Body.capture,
-    0: ServerMessage_Body.notSet
-  };
-  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
-      _omitMessageNames ? '' : 'ServerMessage',
-      package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
-      createEmptyInstance: create)
-    ..oo(0, [3, 4, 5, 9, 10, 11, 12, 13, 14])
-    ..aI(1, _omitFieldNames ? '' : 'id', fieldType: $pb.PbFieldType.OU3)
-    ..aOB(2, _omitFieldNames ? '' : 'end')
-    ..aOM<ServerInfo>(3, _omitFieldNames ? '' : 'serverInfo',
-        subBuilder: ServerInfo.create)
-    ..aOM<Update>(4, _omitFieldNames ? '' : 'update', subBuilder: Update.create)
-    ..aOM<SpectrumRow>(5, _omitFieldNames ? '' : 'spectrum',
-        subBuilder: SpectrumRow.create)
-    ..aOM<Error>(9, _omitFieldNames ? '' : 'error', subBuilder: Error.create)
-    ..aOM<Snapshot>(10, _omitFieldNames ? '' : 'snapshot',
-        subBuilder: Snapshot.create)
-    ..aOM<AircraftHistory>(11, _omitFieldNames ? '' : 'aircraftHistory',
-        subBuilder: AircraftHistory.create)
-    ..aOM<Activity>(12, _omitFieldNames ? '' : 'activity',
-        subBuilder: Activity.create)
-    ..aOM<Heatmap>(13, _omitFieldNames ? '' : 'heatmap',
-        subBuilder: Heatmap.create)
-    ..aOM<CaptureResult>(14, _omitFieldNames ? '' : 'capture',
-        subBuilder: CaptureResult.create)
-    ..hasRequiredFields = false;
-
-  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  ServerMessage clone() => deepCopy();
-  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  ServerMessage copyWith(void Function(ServerMessage) updates) =>
-      super.copyWith((message) => updates(message as ServerMessage))
-          as ServerMessage;
-
-  @$core.override
-  $pb.BuilderInfo get info_ => _i;
-
-  @$core.pragma('dart2js:noInline')
-  static ServerMessage create() => ServerMessage._();
-  @$core.override
-  ServerMessage createEmptyInstance() => create();
-  static $pb.PbList<ServerMessage> createRepeated() =>
-      $pb.PbList<ServerMessage>();
-  @$core.pragma('dart2js:noInline')
-  static ServerMessage getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ServerMessage>(create);
-  static ServerMessage? _defaultInstance;
-
-  @$pb.TagNumber(3)
-  @$pb.TagNumber(4)
-  @$pb.TagNumber(5)
-  @$pb.TagNumber(9)
-  @$pb.TagNumber(10)
-  @$pb.TagNumber(11)
-  @$pb.TagNumber(12)
-  @$pb.TagNumber(13)
-  @$pb.TagNumber(14)
-  ServerMessage_Body whichBody() => _ServerMessage_BodyByTag[$_whichOneof(0)]!;
-  @$pb.TagNumber(3)
-  @$pb.TagNumber(4)
-  @$pb.TagNumber(5)
-  @$pb.TagNumber(9)
-  @$pb.TagNumber(10)
-  @$pb.TagNumber(11)
-  @$pb.TagNumber(12)
-  @$pb.TagNumber(13)
-  @$pb.TagNumber(14)
-  void clearBody() => $_clearField($_whichOneof(0));
-
-  @$pb.TagNumber(1)
-  $core.int get id => $_getIZ(0);
-  @$pb.TagNumber(1)
-  set id($core.int value) => $_setUnsignedInt32(0, value);
-  @$pb.TagNumber(1)
-  $core.bool hasId() => $_has(0);
-  @$pb.TagNumber(1)
-  void clearId() => $_clearField(1);
-
-  @$pb.TagNumber(2)
-  $core.bool get end => $_getBF(1);
-  @$pb.TagNumber(2)
-  set end($core.bool value) => $_setBool(1, value);
-  @$pb.TagNumber(2)
-  $core.bool hasEnd() => $_has(1);
-  @$pb.TagNumber(2)
-  void clearEnd() => $_clearField(2);
-
-  @$pb.TagNumber(3)
-  ServerInfo get serverInfo => $_getN(2);
-  @$pb.TagNumber(3)
-  set serverInfo(ServerInfo value) => $_setField(3, value);
-  @$pb.TagNumber(3)
-  $core.bool hasServerInfo() => $_has(2);
-  @$pb.TagNumber(3)
-  void clearServerInfo() => $_clearField(3);
-  @$pb.TagNumber(3)
-  ServerInfo ensureServerInfo() => $_ensure(2);
-
-  @$pb.TagNumber(4)
-  Update get update => $_getN(3);
-  @$pb.TagNumber(4)
-  set update(Update value) => $_setField(4, value);
-  @$pb.TagNumber(4)
-  $core.bool hasUpdate() => $_has(3);
-  @$pb.TagNumber(4)
-  void clearUpdate() => $_clearField(4);
-  @$pb.TagNumber(4)
-  Update ensureUpdate() => $_ensure(3);
-
-  @$pb.TagNumber(5)
-  SpectrumRow get spectrum => $_getN(4);
-  @$pb.TagNumber(5)
-  set spectrum(SpectrumRow value) => $_setField(5, value);
-  @$pb.TagNumber(5)
-  $core.bool hasSpectrum() => $_has(4);
-  @$pb.TagNumber(5)
-  void clearSpectrum() => $_clearField(5);
-  @$pb.TagNumber(5)
-  SpectrumRow ensureSpectrum() => $_ensure(4);
-
-  @$pb.TagNumber(9)
-  Error get error => $_getN(5);
-  @$pb.TagNumber(9)
-  set error(Error value) => $_setField(9, value);
-  @$pb.TagNumber(9)
-  $core.bool hasError() => $_has(5);
-  @$pb.TagNumber(9)
-  void clearError() => $_clearField(9);
-  @$pb.TagNumber(9)
-  Error ensureError() => $_ensure(5);
-
-  @$pb.TagNumber(10)
-  Snapshot get snapshot => $_getN(6);
-  @$pb.TagNumber(10)
-  set snapshot(Snapshot value) => $_setField(10, value);
-  @$pb.TagNumber(10)
-  $core.bool hasSnapshot() => $_has(6);
-  @$pb.TagNumber(10)
-  void clearSnapshot() => $_clearField(10);
-  @$pb.TagNumber(10)
-  Snapshot ensureSnapshot() => $_ensure(6);
-
-  @$pb.TagNumber(11)
-  AircraftHistory get aircraftHistory => $_getN(7);
-  @$pb.TagNumber(11)
-  set aircraftHistory(AircraftHistory value) => $_setField(11, value);
-  @$pb.TagNumber(11)
-  $core.bool hasAircraftHistory() => $_has(7);
-  @$pb.TagNumber(11)
-  void clearAircraftHistory() => $_clearField(11);
-  @$pb.TagNumber(11)
-  AircraftHistory ensureAircraftHistory() => $_ensure(7);
-
-  @$pb.TagNumber(12)
-  Activity get activity => $_getN(8);
-  @$pb.TagNumber(12)
-  set activity(Activity value) => $_setField(12, value);
-  @$pb.TagNumber(12)
-  $core.bool hasActivity() => $_has(8);
-  @$pb.TagNumber(12)
-  void clearActivity() => $_clearField(12);
-  @$pb.TagNumber(12)
-  Activity ensureActivity() => $_ensure(8);
-
-  @$pb.TagNumber(13)
-  Heatmap get heatmap => $_getN(9);
-  @$pb.TagNumber(13)
-  set heatmap(Heatmap value) => $_setField(13, value);
-  @$pb.TagNumber(13)
-  $core.bool hasHeatmap() => $_has(9);
-  @$pb.TagNumber(13)
-  void clearHeatmap() => $_clearField(13);
-  @$pb.TagNumber(13)
-  Heatmap ensureHeatmap() => $_ensure(9);
-
-  @$pb.TagNumber(14)
-  CaptureResult get capture => $_getN(10);
-  @$pb.TagNumber(14)
-  set capture(CaptureResult value) => $_setField(14, value);
-  @$pb.TagNumber(14)
-  $core.bool hasCapture() => $_has(10);
-  @$pb.TagNumber(14)
-  void clearCapture() => $_clearField(14);
-  @$pb.TagNumber(14)
-  CaptureResult ensureCapture() => $_ensure(10);
-}
-
-class Cancel extends $pb.GeneratedMessage {
-  factory Cancel() => create();
-
-  Cancel._();
-
-  factory Cancel.fromBuffer($core.List<$core.int> data,
-          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
-  factory Cancel.fromJson($core.String json,
+  factory GetReceiverInfoRequest.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
       create()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
-      _omitMessageNames ? '' : 'Cancel',
+      _omitMessageNames ? '' : 'GetReceiverInfoRequest',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
       createEmptyInstance: create)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  Cancel clone() => deepCopy();
+  GetReceiverInfoRequest clone() => deepCopy();
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  Cancel copyWith(void Function(Cancel) updates) =>
-      super.copyWith((message) => updates(message as Cancel)) as Cancel;
+  GetReceiverInfoRequest copyWith(
+          void Function(GetReceiverInfoRequest) updates) =>
+      super.copyWith((message) => updates(message as GetReceiverInfoRequest))
+          as GetReceiverInfoRequest;
 
   @$core.override
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
-  static Cancel create() => Cancel._();
+  static GetReceiverInfoRequest create() => GetReceiverInfoRequest._();
   @$core.override
-  Cancel createEmptyInstance() => create();
-  static $pb.PbList<Cancel> createRepeated() => $pb.PbList<Cancel>();
+  GetReceiverInfoRequest createEmptyInstance() => create();
+  static $pb.PbList<GetReceiverInfoRequest> createRepeated() =>
+      $pb.PbList<GetReceiverInfoRequest>();
   @$core.pragma('dart2js:noInline')
-  static Cancel getDefault() =>
-      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<Cancel>(create);
-  static Cancel? _defaultInstance;
+  static GetReceiverInfoRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<GetReceiverInfoRequest>(create);
+  static GetReceiverInfoRequest? _defaultInstance;
 }
 
-class Error extends $pb.GeneratedMessage {
-  factory Error({
-    Error_Code? code,
-    $core.String? message,
-  }) {
-    final result = create();
-    if (code != null) result.code = code;
-    if (message != null) result.message = message;
-    return result;
-  }
-
-  Error._();
-
-  factory Error.fromBuffer($core.List<$core.int> data,
-          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
-  factory Error.fromJson($core.String json,
-          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
-
-  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
-      _omitMessageNames ? '' : 'Error',
-      package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
-      createEmptyInstance: create)
-    ..aE<Error_Code>(1, _omitFieldNames ? '' : 'code',
-        enumValues: Error_Code.values)
-    ..aOS(2, _omitFieldNames ? '' : 'message')
-    ..hasRequiredFields = false;
-
-  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  Error clone() => deepCopy();
-  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  Error copyWith(void Function(Error) updates) =>
-      super.copyWith((message) => updates(message as Error)) as Error;
-
-  @$core.override
-  $pb.BuilderInfo get info_ => _i;
-
-  @$core.pragma('dart2js:noInline')
-  static Error create() => Error._();
-  @$core.override
-  Error createEmptyInstance() => create();
-  static $pb.PbList<Error> createRepeated() => $pb.PbList<Error>();
-  @$core.pragma('dart2js:noInline')
-  static Error getDefault() =>
-      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<Error>(create);
-  static Error? _defaultInstance;
-
-  @$pb.TagNumber(1)
-  Error_Code get code => $_getN(0);
-  @$pb.TagNumber(1)
-  set code(Error_Code value) => $_setField(1, value);
-  @$pb.TagNumber(1)
-  $core.bool hasCode() => $_has(0);
-  @$pb.TagNumber(1)
-  void clearCode() => $_clearField(1);
-
-  @$pb.TagNumber(2)
-  $core.String get message => $_getSZ(1);
-  @$pb.TagNumber(2)
-  set message($core.String value) => $_setString(1, value);
-  @$pb.TagNumber(2)
-  $core.bool hasMessage() => $_has(1);
-  @$pb.TagNumber(2)
-  void clearMessage() => $_clearField(2);
-}
-
-class ServerInfoRequest extends $pb.GeneratedMessage {
-  factory ServerInfoRequest() => create();
-
-  ServerInfoRequest._();
-
-  factory ServerInfoRequest.fromBuffer($core.List<$core.int> data,
-          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
-  factory ServerInfoRequest.fromJson($core.String json,
-          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
-
-  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
-      _omitMessageNames ? '' : 'ServerInfoRequest',
-      package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
-      createEmptyInstance: create)
-    ..hasRequiredFields = false;
-
-  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  ServerInfoRequest clone() => deepCopy();
-  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  ServerInfoRequest copyWith(void Function(ServerInfoRequest) updates) =>
-      super.copyWith((message) => updates(message as ServerInfoRequest))
-          as ServerInfoRequest;
-
-  @$core.override
-  $pb.BuilderInfo get info_ => _i;
-
-  @$core.pragma('dart2js:noInline')
-  static ServerInfoRequest create() => ServerInfoRequest._();
-  @$core.override
-  ServerInfoRequest createEmptyInstance() => create();
-  static $pb.PbList<ServerInfoRequest> createRepeated() =>
-      $pb.PbList<ServerInfoRequest>();
-  @$core.pragma('dart2js:noInline')
-  static ServerInfoRequest getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ServerInfoRequest>(create);
-  static ServerInfoRequest? _defaultInstance;
-}
-
-class ServerInfo extends $pb.GeneratedMessage {
-  factory ServerInfo({
-    $core.bool? history,
-    $core.bool? spectrum,
+/// Fixed for the run.
+class ReceiverInfo extends $pb.GeneratedMessage {
+  factory ReceiverInfo({
+    $core.String? source,
     $core.double? defaultIntervalS,
-    $core.bool? capture,
-    $core.double? captureMaxS,
+    $core.double? maxCaptureS,
   }) {
     final result = create();
-    if (history != null) result.history = history;
-    if (spectrum != null) result.spectrum = spectrum;
+    if (source != null) result.source = source;
     if (defaultIntervalS != null) result.defaultIntervalS = defaultIntervalS;
-    if (capture != null) result.capture = capture;
-    if (captureMaxS != null) result.captureMaxS = captureMaxS;
+    if (maxCaptureS != null) result.maxCaptureS = maxCaptureS;
     return result;
   }
 
-  ServerInfo._();
+  ReceiverInfo._();
 
-  factory ServerInfo.fromBuffer($core.List<$core.int> data,
+  factory ReceiverInfo.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
       create()..mergeFromBuffer(data, registry);
-  factory ServerInfo.fromJson($core.String json,
+  factory ReceiverInfo.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
       create()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
-      _omitMessageNames ? '' : 'ServerInfo',
+      _omitMessageNames ? '' : 'ReceiverInfo',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
       createEmptyInstance: create)
-    ..aOB(1, _omitFieldNames ? '' : 'history')
-    ..aOB(2, _omitFieldNames ? '' : 'spectrum')
-    ..aD(3, _omitFieldNames ? '' : 'defaultIntervalS')
-    ..aOB(4, _omitFieldNames ? '' : 'capture')
-    ..aD(5, _omitFieldNames ? '' : 'captureMaxS')
+    ..aOS(1, _omitFieldNames ? '' : 'source')
+    ..aD(2, _omitFieldNames ? '' : 'defaultIntervalS')
+    ..aD(3, _omitFieldNames ? '' : 'maxCaptureS')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  ServerInfo clone() => deepCopy();
+  ReceiverInfo clone() => deepCopy();
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  ServerInfo copyWith(void Function(ServerInfo) updates) =>
-      super.copyWith((message) => updates(message as ServerInfo)) as ServerInfo;
+  ReceiverInfo copyWith(void Function(ReceiverInfo) updates) =>
+      super.copyWith((message) => updates(message as ReceiverInfo))
+          as ReceiverInfo;
 
   @$core.override
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
-  static ServerInfo create() => ServerInfo._();
+  static ReceiverInfo create() => ReceiverInfo._();
   @$core.override
-  ServerInfo createEmptyInstance() => create();
-  static $pb.PbList<ServerInfo> createRepeated() => $pb.PbList<ServerInfo>();
+  ReceiverInfo createEmptyInstance() => create();
+  static $pb.PbList<ReceiverInfo> createRepeated() =>
+      $pb.PbList<ReceiverInfo>();
   @$core.pragma('dart2js:noInline')
-  static ServerInfo getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ServerInfo>(create);
-  static ServerInfo? _defaultInstance;
+  static ReceiverInfo getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ReceiverInfo>(create);
+  static ReceiverInfo? _defaultInstance;
 
   @$pb.TagNumber(1)
-  $core.bool get history => $_getBF(0);
+  $core.String get source => $_getSZ(0);
   @$pb.TagNumber(1)
-  set history($core.bool value) => $_setBool(0, value);
+  set source($core.String value) => $_setString(0, value);
   @$pb.TagNumber(1)
-  $core.bool hasHistory() => $_has(0);
+  $core.bool hasSource() => $_has(0);
   @$pb.TagNumber(1)
-  void clearHistory() => $_clearField(1);
+  void clearSource() => $_clearField(1);
 
   @$pb.TagNumber(2)
-  $core.bool get spectrum => $_getBF(1);
+  $core.double get defaultIntervalS => $_getN(1);
   @$pb.TagNumber(2)
-  set spectrum($core.bool value) => $_setBool(1, value);
+  set defaultIntervalS($core.double value) => $_setDouble(1, value);
   @$pb.TagNumber(2)
-  $core.bool hasSpectrum() => $_has(1);
+  $core.bool hasDefaultIntervalS() => $_has(1);
   @$pb.TagNumber(2)
-  void clearSpectrum() => $_clearField(2);
+  void clearDefaultIntervalS() => $_clearField(2);
 
   @$pb.TagNumber(3)
-  $core.double get defaultIntervalS => $_getN(2);
+  $core.double get maxCaptureS => $_getN(2);
   @$pb.TagNumber(3)
-  set defaultIntervalS($core.double value) => $_setDouble(2, value);
+  set maxCaptureS($core.double value) => $_setDouble(2, value);
   @$pb.TagNumber(3)
-  $core.bool hasDefaultIntervalS() => $_has(2);
+  $core.bool hasMaxCaptureS() => $_has(2);
   @$pb.TagNumber(3)
-  void clearDefaultIntervalS() => $_clearField(3);
-
-  @$pb.TagNumber(4)
-  $core.bool get capture => $_getBF(3);
-  @$pb.TagNumber(4)
-  set capture($core.bool value) => $_setBool(3, value);
-  @$pb.TagNumber(4)
-  $core.bool hasCapture() => $_has(3);
-  @$pb.TagNumber(4)
-  void clearCapture() => $_clearField(4);
-
-  @$pb.TagNumber(5)
-  $core.double get captureMaxS => $_getN(4);
-  @$pb.TagNumber(5)
-  set captureMaxS($core.double value) => $_setDouble(4, value);
-  @$pb.TagNumber(5)
-  $core.bool hasCaptureMaxS() => $_has(4);
-  @$pb.TagNumber(5)
-  void clearCaptureMaxS() => $_clearField(5);
+  void clearMaxCaptureS() => $_clearField(3);
 }
 
-class SubscribeRequest extends $pb.GeneratedMessage {
-  factory SubscribeRequest({
+class WatchFramesRequest extends $pb.GeneratedMessage {
+  factory WatchFramesRequest({
     $core.double? intervalS,
   }) {
     final result = create();
@@ -764,42 +153,42 @@ class SubscribeRequest extends $pb.GeneratedMessage {
     return result;
   }
 
-  SubscribeRequest._();
+  WatchFramesRequest._();
 
-  factory SubscribeRequest.fromBuffer($core.List<$core.int> data,
+  factory WatchFramesRequest.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
       create()..mergeFromBuffer(data, registry);
-  factory SubscribeRequest.fromJson($core.String json,
+  factory WatchFramesRequest.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
       create()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
-      _omitMessageNames ? '' : 'SubscribeRequest',
+      _omitMessageNames ? '' : 'WatchFramesRequest',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
       createEmptyInstance: create)
     ..aD(1, _omitFieldNames ? '' : 'intervalS')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  SubscribeRequest clone() => deepCopy();
+  WatchFramesRequest clone() => deepCopy();
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  SubscribeRequest copyWith(void Function(SubscribeRequest) updates) =>
-      super.copyWith((message) => updates(message as SubscribeRequest))
-          as SubscribeRequest;
+  WatchFramesRequest copyWith(void Function(WatchFramesRequest) updates) =>
+      super.copyWith((message) => updates(message as WatchFramesRequest))
+          as WatchFramesRequest;
 
   @$core.override
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
-  static SubscribeRequest create() => SubscribeRequest._();
+  static WatchFramesRequest create() => WatchFramesRequest._();
   @$core.override
-  SubscribeRequest createEmptyInstance() => create();
-  static $pb.PbList<SubscribeRequest> createRepeated() =>
-      $pb.PbList<SubscribeRequest>();
+  WatchFramesRequest createEmptyInstance() => create();
+  static $pb.PbList<WatchFramesRequest> createRepeated() =>
+      $pb.PbList<WatchFramesRequest>();
   @$core.pragma('dart2js:noInline')
-  static SubscribeRequest getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<SubscribeRequest>(create);
-  static SubscribeRequest? _defaultInstance;
+  static WatchFramesRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<WatchFramesRequest>(create);
+  static WatchFramesRequest? _defaultInstance;
 
   @$pb.TagNumber(1)
   $core.double get intervalS => $_getN(0);
@@ -811,77 +200,64 @@ class SubscribeRequest extends $pb.GeneratedMessage {
   void clearIntervalS() => $_clearField(1);
 }
 
-/// One reply of a subscription: what was published since its last update. Frames are in the order they were
-/// published; aircraft are those that changed since the last update, each as last published. The first update
-/// has every aircraft heard in the last 600 s.
-class Update extends $pb.GeneratedMessage {
-  factory Update({
+class FrameBatch extends $pb.GeneratedMessage {
+  factory FrameBatch({
     $core.Iterable<Frame>? frames,
-    $core.Iterable<Aircraft>? aircraft,
-    InputStatus? inputStatus,
+    $core.bool? framesDropped,
   }) {
     final result = create();
     if (frames != null) result.frames.addAll(frames);
-    if (aircraft != null) result.aircraft.addAll(aircraft);
-    if (inputStatus != null) result.inputStatus = inputStatus;
+    if (framesDropped != null) result.framesDropped = framesDropped;
     return result;
   }
 
-  Update._();
+  FrameBatch._();
 
-  factory Update.fromBuffer($core.List<$core.int> data,
+  factory FrameBatch.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
       create()..mergeFromBuffer(data, registry);
-  factory Update.fromJson($core.String json,
+  factory FrameBatch.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
       create()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
-      _omitMessageNames ? '' : 'Update',
+      _omitMessageNames ? '' : 'FrameBatch',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
       createEmptyInstance: create)
     ..pPM<Frame>(1, _omitFieldNames ? '' : 'frames', subBuilder: Frame.create)
-    ..pPM<Aircraft>(3, _omitFieldNames ? '' : 'aircraft',
-        subBuilder: Aircraft.create)
-    ..aOM<InputStatus>(4, _omitFieldNames ? '' : 'inputStatus',
-        subBuilder: InputStatus.create)
+    ..aOB(2, _omitFieldNames ? '' : 'framesDropped')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  Update clone() => deepCopy();
+  FrameBatch clone() => deepCopy();
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  Update copyWith(void Function(Update) updates) =>
-      super.copyWith((message) => updates(message as Update)) as Update;
+  FrameBatch copyWith(void Function(FrameBatch) updates) =>
+      super.copyWith((message) => updates(message as FrameBatch)) as FrameBatch;
 
   @$core.override
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
-  static Update create() => Update._();
+  static FrameBatch create() => FrameBatch._();
   @$core.override
-  Update createEmptyInstance() => create();
-  static $pb.PbList<Update> createRepeated() => $pb.PbList<Update>();
+  FrameBatch createEmptyInstance() => create();
+  static $pb.PbList<FrameBatch> createRepeated() => $pb.PbList<FrameBatch>();
   @$core.pragma('dart2js:noInline')
-  static Update getDefault() =>
-      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<Update>(create);
-  static Update? _defaultInstance;
+  static FrameBatch getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<FrameBatch>(create);
+  static FrameBatch? _defaultInstance;
 
   @$pb.TagNumber(1)
   $pb.PbList<Frame> get frames => $_getList(0);
 
-  @$pb.TagNumber(3)
-  $pb.PbList<Aircraft> get aircraft => $_getList(1);
-
-  @$pb.TagNumber(4)
-  InputStatus get inputStatus => $_getN(2);
-  @$pb.TagNumber(4)
-  set inputStatus(InputStatus value) => $_setField(4, value);
-  @$pb.TagNumber(4)
-  $core.bool hasInputStatus() => $_has(2);
-  @$pb.TagNumber(4)
-  void clearInputStatus() => $_clearField(4);
-  @$pb.TagNumber(4)
-  InputStatus ensureInputStatus() => $_ensure(2);
+  @$pb.TagNumber(2)
+  $core.bool get framesDropped => $_getBF(1);
+  @$pb.TagNumber(2)
+  set framesDropped($core.bool value) => $_setBool(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasFramesDropped() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearFramesDropped() => $_clearField(2);
 }
 
 class Frame extends $pb.GeneratedMessage {
@@ -1049,464 +425,111 @@ class Frame extends $pb.GeneratedMessage {
   void clearSummary() => $_clearField(10);
 }
 
-/// The spectrum's rows, one reply each, as they're computed. The server computes them only while a spectrum
-/// call is in progress.
-class SpectrumRequest extends $pb.GeneratedMessage {
-  factory SpectrumRequest() => create();
-
-  SpectrumRequest._();
-
-  factory SpectrumRequest.fromBuffer($core.List<$core.int> data,
-          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
-  factory SpectrumRequest.fromJson($core.String json,
-          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
-
-  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
-      _omitMessageNames ? '' : 'SpectrumRequest',
-      package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
-      createEmptyInstance: create)
-    ..hasRequiredFields = false;
-
-  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  SpectrumRequest clone() => deepCopy();
-  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  SpectrumRequest copyWith(void Function(SpectrumRequest) updates) =>
-      super.copyWith((message) => updates(message as SpectrumRequest))
-          as SpectrumRequest;
-
-  @$core.override
-  $pb.BuilderInfo get info_ => _i;
-
-  @$core.pragma('dart2js:noInline')
-  static SpectrumRequest create() => SpectrumRequest._();
-  @$core.override
-  SpectrumRequest createEmptyInstance() => create();
-  static $pb.PbList<SpectrumRequest> createRepeated() =>
-      $pb.PbList<SpectrumRequest>();
-  @$core.pragma('dart2js:noInline')
-  static SpectrumRequest getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<SpectrumRequest>(create);
-  static SpectrumRequest? _defaultInstance;
-}
-
-class SpectrumRow extends $pb.GeneratedMessage {
-  factory SpectrumRow({
-    $core.double? freqHz,
-    $core.double? rateHz,
-    $core.Iterable<$core.double>? binsDb,
+class WatchAircraftRequest extends $pb.GeneratedMessage {
+  factory WatchAircraftRequest({
+    $core.double? intervalS,
   }) {
     final result = create();
-    if (freqHz != null) result.freqHz = freqHz;
-    if (rateHz != null) result.rateHz = rateHz;
-    if (binsDb != null) result.binsDb.addAll(binsDb);
+    if (intervalS != null) result.intervalS = intervalS;
     return result;
   }
 
-  SpectrumRow._();
+  WatchAircraftRequest._();
 
-  factory SpectrumRow.fromBuffer($core.List<$core.int> data,
+  factory WatchAircraftRequest.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
       create()..mergeFromBuffer(data, registry);
-  factory SpectrumRow.fromJson($core.String json,
+  factory WatchAircraftRequest.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
       create()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
-      _omitMessageNames ? '' : 'SpectrumRow',
+      _omitMessageNames ? '' : 'WatchAircraftRequest',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
       createEmptyInstance: create)
-    ..aD(1, _omitFieldNames ? '' : 'freqHz')
-    ..aD(2, _omitFieldNames ? '' : 'rateHz')
-    ..p<$core.double>(3, _omitFieldNames ? '' : 'binsDb', $pb.PbFieldType.KF)
+    ..aD(1, _omitFieldNames ? '' : 'intervalS')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  SpectrumRow clone() => deepCopy();
+  WatchAircraftRequest clone() => deepCopy();
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  SpectrumRow copyWith(void Function(SpectrumRow) updates) =>
-      super.copyWith((message) => updates(message as SpectrumRow))
-          as SpectrumRow;
+  WatchAircraftRequest copyWith(void Function(WatchAircraftRequest) updates) =>
+      super.copyWith((message) => updates(message as WatchAircraftRequest))
+          as WatchAircraftRequest;
 
   @$core.override
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
-  static SpectrumRow create() => SpectrumRow._();
+  static WatchAircraftRequest create() => WatchAircraftRequest._();
   @$core.override
-  SpectrumRow createEmptyInstance() => create();
-  static $pb.PbList<SpectrumRow> createRepeated() => $pb.PbList<SpectrumRow>();
+  WatchAircraftRequest createEmptyInstance() => create();
+  static $pb.PbList<WatchAircraftRequest> createRepeated() =>
+      $pb.PbList<WatchAircraftRequest>();
   @$core.pragma('dart2js:noInline')
-  static SpectrumRow getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<SpectrumRow>(create);
-  static SpectrumRow? _defaultInstance;
+  static WatchAircraftRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<WatchAircraftRequest>(create);
+  static WatchAircraftRequest? _defaultInstance;
 
   @$pb.TagNumber(1)
-  $core.double get freqHz => $_getN(0);
+  $core.double get intervalS => $_getN(0);
   @$pb.TagNumber(1)
-  set freqHz($core.double value) => $_setDouble(0, value);
+  set intervalS($core.double value) => $_setDouble(0, value);
   @$pb.TagNumber(1)
-  $core.bool hasFreqHz() => $_has(0);
+  $core.bool hasIntervalS() => $_has(0);
   @$pb.TagNumber(1)
-  void clearFreqHz() => $_clearField(1);
-
-  @$pb.TagNumber(2)
-  $core.double get rateHz => $_getN(1);
-  @$pb.TagNumber(2)
-  set rateHz($core.double value) => $_setDouble(1, value);
-  @$pb.TagNumber(2)
-  $core.bool hasRateHz() => $_has(1);
-  @$pb.TagNumber(2)
-  void clearRateHz() => $_clearField(2);
-
-  @$pb.TagNumber(3)
-  $pb.PbList<$core.double> get binsDb => $_getList(2);
+  void clearIntervalS() => $_clearField(1);
 }
 
-/// Records one point in the pipeline to a SigMF recording in --capture-dir, from the next block on, for
-/// duration_s of stream time. One capture per point at a time; cancelling stops it, keeping what's written.
-class CaptureRequest extends $pb.GeneratedMessage {
-  factory CaptureRequest({
-    CaptureRequest_Point? point,
-    $core.double? durationS,
-    $core.String? name,
+class AircraftChanges extends $pb.GeneratedMessage {
+  factory AircraftChanges({
+    $core.Iterable<Aircraft>? aircraft,
   }) {
     final result = create();
-    if (point != null) result.point = point;
-    if (durationS != null) result.durationS = durationS;
-    if (name != null) result.name = name;
+    if (aircraft != null) result.aircraft.addAll(aircraft);
     return result;
   }
 
-  CaptureRequest._();
+  AircraftChanges._();
 
-  factory CaptureRequest.fromBuffer($core.List<$core.int> data,
+  factory AircraftChanges.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
       create()..mergeFromBuffer(data, registry);
-  factory CaptureRequest.fromJson($core.String json,
+  factory AircraftChanges.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
       create()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
-      _omitMessageNames ? '' : 'CaptureRequest',
+      _omitMessageNames ? '' : 'AircraftChanges',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
       createEmptyInstance: create)
-    ..aE<CaptureRequest_Point>(1, _omitFieldNames ? '' : 'point',
-        enumValues: CaptureRequest_Point.values)
-    ..aD(2, _omitFieldNames ? '' : 'durationS')
-    ..aOS(3, _omitFieldNames ? '' : 'name')
+    ..pPM<Aircraft>(1, _omitFieldNames ? '' : 'aircraft',
+        subBuilder: Aircraft.create)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  CaptureRequest clone() => deepCopy();
+  AircraftChanges clone() => deepCopy();
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  CaptureRequest copyWith(void Function(CaptureRequest) updates) =>
-      super.copyWith((message) => updates(message as CaptureRequest))
-          as CaptureRequest;
+  AircraftChanges copyWith(void Function(AircraftChanges) updates) =>
+      super.copyWith((message) => updates(message as AircraftChanges))
+          as AircraftChanges;
 
   @$core.override
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
-  static CaptureRequest create() => CaptureRequest._();
+  static AircraftChanges create() => AircraftChanges._();
   @$core.override
-  CaptureRequest createEmptyInstance() => create();
-  static $pb.PbList<CaptureRequest> createRepeated() =>
-      $pb.PbList<CaptureRequest>();
+  AircraftChanges createEmptyInstance() => create();
+  static $pb.PbList<AircraftChanges> createRepeated() =>
+      $pb.PbList<AircraftChanges>();
   @$core.pragma('dart2js:noInline')
-  static CaptureRequest getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<CaptureRequest>(create);
-  static CaptureRequest? _defaultInstance;
+  static AircraftChanges getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<AircraftChanges>(create);
+  static AircraftChanges? _defaultInstance;
 
   @$pb.TagNumber(1)
-  CaptureRequest_Point get point => $_getN(0);
-  @$pb.TagNumber(1)
-  set point(CaptureRequest_Point value) => $_setField(1, value);
-  @$pb.TagNumber(1)
-  $core.bool hasPoint() => $_has(0);
-  @$pb.TagNumber(1)
-  void clearPoint() => $_clearField(1);
-
-  @$pb.TagNumber(2)
-  $core.double get durationS => $_getN(1);
-  @$pb.TagNumber(2)
-  set durationS($core.double value) => $_setDouble(1, value);
-  @$pb.TagNumber(2)
-  $core.bool hasDurationS() => $_has(1);
-  @$pb.TagNumber(2)
-  void clearDurationS() => $_clearField(2);
-
-  @$pb.TagNumber(3)
-  $core.String get name => $_getSZ(2);
-  @$pb.TagNumber(3)
-  set name($core.String value) => $_setString(2, value);
-  @$pb.TagNumber(3)
-  $core.bool hasName() => $_has(2);
-  @$pb.TagNumber(3)
-  void clearName() => $_clearField(3);
-}
-
-/// Sent when the capture has covered its duration, or the input ended first.
-class CaptureResult extends $pb.GeneratedMessage {
-  factory CaptureResult({
-    $core.String? dataPath,
-    $core.String? datatype,
-    $core.double? rateHz,
-    $fixnum.Int64? startIndex,
-    $fixnum.Int64? samples,
-    $fixnum.Int64? missing,
-  }) {
-    final result = create();
-    if (dataPath != null) result.dataPath = dataPath;
-    if (datatype != null) result.datatype = datatype;
-    if (rateHz != null) result.rateHz = rateHz;
-    if (startIndex != null) result.startIndex = startIndex;
-    if (samples != null) result.samples = samples;
-    if (missing != null) result.missing = missing;
-    return result;
-  }
-
-  CaptureResult._();
-
-  factory CaptureResult.fromBuffer($core.List<$core.int> data,
-          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
-  factory CaptureResult.fromJson($core.String json,
-          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
-
-  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
-      _omitMessageNames ? '' : 'CaptureResult',
-      package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
-      createEmptyInstance: create)
-    ..aOS(1, _omitFieldNames ? '' : 'dataPath')
-    ..aOS(2, _omitFieldNames ? '' : 'datatype')
-    ..aD(3, _omitFieldNames ? '' : 'rateHz')
-    ..a<$fixnum.Int64>(
-        4, _omitFieldNames ? '' : 'startIndex', $pb.PbFieldType.OU6,
-        defaultOrMaker: $fixnum.Int64.ZERO)
-    ..a<$fixnum.Int64>(5, _omitFieldNames ? '' : 'samples', $pb.PbFieldType.OU6,
-        defaultOrMaker: $fixnum.Int64.ZERO)
-    ..a<$fixnum.Int64>(6, _omitFieldNames ? '' : 'missing', $pb.PbFieldType.OU6,
-        defaultOrMaker: $fixnum.Int64.ZERO)
-    ..hasRequiredFields = false;
-
-  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  CaptureResult clone() => deepCopy();
-  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  CaptureResult copyWith(void Function(CaptureResult) updates) =>
-      super.copyWith((message) => updates(message as CaptureResult))
-          as CaptureResult;
-
-  @$core.override
-  $pb.BuilderInfo get info_ => _i;
-
-  @$core.pragma('dart2js:noInline')
-  static CaptureResult create() => CaptureResult._();
-  @$core.override
-  CaptureResult createEmptyInstance() => create();
-  static $pb.PbList<CaptureResult> createRepeated() =>
-      $pb.PbList<CaptureResult>();
-  @$core.pragma('dart2js:noInline')
-  static CaptureResult getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<CaptureResult>(create);
-  static CaptureResult? _defaultInstance;
-
-  @$pb.TagNumber(1)
-  $core.String get dataPath => $_getSZ(0);
-  @$pb.TagNumber(1)
-  set dataPath($core.String value) => $_setString(0, value);
-  @$pb.TagNumber(1)
-  $core.bool hasDataPath() => $_has(0);
-  @$pb.TagNumber(1)
-  void clearDataPath() => $_clearField(1);
-
-  @$pb.TagNumber(2)
-  $core.String get datatype => $_getSZ(1);
-  @$pb.TagNumber(2)
-  set datatype($core.String value) => $_setString(1, value);
-  @$pb.TagNumber(2)
-  $core.bool hasDatatype() => $_has(1);
-  @$pb.TagNumber(2)
-  void clearDatatype() => $_clearField(2);
-
-  @$pb.TagNumber(3)
-  $core.double get rateHz => $_getN(2);
-  @$pb.TagNumber(3)
-  set rateHz($core.double value) => $_setDouble(2, value);
-  @$pb.TagNumber(3)
-  $core.bool hasRateHz() => $_has(2);
-  @$pb.TagNumber(3)
-  void clearRateHz() => $_clearField(3);
-
-  @$pb.TagNumber(4)
-  $fixnum.Int64 get startIndex => $_getI64(3);
-  @$pb.TagNumber(4)
-  set startIndex($fixnum.Int64 value) => $_setInt64(3, value);
-  @$pb.TagNumber(4)
-  $core.bool hasStartIndex() => $_has(3);
-  @$pb.TagNumber(4)
-  void clearStartIndex() => $_clearField(4);
-
-  @$pb.TagNumber(5)
-  $fixnum.Int64 get samples => $_getI64(4);
-  @$pb.TagNumber(5)
-  set samples($fixnum.Int64 value) => $_setInt64(4, value);
-  @$pb.TagNumber(5)
-  $core.bool hasSamples() => $_has(4);
-  @$pb.TagNumber(5)
-  void clearSamples() => $_clearField(5);
-
-  @$pb.TagNumber(6)
-  $fixnum.Int64 get missing => $_getI64(5);
-  @$pb.TagNumber(6)
-  set missing($fixnum.Int64 value) => $_setInt64(5, value);
-  @$pb.TagNumber(6)
-  $core.bool hasMissing() => $_has(5);
-  @$pb.TagNumber(6)
-  void clearMissing() => $_clearField(6);
-}
-
-class InputStatus extends $pb.GeneratedMessage {
-  factory InputStatus({
-    $core.double? windowS,
-    $core.double? rateHz,
-    $core.double? streamS,
-    $core.double? lostS,
-    $core.double? droppedS,
-    $fixnum.Int64? kernelDrops,
-    $core.bool? ok,
-    $core.String? summary,
-  }) {
-    final result = create();
-    if (windowS != null) result.windowS = windowS;
-    if (rateHz != null) result.rateHz = rateHz;
-    if (streamS != null) result.streamS = streamS;
-    if (lostS != null) result.lostS = lostS;
-    if (droppedS != null) result.droppedS = droppedS;
-    if (kernelDrops != null) result.kernelDrops = kernelDrops;
-    if (ok != null) result.ok = ok;
-    if (summary != null) result.summary = summary;
-    return result;
-  }
-
-  InputStatus._();
-
-  factory InputStatus.fromBuffer($core.List<$core.int> data,
-          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromBuffer(data, registry);
-  factory InputStatus.fromJson($core.String json,
-          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
-      create()..mergeFromJson(json, registry);
-
-  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
-      _omitMessageNames ? '' : 'InputStatus',
-      package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
-      createEmptyInstance: create)
-    ..aD(1, _omitFieldNames ? '' : 'windowS')
-    ..aD(2, _omitFieldNames ? '' : 'rateHz')
-    ..aD(3, _omitFieldNames ? '' : 'streamS')
-    ..aD(4, _omitFieldNames ? '' : 'lostS')
-    ..aD(5, _omitFieldNames ? '' : 'droppedS')
-    ..a<$fixnum.Int64>(
-        6, _omitFieldNames ? '' : 'kernelDrops', $pb.PbFieldType.OU6,
-        defaultOrMaker: $fixnum.Int64.ZERO)
-    ..aOB(7, _omitFieldNames ? '' : 'ok')
-    ..aOS(8, _omitFieldNames ? '' : 'summary')
-    ..hasRequiredFields = false;
-
-  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  InputStatus clone() => deepCopy();
-  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  InputStatus copyWith(void Function(InputStatus) updates) =>
-      super.copyWith((message) => updates(message as InputStatus))
-          as InputStatus;
-
-  @$core.override
-  $pb.BuilderInfo get info_ => _i;
-
-  @$core.pragma('dart2js:noInline')
-  static InputStatus create() => InputStatus._();
-  @$core.override
-  InputStatus createEmptyInstance() => create();
-  static $pb.PbList<InputStatus> createRepeated() => $pb.PbList<InputStatus>();
-  @$core.pragma('dart2js:noInline')
-  static InputStatus getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<InputStatus>(create);
-  static InputStatus? _defaultInstance;
-
-  @$pb.TagNumber(1)
-  $core.double get windowS => $_getN(0);
-  @$pb.TagNumber(1)
-  set windowS($core.double value) => $_setDouble(0, value);
-  @$pb.TagNumber(1)
-  $core.bool hasWindowS() => $_has(0);
-  @$pb.TagNumber(1)
-  void clearWindowS() => $_clearField(1);
-
-  @$pb.TagNumber(2)
-  $core.double get rateHz => $_getN(1);
-  @$pb.TagNumber(2)
-  set rateHz($core.double value) => $_setDouble(1, value);
-  @$pb.TagNumber(2)
-  $core.bool hasRateHz() => $_has(1);
-  @$pb.TagNumber(2)
-  void clearRateHz() => $_clearField(2);
-
-  @$pb.TagNumber(3)
-  $core.double get streamS => $_getN(2);
-  @$pb.TagNumber(3)
-  set streamS($core.double value) => $_setDouble(2, value);
-  @$pb.TagNumber(3)
-  $core.bool hasStreamS() => $_has(2);
-  @$pb.TagNumber(3)
-  void clearStreamS() => $_clearField(3);
-
-  @$pb.TagNumber(4)
-  $core.double get lostS => $_getN(3);
-  @$pb.TagNumber(4)
-  set lostS($core.double value) => $_setDouble(3, value);
-  @$pb.TagNumber(4)
-  $core.bool hasLostS() => $_has(3);
-  @$pb.TagNumber(4)
-  void clearLostS() => $_clearField(4);
-
-  @$pb.TagNumber(5)
-  $core.double get droppedS => $_getN(4);
-  @$pb.TagNumber(5)
-  set droppedS($core.double value) => $_setDouble(4, value);
-  @$pb.TagNumber(5)
-  $core.bool hasDroppedS() => $_has(4);
-  @$pb.TagNumber(5)
-  void clearDroppedS() => $_clearField(5);
-
-  @$pb.TagNumber(6)
-  $fixnum.Int64 get kernelDrops => $_getI64(5);
-  @$pb.TagNumber(6)
-  set kernelDrops($fixnum.Int64 value) => $_setInt64(5, value);
-  @$pb.TagNumber(6)
-  $core.bool hasKernelDrops() => $_has(5);
-  @$pb.TagNumber(6)
-  void clearKernelDrops() => $_clearField(6);
-
-  @$pb.TagNumber(7)
-  $core.bool get ok => $_getBF(6);
-  @$pb.TagNumber(7)
-  set ok($core.bool value) => $_setBool(6, value);
-  @$pb.TagNumber(7)
-  $core.bool hasOk() => $_has(6);
-  @$pb.TagNumber(7)
-  void clearOk() => $_clearField(7);
-
-  @$pb.TagNumber(8)
-  $core.String get summary => $_getSZ(7);
-  @$pb.TagNumber(8)
-  set summary($core.String value) => $_setString(7, value);
-  @$pb.TagNumber(8)
-  $core.bool hasSummary() => $_has(7);
-  @$pb.TagNumber(8)
-  void clearSummary() => $_clearField(8);
+  $pb.PbList<Aircraft> get aircraft => $_getList(0);
 }
 
 class Aircraft extends $pb.GeneratedMessage {
@@ -1977,8 +1000,969 @@ class AutopilotModes extends $pb.GeneratedMessage {
   $pb.PbList<AutopilotModes_Mode> get modes => $_getList(0);
 }
 
-class SnapshotRequest extends $pb.GeneratedMessage {
-  factory SnapshotRequest({
+class WatchInputStatusRequest extends $pb.GeneratedMessage {
+  factory WatchInputStatusRequest() => create();
+
+  WatchInputStatusRequest._();
+
+  factory WatchInputStatusRequest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory WatchInputStatusRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'WatchInputStatusRequest',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
+      createEmptyInstance: create)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  WatchInputStatusRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  WatchInputStatusRequest copyWith(
+          void Function(WatchInputStatusRequest) updates) =>
+      super.copyWith((message) => updates(message as WatchInputStatusRequest))
+          as WatchInputStatusRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static WatchInputStatusRequest create() => WatchInputStatusRequest._();
+  @$core.override
+  WatchInputStatusRequest createEmptyInstance() => create();
+  static $pb.PbList<WatchInputStatusRequest> createRepeated() =>
+      $pb.PbList<WatchInputStatusRequest>();
+  @$core.pragma('dart2js:noInline')
+  static WatchInputStatusRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<WatchInputStatusRequest>(create);
+  static WatchInputStatusRequest? _defaultInstance;
+}
+
+class InputStatus extends $pb.GeneratedMessage {
+  factory InputStatus({
+    $core.double? windowS,
+    $core.double? rateHz,
+    $core.double? streamS,
+    $core.double? lostS,
+    $core.double? droppedS,
+    $fixnum.Int64? kernelDrops,
+    $core.bool? ok,
+    $core.String? summary,
+  }) {
+    final result = create();
+    if (windowS != null) result.windowS = windowS;
+    if (rateHz != null) result.rateHz = rateHz;
+    if (streamS != null) result.streamS = streamS;
+    if (lostS != null) result.lostS = lostS;
+    if (droppedS != null) result.droppedS = droppedS;
+    if (kernelDrops != null) result.kernelDrops = kernelDrops;
+    if (ok != null) result.ok = ok;
+    if (summary != null) result.summary = summary;
+    return result;
+  }
+
+  InputStatus._();
+
+  factory InputStatus.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory InputStatus.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'InputStatus',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
+      createEmptyInstance: create)
+    ..aD(1, _omitFieldNames ? '' : 'windowS')
+    ..aD(2, _omitFieldNames ? '' : 'rateHz')
+    ..aD(3, _omitFieldNames ? '' : 'streamS')
+    ..aD(4, _omitFieldNames ? '' : 'lostS')
+    ..aD(5, _omitFieldNames ? '' : 'droppedS')
+    ..a<$fixnum.Int64>(
+        6, _omitFieldNames ? '' : 'kernelDrops', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..aOB(7, _omitFieldNames ? '' : 'ok')
+    ..aOS(8, _omitFieldNames ? '' : 'summary')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  InputStatus clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  InputStatus copyWith(void Function(InputStatus) updates) =>
+      super.copyWith((message) => updates(message as InputStatus))
+          as InputStatus;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static InputStatus create() => InputStatus._();
+  @$core.override
+  InputStatus createEmptyInstance() => create();
+  static $pb.PbList<InputStatus> createRepeated() => $pb.PbList<InputStatus>();
+  @$core.pragma('dart2js:noInline')
+  static InputStatus getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<InputStatus>(create);
+  static InputStatus? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.double get windowS => $_getN(0);
+  @$pb.TagNumber(1)
+  set windowS($core.double value) => $_setDouble(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasWindowS() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearWindowS() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.double get rateHz => $_getN(1);
+  @$pb.TagNumber(2)
+  set rateHz($core.double value) => $_setDouble(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasRateHz() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearRateHz() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.double get streamS => $_getN(2);
+  @$pb.TagNumber(3)
+  set streamS($core.double value) => $_setDouble(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasStreamS() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearStreamS() => $_clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.double get lostS => $_getN(3);
+  @$pb.TagNumber(4)
+  set lostS($core.double value) => $_setDouble(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasLostS() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearLostS() => $_clearField(4);
+
+  @$pb.TagNumber(5)
+  $core.double get droppedS => $_getN(4);
+  @$pb.TagNumber(5)
+  set droppedS($core.double value) => $_setDouble(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasDroppedS() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearDroppedS() => $_clearField(5);
+
+  @$pb.TagNumber(6)
+  $fixnum.Int64 get kernelDrops => $_getI64(5);
+  @$pb.TagNumber(6)
+  set kernelDrops($fixnum.Int64 value) => $_setInt64(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasKernelDrops() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearKernelDrops() => $_clearField(6);
+
+  @$pb.TagNumber(7)
+  $core.bool get ok => $_getBF(6);
+  @$pb.TagNumber(7)
+  set ok($core.bool value) => $_setBool(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasOk() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearOk() => $_clearField(7);
+
+  @$pb.TagNumber(8)
+  $core.String get summary => $_getSZ(7);
+  @$pb.TagNumber(8)
+  set summary($core.String value) => $_setString(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasSummary() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearSummary() => $_clearField(8);
+}
+
+class WatchSpectrumRequest extends $pb.GeneratedMessage {
+  factory WatchSpectrumRequest() => create();
+
+  WatchSpectrumRequest._();
+
+  factory WatchSpectrumRequest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory WatchSpectrumRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'WatchSpectrumRequest',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
+      createEmptyInstance: create)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  WatchSpectrumRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  WatchSpectrumRequest copyWith(void Function(WatchSpectrumRequest) updates) =>
+      super.copyWith((message) => updates(message as WatchSpectrumRequest))
+          as WatchSpectrumRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static WatchSpectrumRequest create() => WatchSpectrumRequest._();
+  @$core.override
+  WatchSpectrumRequest createEmptyInstance() => create();
+  static $pb.PbList<WatchSpectrumRequest> createRepeated() =>
+      $pb.PbList<WatchSpectrumRequest>();
+  @$core.pragma('dart2js:noInline')
+  static WatchSpectrumRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<WatchSpectrumRequest>(create);
+  static WatchSpectrumRequest? _defaultInstance;
+}
+
+class SpectrumRow extends $pb.GeneratedMessage {
+  factory SpectrumRow({
+    $core.double? freqHz,
+    $core.double? rateHz,
+    $core.Iterable<$core.double>? binsDb,
+  }) {
+    final result = create();
+    if (freqHz != null) result.freqHz = freqHz;
+    if (rateHz != null) result.rateHz = rateHz;
+    if (binsDb != null) result.binsDb.addAll(binsDb);
+    return result;
+  }
+
+  SpectrumRow._();
+
+  factory SpectrumRow.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory SpectrumRow.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SpectrumRow',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
+      createEmptyInstance: create)
+    ..aD(1, _omitFieldNames ? '' : 'freqHz')
+    ..aD(2, _omitFieldNames ? '' : 'rateHz')
+    ..p<$core.double>(3, _omitFieldNames ? '' : 'binsDb', $pb.PbFieldType.KF)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SpectrumRow clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SpectrumRow copyWith(void Function(SpectrumRow) updates) =>
+      super.copyWith((message) => updates(message as SpectrumRow))
+          as SpectrumRow;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static SpectrumRow create() => SpectrumRow._();
+  @$core.override
+  SpectrumRow createEmptyInstance() => create();
+  static $pb.PbList<SpectrumRow> createRepeated() => $pb.PbList<SpectrumRow>();
+  @$core.pragma('dart2js:noInline')
+  static SpectrumRow getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<SpectrumRow>(create);
+  static SpectrumRow? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.double get freqHz => $_getN(0);
+  @$pb.TagNumber(1)
+  set freqHz($core.double value) => $_setDouble(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasFreqHz() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearFreqHz() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.double get rateHz => $_getN(1);
+  @$pb.TagNumber(2)
+  set rateHz($core.double value) => $_setDouble(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasRateHz() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearRateHz() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $pb.PbList<$core.double> get binsDb => $_getList(2);
+}
+
+class WatchSettingsRequest extends $pb.GeneratedMessage {
+  factory WatchSettingsRequest() => create();
+
+  WatchSettingsRequest._();
+
+  factory WatchSettingsRequest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory WatchSettingsRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'WatchSettingsRequest',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
+      createEmptyInstance: create)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  WatchSettingsRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  WatchSettingsRequest copyWith(void Function(WatchSettingsRequest) updates) =>
+      super.copyWith((message) => updates(message as WatchSettingsRequest))
+          as WatchSettingsRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static WatchSettingsRequest create() => WatchSettingsRequest._();
+  @$core.override
+  WatchSettingsRequest createEmptyInstance() => create();
+  static $pb.PbList<WatchSettingsRequest> createRepeated() =>
+      $pb.PbList<WatchSettingsRequest>();
+  @$core.pragma('dart2js:noInline')
+  static WatchSettingsRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<WatchSettingsRequest>(create);
+  static WatchSettingsRequest? _defaultInstance;
+}
+
+/// Each reply of WatchSettings is the whole of it.
+class Settings extends $pb.GeneratedMessage {
+  factory Settings({
+    $core.String? captureDir,
+  }) {
+    final result = create();
+    if (captureDir != null) result.captureDir = captureDir;
+    return result;
+  }
+
+  Settings._();
+
+  factory Settings.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory Settings.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'Settings',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'captureDir')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  Settings clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  Settings copyWith(void Function(Settings) updates) =>
+      super.copyWith((message) => updates(message as Settings)) as Settings;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static Settings create() => Settings._();
+  @$core.override
+  Settings createEmptyInstance() => create();
+  static $pb.PbList<Settings> createRepeated() => $pb.PbList<Settings>();
+  @$core.pragma('dart2js:noInline')
+  static Settings getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<Settings>(create);
+  static Settings? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get captureDir => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set captureDir($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasCaptureDir() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearCaptureDir() => $_clearField(1);
+}
+
+/// Each field set is changed; each unset is left as it is.
+class UpdateSettingsRequest extends $pb.GeneratedMessage {
+  factory UpdateSettingsRequest({
+    $core.String? captureDir,
+  }) {
+    final result = create();
+    if (captureDir != null) result.captureDir = captureDir;
+    return result;
+  }
+
+  UpdateSettingsRequest._();
+
+  factory UpdateSettingsRequest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory UpdateSettingsRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'UpdateSettingsRequest',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'captureDir')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UpdateSettingsRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  UpdateSettingsRequest copyWith(
+          void Function(UpdateSettingsRequest) updates) =>
+      super.copyWith((message) => updates(message as UpdateSettingsRequest))
+          as UpdateSettingsRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static UpdateSettingsRequest create() => UpdateSettingsRequest._();
+  @$core.override
+  UpdateSettingsRequest createEmptyInstance() => create();
+  static $pb.PbList<UpdateSettingsRequest> createRepeated() =>
+      $pb.PbList<UpdateSettingsRequest>();
+  @$core.pragma('dart2js:noInline')
+  static UpdateSettingsRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<UpdateSettingsRequest>(create);
+  static UpdateSettingsRequest? _defaultInstance;
+
+  /// An existing, writable directory on the server, relative to its working directory or absolute; empty turns
+  /// captures off. A capture in progress carries on in the directory it started in.
+  @$pb.TagNumber(1)
+  $core.String get captureDir => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set captureDir($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasCaptureDir() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearCaptureDir() => $_clearField(1);
+}
+
+class RecordCaptureRequest extends $pb.GeneratedMessage {
+  factory RecordCaptureRequest({
+    CapturePoint? point,
+    $core.double? durationS,
+    $core.String? name,
+  }) {
+    final result = create();
+    if (point != null) result.point = point;
+    if (durationS != null) result.durationS = durationS;
+    if (name != null) result.name = name;
+    return result;
+  }
+
+  RecordCaptureRequest._();
+
+  factory RecordCaptureRequest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory RecordCaptureRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'RecordCaptureRequest',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
+      createEmptyInstance: create)
+    ..aE<CapturePoint>(1, _omitFieldNames ? '' : 'point',
+        enumValues: CapturePoint.values)
+    ..aD(2, _omitFieldNames ? '' : 'durationS')
+    ..aOS(3, _omitFieldNames ? '' : 'name')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  RecordCaptureRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  RecordCaptureRequest copyWith(void Function(RecordCaptureRequest) updates) =>
+      super.copyWith((message) => updates(message as RecordCaptureRequest))
+          as RecordCaptureRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static RecordCaptureRequest create() => RecordCaptureRequest._();
+  @$core.override
+  RecordCaptureRequest createEmptyInstance() => create();
+  static $pb.PbList<RecordCaptureRequest> createRepeated() =>
+      $pb.PbList<RecordCaptureRequest>();
+  @$core.pragma('dart2js:noInline')
+  static RecordCaptureRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<RecordCaptureRequest>(create);
+  static RecordCaptureRequest? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  CapturePoint get point => $_getN(0);
+  @$pb.TagNumber(1)
+  set point(CapturePoint value) => $_setField(1, value);
+  @$pb.TagNumber(1)
+  $core.bool hasPoint() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearPoint() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.double get durationS => $_getN(1);
+  @$pb.TagNumber(2)
+  set durationS($core.double value) => $_setDouble(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasDurationS() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearDurationS() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.String get name => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set name($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasName() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearName() => $_clearField(3);
+}
+
+/// About twice a second while the capture runs, and a last one when it has covered its duration or the input
+/// ended first.
+class RecordCaptureProgress extends $pb.GeneratedMessage {
+  factory RecordCaptureProgress({
+    $fixnum.Int64? startIndex,
+    $fixnum.Int64? samples,
+    $fixnum.Int64? missing,
+    Capture? capture,
+  }) {
+    final result = create();
+    if (startIndex != null) result.startIndex = startIndex;
+    if (samples != null) result.samples = samples;
+    if (missing != null) result.missing = missing;
+    if (capture != null) result.capture = capture;
+    return result;
+  }
+
+  RecordCaptureProgress._();
+
+  factory RecordCaptureProgress.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory RecordCaptureProgress.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'RecordCaptureProgress',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
+      createEmptyInstance: create)
+    ..a<$fixnum.Int64>(
+        1, _omitFieldNames ? '' : 'startIndex', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$fixnum.Int64>(2, _omitFieldNames ? '' : 'samples', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$fixnum.Int64>(3, _omitFieldNames ? '' : 'missing', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..aOM<Capture>(4, _omitFieldNames ? '' : 'capture',
+        subBuilder: Capture.create)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  RecordCaptureProgress clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  RecordCaptureProgress copyWith(
+          void Function(RecordCaptureProgress) updates) =>
+      super.copyWith((message) => updates(message as RecordCaptureProgress))
+          as RecordCaptureProgress;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static RecordCaptureProgress create() => RecordCaptureProgress._();
+  @$core.override
+  RecordCaptureProgress createEmptyInstance() => create();
+  static $pb.PbList<RecordCaptureProgress> createRepeated() =>
+      $pb.PbList<RecordCaptureProgress>();
+  @$core.pragma('dart2js:noInline')
+  static RecordCaptureProgress getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<RecordCaptureProgress>(create);
+  static RecordCaptureProgress? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $fixnum.Int64 get startIndex => $_getI64(0);
+  @$pb.TagNumber(1)
+  set startIndex($fixnum.Int64 value) => $_setInt64(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasStartIndex() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearStartIndex() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $fixnum.Int64 get samples => $_getI64(1);
+  @$pb.TagNumber(2)
+  set samples($fixnum.Int64 value) => $_setInt64(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasSamples() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearSamples() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $fixnum.Int64 get missing => $_getI64(2);
+  @$pb.TagNumber(3)
+  set missing($fixnum.Int64 value) => $_setInt64(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasMissing() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearMissing() => $_clearField(3);
+
+  /// gap starts a new SigMF capture segment
+  @$pb.TagNumber(4)
+  Capture get capture => $_getN(3);
+  @$pb.TagNumber(4)
+  set capture(Capture value) => $_setField(4, value);
+  @$pb.TagNumber(4)
+  $core.bool hasCapture() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearCapture() => $_clearField(4);
+  @$pb.TagNumber(4)
+  Capture ensureCapture() => $_ensure(3);
+}
+
+class ListCapturesRequest extends $pb.GeneratedMessage {
+  factory ListCapturesRequest() => create();
+
+  ListCapturesRequest._();
+
+  factory ListCapturesRequest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ListCapturesRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ListCapturesRequest',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
+      createEmptyInstance: create)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ListCapturesRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ListCapturesRequest copyWith(void Function(ListCapturesRequest) updates) =>
+      super.copyWith((message) => updates(message as ListCapturesRequest))
+          as ListCapturesRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ListCapturesRequest create() => ListCapturesRequest._();
+  @$core.override
+  ListCapturesRequest createEmptyInstance() => create();
+  static $pb.PbList<ListCapturesRequest> createRepeated() =>
+      $pb.PbList<ListCapturesRequest>();
+  @$core.pragma('dart2js:noInline')
+  static ListCapturesRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ListCapturesRequest>(create);
+  static ListCapturesRequest? _defaultInstance;
+}
+
+class ListCapturesResponse extends $pb.GeneratedMessage {
+  factory ListCapturesResponse({
+    $core.String? dir,
+    $core.Iterable<Capture>? captures,
+    $core.int? notListed,
+  }) {
+    final result = create();
+    if (dir != null) result.dir = dir;
+    if (captures != null) result.captures.addAll(captures);
+    if (notListed != null) result.notListed = notListed;
+    return result;
+  }
+
+  ListCapturesResponse._();
+
+  factory ListCapturesResponse.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ListCapturesResponse.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ListCapturesResponse',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'dir')
+    ..pPM<Capture>(2, _omitFieldNames ? '' : 'captures',
+        subBuilder: Capture.create)
+    ..aI(3, _omitFieldNames ? '' : 'notListed', fieldType: $pb.PbFieldType.OU3)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ListCapturesResponse clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ListCapturesResponse copyWith(void Function(ListCapturesResponse) updates) =>
+      super.copyWith((message) => updates(message as ListCapturesResponse))
+          as ListCapturesResponse;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ListCapturesResponse create() => ListCapturesResponse._();
+  @$core.override
+  ListCapturesResponse createEmptyInstance() => create();
+  static $pb.PbList<ListCapturesResponse> createRepeated() =>
+      $pb.PbList<ListCapturesResponse>();
+  @$core.pragma('dart2js:noInline')
+  static ListCapturesResponse getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ListCapturesResponse>(create);
+  static ListCapturesResponse? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get dir => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set dir($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasDir() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearDir() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $pb.PbList<Capture> get captures => $_getList(1);
+
+  @$pb.TagNumber(3)
+  $core.int get notListed => $_getIZ(2);
+  @$pb.TagNumber(3)
+  set notListed($core.int value) => $_setUnsignedInt32(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasNotListed() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearNotListed() => $_clearField(3);
+}
+
+/// One recording in the capture directory.
+class Capture extends $pb.GeneratedMessage {
+  factory Capture({
+    $core.String? name,
+    $core.String? dataPath,
+    $fixnum.Int64? dataBytes,
+    $core.double? modifiedUnixS,
+    CaptureMeta? meta,
+  }) {
+    final result = create();
+    if (name != null) result.name = name;
+    if (dataPath != null) result.dataPath = dataPath;
+    if (dataBytes != null) result.dataBytes = dataBytes;
+    if (modifiedUnixS != null) result.modifiedUnixS = modifiedUnixS;
+    if (meta != null) result.meta = meta;
+    return result;
+  }
+
+  Capture._();
+
+  factory Capture.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory Capture.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'Capture',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'name')
+    ..aOS(2, _omitFieldNames ? '' : 'dataPath')
+    ..a<$fixnum.Int64>(
+        3, _omitFieldNames ? '' : 'dataBytes', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..aD(4, _omitFieldNames ? '' : 'modifiedUnixS')
+    ..aOM<CaptureMeta>(5, _omitFieldNames ? '' : 'meta',
+        subBuilder: CaptureMeta.create)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  Capture clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  Capture copyWith(void Function(Capture) updates) =>
+      super.copyWith((message) => updates(message as Capture)) as Capture;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static Capture create() => Capture._();
+  @$core.override
+  Capture createEmptyInstance() => create();
+  static $pb.PbList<Capture> createRepeated() => $pb.PbList<Capture>();
+  @$core.pragma('dart2js:noInline')
+  static Capture getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<Capture>(create);
+  static Capture? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get name => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set name($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasName() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearName() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get dataPath => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set dataPath($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasDataPath() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearDataPath() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $fixnum.Int64 get dataBytes => $_getI64(2);
+  @$pb.TagNumber(3)
+  set dataBytes($fixnum.Int64 value) => $_setInt64(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasDataBytes() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearDataBytes() => $_clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.double get modifiedUnixS => $_getN(3);
+  @$pb.TagNumber(4)
+  set modifiedUnixS($core.double value) => $_setDouble(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasModifiedUnixS() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearModifiedUnixS() => $_clearField(4);
+
+  @$pb.TagNumber(5)
+  CaptureMeta get meta => $_getN(4);
+  @$pb.TagNumber(5)
+  set meta(CaptureMeta value) => $_setField(5, value);
+  @$pb.TagNumber(5)
+  $core.bool hasMeta() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearMeta() => $_clearField(5);
+  @$pb.TagNumber(5)
+  CaptureMeta ensureMeta() => $_ensure(4);
+}
+
+/// What a recording's .sigmf-meta says.
+class CaptureMeta extends $pb.GeneratedMessage {
+  factory CaptureMeta({
+    $core.String? datatype,
+    $core.double? rateHz,
+    $core.double? freqHz,
+    $core.String? description,
+    $core.double? durationS,
+  }) {
+    final result = create();
+    if (datatype != null) result.datatype = datatype;
+    if (rateHz != null) result.rateHz = rateHz;
+    if (freqHz != null) result.freqHz = freqHz;
+    if (description != null) result.description = description;
+    if (durationS != null) result.durationS = durationS;
+    return result;
+  }
+
+  CaptureMeta._();
+
+  factory CaptureMeta.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory CaptureMeta.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'CaptureMeta',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'datatype')
+    ..aD(2, _omitFieldNames ? '' : 'rateHz')
+    ..aD(3, _omitFieldNames ? '' : 'freqHz')
+    ..aOS(4, _omitFieldNames ? '' : 'description')
+    ..aD(5, _omitFieldNames ? '' : 'durationS')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CaptureMeta clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CaptureMeta copyWith(void Function(CaptureMeta) updates) =>
+      super.copyWith((message) => updates(message as CaptureMeta))
+          as CaptureMeta;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static CaptureMeta create() => CaptureMeta._();
+  @$core.override
+  CaptureMeta createEmptyInstance() => create();
+  static $pb.PbList<CaptureMeta> createRepeated() => $pb.PbList<CaptureMeta>();
+  @$core.pragma('dart2js:noInline')
+  static CaptureMeta getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<CaptureMeta>(create);
+  static CaptureMeta? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get datatype => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set datatype($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasDatatype() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearDatatype() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.double get rateHz => $_getN(1);
+  @$pb.TagNumber(2)
+  set rateHz($core.double value) => $_setDouble(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasRateHz() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearRateHz() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.double get freqHz => $_getN(2);
+  @$pb.TagNumber(3)
+  set freqHz($core.double value) => $_setDouble(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasFreqHz() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearFreqHz() => $_clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.String get description => $_getSZ(3);
+  @$pb.TagNumber(4)
+  set description($core.String value) => $_setString(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasDescription() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearDescription() => $_clearField(4);
+
+  @$pb.TagNumber(5)
+  $core.double get durationS => $_getN(4);
+  @$pb.TagNumber(5)
+  set durationS($core.double value) => $_setDouble(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasDurationS() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearDurationS() => $_clearField(5);
+}
+
+class GetSnapshotRequest extends $pb.GeneratedMessage {
+  factory GetSnapshotRequest({
     $core.double? t,
   }) {
     final result = create();
@@ -1986,42 +1970,42 @@ class SnapshotRequest extends $pb.GeneratedMessage {
     return result;
   }
 
-  SnapshotRequest._();
+  GetSnapshotRequest._();
 
-  factory SnapshotRequest.fromBuffer($core.List<$core.int> data,
+  factory GetSnapshotRequest.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
       create()..mergeFromBuffer(data, registry);
-  factory SnapshotRequest.fromJson($core.String json,
+  factory GetSnapshotRequest.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
       create()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
-      _omitMessageNames ? '' : 'SnapshotRequest',
+      _omitMessageNames ? '' : 'GetSnapshotRequest',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
       createEmptyInstance: create)
     ..aD(1, _omitFieldNames ? '' : 't')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  SnapshotRequest clone() => deepCopy();
+  GetSnapshotRequest clone() => deepCopy();
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  SnapshotRequest copyWith(void Function(SnapshotRequest) updates) =>
-      super.copyWith((message) => updates(message as SnapshotRequest))
-          as SnapshotRequest;
+  GetSnapshotRequest copyWith(void Function(GetSnapshotRequest) updates) =>
+      super.copyWith((message) => updates(message as GetSnapshotRequest))
+          as GetSnapshotRequest;
 
   @$core.override
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
-  static SnapshotRequest create() => SnapshotRequest._();
+  static GetSnapshotRequest create() => GetSnapshotRequest._();
   @$core.override
-  SnapshotRequest createEmptyInstance() => create();
-  static $pb.PbList<SnapshotRequest> createRepeated() =>
-      $pb.PbList<SnapshotRequest>();
+  GetSnapshotRequest createEmptyInstance() => create();
+  static $pb.PbList<GetSnapshotRequest> createRepeated() =>
+      $pb.PbList<GetSnapshotRequest>();
   @$core.pragma('dart2js:noInline')
-  static SnapshotRequest getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<SnapshotRequest>(create);
-  static SnapshotRequest? _defaultInstance;
+  static GetSnapshotRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<GetSnapshotRequest>(create);
+  static GetSnapshotRequest? _defaultInstance;
 
   @$pb.TagNumber(1)
   $core.double get t => $_getN(0);
@@ -2262,8 +2246,8 @@ class TrackPoint extends $pb.GeneratedMessage {
   void clearAltitudeFt() => $_clearField(3);
 }
 
-class AircraftHistoryRequest extends $pb.GeneratedMessage {
-  factory AircraftHistoryRequest({
+class GetAircraftHistoryRequest extends $pb.GeneratedMessage {
+  factory GetAircraftHistoryRequest({
     $core.int? icao,
     $core.double? t,
   }) {
@@ -2273,17 +2257,17 @@ class AircraftHistoryRequest extends $pb.GeneratedMessage {
     return result;
   }
 
-  AircraftHistoryRequest._();
+  GetAircraftHistoryRequest._();
 
-  factory AircraftHistoryRequest.fromBuffer($core.List<$core.int> data,
+  factory GetAircraftHistoryRequest.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
       create()..mergeFromBuffer(data, registry);
-  factory AircraftHistoryRequest.fromJson($core.String json,
+  factory GetAircraftHistoryRequest.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
       create()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
-      _omitMessageNames ? '' : 'AircraftHistoryRequest',
+      _omitMessageNames ? '' : 'GetAircraftHistoryRequest',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
       createEmptyInstance: create)
     ..aI(1, _omitFieldNames ? '' : 'icao', fieldType: $pb.PbFieldType.OU3)
@@ -2291,26 +2275,26 @@ class AircraftHistoryRequest extends $pb.GeneratedMessage {
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  AircraftHistoryRequest clone() => deepCopy();
+  GetAircraftHistoryRequest clone() => deepCopy();
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  AircraftHistoryRequest copyWith(
-          void Function(AircraftHistoryRequest) updates) =>
-      super.copyWith((message) => updates(message as AircraftHistoryRequest))
-          as AircraftHistoryRequest;
+  GetAircraftHistoryRequest copyWith(
+          void Function(GetAircraftHistoryRequest) updates) =>
+      super.copyWith((message) => updates(message as GetAircraftHistoryRequest))
+          as GetAircraftHistoryRequest;
 
   @$core.override
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
-  static AircraftHistoryRequest create() => AircraftHistoryRequest._();
+  static GetAircraftHistoryRequest create() => GetAircraftHistoryRequest._();
   @$core.override
-  AircraftHistoryRequest createEmptyInstance() => create();
-  static $pb.PbList<AircraftHistoryRequest> createRepeated() =>
-      $pb.PbList<AircraftHistoryRequest>();
+  GetAircraftHistoryRequest createEmptyInstance() => create();
+  static $pb.PbList<GetAircraftHistoryRequest> createRepeated() =>
+      $pb.PbList<GetAircraftHistoryRequest>();
   @$core.pragma('dart2js:noInline')
-  static AircraftHistoryRequest getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<AircraftHistoryRequest>(create);
-  static AircraftHistoryRequest? _defaultInstance;
+  static GetAircraftHistoryRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<GetAircraftHistoryRequest>(create);
+  static GetAircraftHistoryRequest? _defaultInstance;
 
   @$pb.TagNumber(1)
   $core.int get icao => $_getIZ(0);
@@ -2512,8 +2496,8 @@ class AircraftHistory extends $pb.GeneratedMessage {
   $pb.PbList<AircraftHistory_Point> get points => $_getList(1);
 }
 
-class ActivityRequest extends $pb.GeneratedMessage {
-  factory ActivityRequest({
+class GetActivityRequest extends $pb.GeneratedMessage {
+  factory GetActivityRequest({
     $core.double? from,
   }) {
     final result = create();
@@ -2521,42 +2505,42 @@ class ActivityRequest extends $pb.GeneratedMessage {
     return result;
   }
 
-  ActivityRequest._();
+  GetActivityRequest._();
 
-  factory ActivityRequest.fromBuffer($core.List<$core.int> data,
+  factory GetActivityRequest.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
       create()..mergeFromBuffer(data, registry);
-  factory ActivityRequest.fromJson($core.String json,
+  factory GetActivityRequest.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
       create()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
-      _omitMessageNames ? '' : 'ActivityRequest',
+      _omitMessageNames ? '' : 'GetActivityRequest',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
       createEmptyInstance: create)
     ..aD(1, _omitFieldNames ? '' : 'from')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  ActivityRequest clone() => deepCopy();
+  GetActivityRequest clone() => deepCopy();
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  ActivityRequest copyWith(void Function(ActivityRequest) updates) =>
-      super.copyWith((message) => updates(message as ActivityRequest))
-          as ActivityRequest;
+  GetActivityRequest copyWith(void Function(GetActivityRequest) updates) =>
+      super.copyWith((message) => updates(message as GetActivityRequest))
+          as GetActivityRequest;
 
   @$core.override
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
-  static ActivityRequest create() => ActivityRequest._();
+  static GetActivityRequest create() => GetActivityRequest._();
   @$core.override
-  ActivityRequest createEmptyInstance() => create();
-  static $pb.PbList<ActivityRequest> createRepeated() =>
-      $pb.PbList<ActivityRequest>();
+  GetActivityRequest createEmptyInstance() => create();
+  static $pb.PbList<GetActivityRequest> createRepeated() =>
+      $pb.PbList<GetActivityRequest>();
   @$core.pragma('dart2js:noInline')
-  static ActivityRequest getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<ActivityRequest>(create);
-  static ActivityRequest? _defaultInstance;
+  static GetActivityRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<GetActivityRequest>(create);
+  static GetActivityRequest? _defaultInstance;
 
   @$pb.TagNumber(1)
   $core.double get from => $_getN(0);
@@ -2640,8 +2624,8 @@ class Activity extends $pb.GeneratedMessage {
   $pb.PbList<$core.int> get counts => $_getList(2);
 }
 
-class HeatmapRequest extends $pb.GeneratedMessage {
-  factory HeatmapRequest({
+class GetHeatmapRequest extends $pb.GeneratedMessage {
+  factory GetHeatmapRequest({
     $core.double? west,
     $core.double? south,
     $core.double? east,
@@ -2663,17 +2647,17 @@ class HeatmapRequest extends $pb.GeneratedMessage {
     return result;
   }
 
-  HeatmapRequest._();
+  GetHeatmapRequest._();
 
-  factory HeatmapRequest.fromBuffer($core.List<$core.int> data,
+  factory GetHeatmapRequest.fromBuffer($core.List<$core.int> data,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
       create()..mergeFromBuffer(data, registry);
-  factory HeatmapRequest.fromJson($core.String json,
+  factory GetHeatmapRequest.fromJson($core.String json,
           [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
       create()..mergeFromJson(json, registry);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
-      _omitMessageNames ? '' : 'HeatmapRequest',
+      _omitMessageNames ? '' : 'GetHeatmapRequest',
       package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
       createEmptyInstance: create)
     ..aD(1, _omitFieldNames ? '' : 'west')
@@ -2687,25 +2671,25 @@ class HeatmapRequest extends $pb.GeneratedMessage {
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  HeatmapRequest clone() => deepCopy();
+  GetHeatmapRequest clone() => deepCopy();
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
-  HeatmapRequest copyWith(void Function(HeatmapRequest) updates) =>
-      super.copyWith((message) => updates(message as HeatmapRequest))
-          as HeatmapRequest;
+  GetHeatmapRequest copyWith(void Function(GetHeatmapRequest) updates) =>
+      super.copyWith((message) => updates(message as GetHeatmapRequest))
+          as GetHeatmapRequest;
 
   @$core.override
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
-  static HeatmapRequest create() => HeatmapRequest._();
+  static GetHeatmapRequest create() => GetHeatmapRequest._();
   @$core.override
-  HeatmapRequest createEmptyInstance() => create();
-  static $pb.PbList<HeatmapRequest> createRepeated() =>
-      $pb.PbList<HeatmapRequest>();
+  GetHeatmapRequest createEmptyInstance() => create();
+  static $pb.PbList<GetHeatmapRequest> createRepeated() =>
+      $pb.PbList<GetHeatmapRequest>();
   @$core.pragma('dart2js:noInline')
-  static HeatmapRequest getDefault() => _defaultInstance ??=
-      $pb.GeneratedMessage.$_defaultFor<HeatmapRequest>(create);
-  static HeatmapRequest? _defaultInstance;
+  static GetHeatmapRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<GetHeatmapRequest>(create);
+  static GetHeatmapRequest? _defaultInstance;
 
   @$pb.TagNumber(1)
   $core.double get west => $_getN(0);
@@ -2845,6 +2829,97 @@ class Heatmap extends $pb.GeneratedMessage {
 
   @$pb.TagNumber(3)
   $pb.PbList<$core.int> get cellCount => $_getList(2);
+}
+
+/// The live pipeline. Served with a live input, not by `serve`.
+class ReceiverApi {
+  final $pb.RpcClient _client;
+
+  ReceiverApi(this._client);
+
+  $async.Future<ReceiverInfo> getReceiverInfo(
+          $pb.ClientContext? ctx, GetReceiverInfoRequest request) =>
+      _client.invoke<ReceiverInfo>(
+          ctx, 'Receiver', 'GetReceiverInfo', request, ReceiverInfo());
+
+  /// The frames decoded, a batch per interval that has any.
+  $async.Future<FrameBatch> watchFrames(
+          $pb.ClientContext? ctx, WatchFramesRequest request) =>
+      _client.invoke<FrameBatch>(
+          ctx, 'Receiver', 'WatchFrames', request, FrameBatch());
+
+  /// The aircraft: every one heard in the last 600 s at once, then those that changed, per interval that has any.
+  $async.Future<AircraftChanges> watchAircraft(
+          $pb.ClientContext? ctx, WatchAircraftRequest request) =>
+      _client.invoke<AircraftChanges>(
+          ctx, 'Receiver', 'WatchAircraft', request, AircraftChanges());
+
+  /// The input's status, once there is one, then at each change.
+  $async.Future<InputStatus> watchInputStatus(
+          $pb.ClientContext? ctx, WatchInputStatusRequest request) =>
+      _client.invoke<InputStatus>(
+          ctx, 'Receiver', 'WatchInputStatus', request, InputStatus());
+
+  /// The spectrum's rows as they're computed. The server computes them only while one of these calls is open.
+  $async.Future<SpectrumRow> watchSpectrum(
+          $pb.ClientContext? ctx, WatchSpectrumRequest request) =>
+      _client.invoke<SpectrumRow>(
+          ctx, 'Receiver', 'WatchSpectrum', request, SpectrumRow());
+
+  /// The settings clients set, now and at each change, from any client.
+  $async.Future<Settings> watchSettings(
+          $pb.ClientContext? ctx, WatchSettingsRequest request) =>
+      _client.invoke<Settings>(
+          ctx, 'Receiver', 'WatchSettings', request, Settings());
+
+  /// Changes the settings for every client; replies with them as they are after the change.
+  $async.Future<Settings> updateSettings(
+          $pb.ClientContext? ctx, UpdateSettingsRequest request) =>
+      _client.invoke<Settings>(
+          ctx, 'Receiver', 'UpdateSettings', request, Settings());
+
+  /// Records one point of the pipeline to a SigMF recording in Settings.capture_dir, from the next block on,
+  /// reporting its progress. One capture per point at a time; cancelling stops it, keeping what's written.
+  $async.Future<RecordCaptureProgress> recordCapture(
+          $pb.ClientContext? ctx, RecordCaptureRequest request) =>
+      _client.invoke<RecordCaptureProgress>(
+          ctx, 'Receiver', 'RecordCapture', request, RecordCaptureProgress());
+
+  /// The recordings in the capture directory: every .sigmf-data there, whoever wrote it.
+  $async.Future<ListCapturesResponse> listCaptures(
+          $pb.ClientContext? ctx, ListCapturesRequest request) =>
+      _client.invoke<ListCapturesResponse>(
+          ctx, 'Receiver', 'ListCaptures', request, ListCapturesResponse());
+}
+
+/// The history database. Served with --history-db.
+class HistoryApi {
+  final $pb.RpcClient _client;
+
+  HistoryApi(this._client);
+
+  /// Every aircraft as it was at a time, with its track up to then.
+  $async.Future<Snapshot> getSnapshot(
+          $pb.ClientContext? ctx, GetSnapshotRequest request) =>
+      _client.invoke<Snapshot>(
+          ctx, 'History', 'GetSnapshot', request, Snapshot());
+
+  /// One aircraft's values over time, up to a time.
+  $async.Future<AircraftHistory> getAircraftHistory(
+          $pb.ClientContext? ctx, GetAircraftHistoryRequest request) =>
+      _client.invoke<AircraftHistory>(
+          ctx, 'History', 'GetAircraftHistory', request, AircraftHistory());
+
+  /// How many aircraft were heard, per time bucket.
+  $async.Future<Activity> getActivity(
+          $pb.ClientContext? ctx, GetActivityRequest request) =>
+      _client.invoke<Activity>(
+          ctx, 'History', 'GetActivity', request, Activity());
+
+  /// How many flights crossed each cell of an area.
+  $async.Future<Heatmap> getHeatmap(
+          $pb.ClientContext? ctx, GetHeatmapRequest request) =>
+      _client.invoke<Heatmap>(ctx, 'History', 'GetHeatmap', request, Heatmap());
 }
 
 const $core.bool _omitFieldNames =

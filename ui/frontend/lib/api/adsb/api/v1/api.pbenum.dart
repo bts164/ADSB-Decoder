@@ -14,66 +14,26 @@ import 'dart:core' as $core;
 
 import 'package:protobuf/protobuf.dart' as $pb;
 
-class Error_Code extends $pb.ProtobufEnum {
-  static const Error_Code CODE_UNSPECIFIED =
-      Error_Code._(0, _omitEnumNames ? '' : 'CODE_UNSPECIFIED');
-  static const Error_Code UNIMPLEMENTED =
-      Error_Code._(1, _omitEnumNames ? '' : 'UNIMPLEMENTED');
-  static const Error_Code INVALID_ARGUMENT =
-      Error_Code._(2, _omitEnumNames ? '' : 'INVALID_ARGUMENT');
-  static const Error_Code NO_HISTORY =
-      Error_Code._(3, _omitEnumNames ? '' : 'NO_HISTORY');
-  static const Error_Code INTERNAL =
-      Error_Code._(4, _omitEnumNames ? '' : 'INTERNAL');
-  static const Error_Code CANCELLED =
-      Error_Code._(5, _omitEnumNames ? '' : 'CANCELLED');
-  static const Error_Code RESOURCE_EXHAUSTED =
-      Error_Code._(6, _omitEnumNames ? '' : 'RESOURCE_EXHAUSTED');
-  static const Error_Code NO_LIVE_INPUT =
-      Error_Code._(7, _omitEnumNames ? '' : 'NO_LIVE_INPUT');
-  static const Error_Code NO_CAPTURE =
-      Error_Code._(8, _omitEnumNames ? '' : 'NO_CAPTURE');
+class CapturePoint extends $pb.ProtobufEnum {
+  static const CapturePoint CAPTURE_POINT_UNSPECIFIED =
+      CapturePoint._(0, _omitEnumNames ? '' : 'CAPTURE_POINT_UNSPECIFIED');
+  static const CapturePoint INPUT =
+      CapturePoint._(1, _omitEnumNames ? '' : 'INPUT');
+  static const CapturePoint ENVELOPE =
+      CapturePoint._(2, _omitEnumNames ? '' : 'ENVELOPE');
 
-  static const $core.List<Error_Code> values = <Error_Code>[
-    CODE_UNSPECIFIED,
-    UNIMPLEMENTED,
-    INVALID_ARGUMENT,
-    NO_HISTORY,
-    INTERNAL,
-    CANCELLED,
-    RESOURCE_EXHAUSTED,
-    NO_LIVE_INPUT,
-    NO_CAPTURE,
-  ];
-
-  static final $core.List<Error_Code?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 8);
-  static Error_Code? valueOf($core.int value) =>
-      value < 0 || value >= _byValue.length ? null : _byValue[value];
-
-  const Error_Code._(super.value, super.name);
-}
-
-class CaptureRequest_Point extends $pb.ProtobufEnum {
-  static const CaptureRequest_Point POINT_UNSPECIFIED =
-      CaptureRequest_Point._(0, _omitEnumNames ? '' : 'POINT_UNSPECIFIED');
-  static const CaptureRequest_Point INPUT =
-      CaptureRequest_Point._(1, _omitEnumNames ? '' : 'INPUT');
-  static const CaptureRequest_Point ENVELOPE =
-      CaptureRequest_Point._(2, _omitEnumNames ? '' : 'ENVELOPE');
-
-  static const $core.List<CaptureRequest_Point> values = <CaptureRequest_Point>[
-    POINT_UNSPECIFIED,
+  static const $core.List<CapturePoint> values = <CapturePoint>[
+    CAPTURE_POINT_UNSPECIFIED,
     INPUT,
     ENVELOPE,
   ];
 
-  static final $core.List<CaptureRequest_Point?> _byValue =
+  static final $core.List<CapturePoint?> _byValue =
       $pb.ProtobufEnum.$_initByValueList(values, 2);
-  static CaptureRequest_Point? valueOf($core.int value) =>
+  static CapturePoint? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
-  const CaptureRequest_Point._(super.value, super.name);
+  const CapturePoint._(super.value, super.name);
 }
 
 class Aircraft_AltitudeSource extends $pb.ProtobufEnum {

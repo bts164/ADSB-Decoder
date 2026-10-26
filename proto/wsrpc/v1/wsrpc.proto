@@ -1,0 +1,44 @@
+// The framing of wsrpc: calls to protobuf services over one WebSocket connection. Every WebSocket message is one
+// binary frame holding one of these: a ClientFrame from the client, or a ServerFrame from the server. It knows
+// nothing of the services: it carries a call's id, its method's name and its messages as bytes, which both ends
+// parse, since both are generated from the services' .proto. doc/design/ui_api.md describes the protocol.
+
+syntax = "proto3";
+
+package wsrpc.v1;
+
+message ClientFrame {
+  uint32 id = 1;               // 0 for the hello; otherwise the call's
+  Hello hello = 2;             // the connection's first frame, and only there
+  string method = 3;           // a call's first frame only, e.g. "/adsb.api.v1.Receiver/WatchFrames"
+  optional bytes request = 4;  // one serialized request of the method's type
+  bool end = 5;                // the client sends no more requests on this call
+  bool cancel = 6;             // cancel the call; nothing else is set
+}
+
+message ServerFrame {
+  uint32 id = 1;             // the call this belongs to; 0 for the hello
+  Hello hello = 2;           // the answer to the client's hello
+  optional bytes reply = 3;  // one serialized reply of the method's type
+  bool end = 4;              // the call's last frame
+  Error error = 5;           // with end only
+}
+
+message Hello {
+  // Full names, e.g. "adsb.api.v1.Receiver". The client's: those it knows; the server's: those it serves.
+  repeated string services = 1;
+}
+
+message Error {
+  enum Code {  // gRPC's names and numbers
+    CODE_UNSPECIFIED = 0;
+    CANCELLED = 1;            // the client cancelled it
+    INVALID_ARGUMENT = 3;     // e.g. an id not larger than the last, or a request that doesn't parse
+    RESOURCE_EXHAUSTED = 8;   // the calls in progress are at the cap, or a client stream sent too far ahead
+    FAILED_PRECONDITION = 9;  // the server can't answer it now
+    UNIMPLEMENTED = 12;       // a method or a service this server doesn't serve
+    INTERNAL = 13;            // the handler failed; the server logged why
+  }
+  Code code = 1;
+  string message = 2;
+}

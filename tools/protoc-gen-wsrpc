@@ -1,0 +1,396 @@
+#!/usr/bin/env python3
+"""protoc plugin: generates the wsrpc protocol code for a .proto's services.
+
+    protoc --plugin=protoc-gen-wsrpc=tools/protoc-gen-wsrpc --wsrpc_out=lang=cpp:<dir> -I proto <file.proto>
+    protoc --plugin=protoc-gen-wsrpc=tools/protoc-gen-wsrpc \
+        --wsrpc_opt=lang=dart,runtime=package:<app>/wsrpc/channel.dart --wsrpc_out=<dir> -I proto <file.proto>
+
+For each file, lang=cpp writes <file>.wsrpc.h and <file>.wsrpc.cc beside where protoc's own C++ goes: a base
+class per service, with a pure virtual handler per rpc, and the method table the wsrpc runtime dispatches by.
+Every file gets both outputs, even one without services, so a build can name them in advance.
+
+lang=dart writes <file>.wsrpc.dart beside where protoc_plugin's Dart goes: a client class per service, with a
+method per rpc that makes the call through the runtime's WsRpcChannel, which `runtime` imports. A file without
+services gets nothing, since its Dart is committed rather than named by a build. doc/design/ui_api.md describes
+both outputs.
+
+Requires the protobuf package (`pip install protobuf`). It reads only CodeGeneratorRequest, whose format is
+stable, so its version needn't match protoc's.
+"""
+
+import posixpath
+import re
+import sys
+import textwrap
+
+from google.protobuf import descriptor_pb2
+from google.protobuf.compiler import plugin_pb2
+
+# Lower-case C++ keywords and alternative tokens: a handler can't be named any of them.
+CPP_KEYWORDS = frozenset("""
+    alignas alignof and and_eq asm auto bitand bitor bool break case catch char char8_t char16_t char32_t class
+    compl concept const consteval constexpr constinit const_cast continue co_await co_return co_yield decltype
+    default delete do double dynamic_cast else enum explicit export extern false float for friend goto if inline
+    int long mutable namespace new noexcept not not_eq nullptr operator or or_eq private protected public register
+    reinterpret_cast requires return short signed sizeof static static_assert static_cast struct switch template
+    this thread_local throw true try typedef typeid typename union unsigned using virtual void volatile wchar_t
+    while xor xor_eq
+""".split())
+
+# wsrpc::Service's own members, which a handler would hide.
+SERVICE_MEMBERS = frozenset({"name", "find"})
+
+# Dart's reserved words, which a method can't be named; its built-in identifiers (get, set, ...) are fine.
+DART_RESERVED = frozenset("""
+    assert break case catch class const continue default do else enum extends false final finally for if in is
+    new null rethrow return super switch this throw true try var void while with
+""".split())
+
+# Members a Dart client has, from Object or of its own, which a method would hide or clash with.
+DART_CLIENT_MEMBERS = frozenset({"hashCode", "noSuchMethod", "runtimeType", "toString", "service"})
+
+# Paths into FileDescriptorProto, for its source locations: field numbers of service, and of a service's method.
+SERVICE_FIELD = 6
+METHOD_FIELD = 2
+
+
+class Refused(Exception):
+    """A .proto this plugin can't generate for; the message says why."""
+
+
+def snake_case(name):
+    """GetReceiverInfo to get_receiver_info; an acronym stays one word: GetURLList to get_url_list."""
+    name = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", name)
+    name = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name)
+    return name.lower()
+
+
+def lower_camel_case(name):
+    """GetReceiverInfo to getReceiverInfo; a leading acronym is lowered whole: URLList to urlList."""
+    upper = len(name) - len(name.lstrip("ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
+    if upper > 1 and upper < len(name) and name[upper].islower():
+        upper -= 1
+    return name[:upper].lower() + name[upper:]
+
+
+def cpp_namespace(package):
+    return package.replace(".", "::")
+
+
+class TypeNames:
+    """Each message's C++ name, by its full proto name, across every file protoc passed."""
+
+    def __init__(self, files):
+        self.by_proto = {}
+        self.files = {}
+        for f in files:
+            for message in f.message_type:
+                self._add(f.name, f.package, message, [])
+
+    def _add(self, file, package, message, outer):
+        path = outer + [message.name]
+        full = ".".join(([package] if package else []) + path)
+        # protoc's C++ names a nested message Outer_Inner, at namespace scope.
+        self.by_proto["." + full] = (package, "_".join(path))
+        self.files["." + full] = file
+        for nested in message.nested_type:
+            self._add(file, package, nested, path)
+
+    def file_of(self, proto_name):
+        return self.files[proto_name]
+
+    def dart(self, proto_name):
+        """The Dart class name protoc_plugin gives a message: nested ones are Outer_Inner too."""
+        return self.by_proto[proto_name][1]
+
+    def cpp(self, proto_name, package):
+        """The C++ name for a message, as written in `package`'s namespace."""
+        message_package, name = self.by_proto[proto_name]
+        if message_package == package:
+            return name
+        return "::" + cpp_namespace(message_package) + "::" + name if message_package else "::" + name
+
+
+def comments(file, path):
+    """The leading comment at a source path, as lines without the //, or none."""
+    for location in file.source_code_info.location:
+        if tuple(location.path) == path and location.leading_comments:
+            return location.leading_comments.rstrip("\n").split("\n")
+    return []
+
+
+def comment_block(lines, indent, marker="//"):
+    return "".join(f"{indent}{marker}{(' ' + line.strip()) if line.strip() else ''}\n" for line in lines)
+
+
+class Method:
+    def __init__(self, method, comment, package, types):
+        self.rpc = method.name
+        self.handler = snake_case(method.name)
+        self.comment = comment
+        self.input_type = method.input_type
+        self.output_type = method.output_type
+        self.request = types.cpp(method.input_type, package)
+        self.reply = types.cpp(method.output_type, package)
+        self.client_streaming = method.client_streaming
+        self.server_streaming = method.server_streaming
+
+    @property
+    def adapter(self):
+        if self.client_streaming:
+            return "bidi" if self.server_streaming else "client_streaming"
+        return "server_streaming" if self.server_streaming else "unary"
+
+    def declaration(self):
+        returns = f"coro::CoroStream<{self.reply}>" if self.server_streaming else f"coro::Coro<{self.reply}>"
+        if self.client_streaming:
+            parameter = f"coro::CoroStream<{self.request}> requests"
+        else:
+            parameter = f"const {self.request}& request"
+        return f"virtual {returns} {self.handler}({parameter}) = 0;"
+
+
+class Service:
+    def __init__(self, file, index, service, types):
+        self.name = service.name
+        self.full_name = f"{file.package}.{service.name}" if file.package else service.name
+        self.comment = comments(file, (SERVICE_FIELD, index))
+        self.methods = [
+            Method(m, comments(file, (SERVICE_FIELD, index, METHOD_FIELD, i)), file.package, types)
+            for i, m in enumerate(service.method)
+        ]
+
+    def check(self):
+        where = f"service {self.name}"
+        seen = {}
+        for m in self.methods:
+            if m.handler in CPP_KEYWORDS:
+                raise Refused(f"{where}: rpc {m.rpc}'s handler, {m.handler}, would be a C++ keyword")
+            if m.handler in SERVICE_MEMBERS:
+                raise Refused(f"{where}: rpc {m.rpc}'s handler, {m.handler}, would hide wsrpc::Service::{m.handler}")
+            if "__" in m.handler:
+                raise Refused(f"{where}: rpc {m.rpc}'s handler, {m.handler}, would be a reserved C++ name")
+            if m.handler in seen:
+                raise Refused(f"{where}: rpcs {seen[m.handler]} and {m.rpc} would both have the handler {m.handler}")
+            seen[m.handler] = m.rpc
+
+
+def generated_name(proto_name, extension):
+    return proto_name.removesuffix(".proto") + extension
+
+
+def block(template, **values):
+    """A template indented with the code around it. It's dedented before it's filled, since a value of several
+    lines would leave dedent no common indentation to remove."""
+    return textwrap.dedent(template).format(**values)
+
+
+# Each block below starts with the blank line that separates it from the one before.
+
+def in_namespace(package, body):
+    namespace = cpp_namespace(package)
+    if not namespace:
+        return body
+    return block("""
+        namespace {namespace} {{
+        {body}
+        }}  // namespace {namespace}
+        """, namespace=namespace, body=body)
+
+
+def cpp_class(s):
+    handlers = "".join(f"\n{comment_block(m.comment, '    ')}    {m.declaration()}\n" for m in s.methods)
+    return block("""
+        {comment}class {s.name} : public wsrpc::Service {{
+        public:
+            static constexpr std::string_view kName = "{s.full_name}";
+        {handlers}
+            std::string_view name() const final {{ return kName; }}
+            const wsrpc::Method* find(std::string_view method) const final;
+        }};
+        """, s=s, comment=comment_block(s.comment, ""), handlers=handlers)
+
+
+def cpp_find(s):
+    entries = "".join(f'        wsrpc::{m.adapter}<&{s.name}::{m.handler}>("{m.rpc}"),\n' for m in s.methods)
+    return block("""
+        const wsrpc::Method* {s.name}::find(std::string_view method) const {{
+            static const wsrpc::MethodTable kMethods{{
+        {entries}    }};
+            return kMethods.find(method);
+        }}
+        """, s=s, entries=entries)
+
+
+def cpp_header(file, services):
+    return block("""\
+        // Generated by protoc-gen-wsrpc from {proto}. Do not edit.
+        #pragma once
+
+        #include <string_view>
+
+        #include <coro/coro.h>
+        #include <coro/coro_stream.h>
+
+        #include "wsrpc/service.h"
+
+        #include "{messages}"
+        {classes}""",
+        proto=file.name,
+        messages=generated_name(file.name, ".pb.h"),
+        classes=in_namespace(file.package, "".join(cpp_class(s) for s in services)))
+
+
+def cpp_source(file, services):
+    return block("""\
+        // Generated by protoc-gen-wsrpc from {proto}. Do not edit.
+        #include "{header}"
+        {finds}""",
+        proto=file.name,
+        header=generated_name(file.name, ".wsrpc.h"),
+        finds=in_namespace(file.package, "".join(cpp_find(s) for s in services)))
+
+
+def generate_cpp(request, response):
+    files = {f.name: f for f in request.proto_file}
+    types = TypeNames(request.proto_file)
+    for name in request.file_to_generate:
+        file = files[name]
+        services = [Service(file, i, s, types) for i, s in enumerate(file.service)]
+        for s in services:
+            s.check()
+        response.file.add(name=generated_name(name, ".wsrpc.h"), content=cpp_header(file, services))
+        response.file.add(name=generated_name(name, ".wsrpc.cc"), content=cpp_source(file, services))
+
+
+def check_dart(s):
+    where = f"service {s.name}"
+    seen = {}
+    for m in s.methods:
+        name = lower_camel_case(m.rpc)
+        if name in DART_RESERVED:
+            raise Refused(f"{where}: rpc {m.rpc}'s Dart method, {name}, would be a Dart reserved word")
+        if name in DART_CLIENT_MEMBERS:
+            raise Refused(f"{where}: rpc {m.rpc}'s Dart method, {name}, would clash with the client's {name}")
+        if name in seen:
+            raise Refused(f"{where}: rpcs {seen[name]} and {m.rpc} would both have the Dart method {name}")
+        seen[name] = m.rpc
+
+
+class DartImports:
+    """The message classes' files a .wsrpc.dart imports: its own unprefixed, each other one with a prefix."""
+
+    def __init__(self, file, types):
+        self.file = file
+        self.types = types
+        self.prefixes = {}
+
+    def type(self, proto_name):
+        other = self.types.file_of(proto_name)
+        name = self.types.dart(proto_name)
+        if other == self.file.name:
+            return name
+        prefix = self.prefixes.setdefault(other, f"${len(self.prefixes) + 1}")
+        return f"{prefix}.{name}"
+
+    def lines(self):
+        here = posixpath.dirname(self.file.name)
+        own = posixpath.relpath(generated_name(self.file.name, ".pb.dart"), here)
+        others = "".join(
+            f"import '{posixpath.relpath(generated_name(f, '.pb.dart'), here)}' as {prefix};\n"
+            for f, prefix in self.prefixes.items())
+        return f"import '{own}';\n{others}"
+
+
+def dart_method(s, m, imports):
+    request = imports.type(m.input_type)
+    reply = imports.type(m.output_type)
+    returns = f"$async.Stream<{reply}>" if m.server_streaming else f"$wsrpc.UnaryCall<{reply}>"
+    parameter = f"$async.Stream<{request}> requests" if m.client_streaming else f"{request} request"
+    call = {"unary": "unary", "server_streaming": "serverStreaming", "client_streaming": "clientStreaming",
+            "bidi": "bidi"}[m.adapter]
+    argument = "requests" if m.client_streaming else "request"
+    return (f"\n{comment_block(m.comment, '  ', '///')}  {returns} {lower_camel_case(m.rpc)}({parameter}) =>\n"
+            f"      _channel.{call}('/{s.full_name}/{m.rpc}', {argument}, {reply}.fromBuffer);\n")
+
+
+def dart_class(s, imports):
+    methods = "".join(dart_method(s, m, imports) for m in s.methods)
+    return block("""
+        {comment}class {s.name}Client {{
+          {s.name}Client(this._channel);
+
+          static const service = '{s.full_name}';
+
+          final $wsrpc.WsRpcChannel _channel;
+        {methods}}}
+        """, s=s, comment=comment_block(s.comment, "", "///"), methods=methods)
+
+
+def dart_file(file, services, types, runtime):
+    imports = DartImports(file, types)
+    classes = "".join(dart_class(s, imports) for s in services)
+    return block("""\
+        // Generated by protoc-gen-wsrpc from {proto}. Do not edit.
+
+        // ignore_for_file: library_prefixes
+
+        import 'dart:async' as $async;
+
+        import '{runtime}' as $wsrpc;
+
+        {imports}{classes}""",
+        proto=file.name, runtime=runtime, imports=imports.lines(), classes=classes)
+
+
+def generate_dart(request, response, runtime):
+    files = {f.name: f for f in request.proto_file}
+    types = TypeNames(request.proto_file)
+    for name in request.file_to_generate:
+        file = files[name]
+        services = [Service(file, i, s, types) for i, s in enumerate(file.service)]
+        if not services:
+            continue
+        for s in services:
+            check_dart(s)
+        response.file.add(name=generated_name(name, ".wsrpc.dart"), content=dart_file(file, services, types, runtime))
+
+
+def parameters(text):
+    params = {}
+    for item in filter(None, text.split(",")):
+        key, sep, value = item.partition("=")
+        if not sep:
+            raise Refused(f"parameter {item!r} isn't key=value")
+        params[key] = value
+    return params
+
+
+def main():
+    request = plugin_pb2.CodeGeneratorRequest.FromString(sys.stdin.buffer.read())
+    response = plugin_pb2.CodeGeneratorResponse()
+    response.supported_features = plugin_pb2.CodeGeneratorResponse.FEATURE_PROTO3_OPTIONAL
+    try:
+        params = parameters(request.parameter)
+        unknown = params.keys() - {"lang", "runtime"}
+        if unknown:
+            raise Refused(f"unknown parameters: {', '.join(sorted(unknown))}")
+        lang = params.get("lang")
+        if lang == "cpp":
+            generate_cpp(request, response)
+        elif lang == "dart":
+            runtime = params.get("runtime")
+            if not runtime:
+                raise Refused("lang=dart needs runtime=<the import of WsRpcChannel>, e.g. "
+                              "runtime=package:<app>/wsrpc/channel.dart")
+            generate_dart(request, response, runtime)
+        else:
+            raise Refused("the parameter lang=cpp or lang=dart is required, e.g. --wsrpc_out=lang=cpp:<dir>")
+    except Refused as e:
+        response.Clear()
+        response.error = str(e)
+    sys.stdout.buffer.write(response.SerializeToString())
+
+
+if __name__ == "__main__":
+    main()

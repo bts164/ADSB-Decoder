@@ -25,6 +25,25 @@ add_executable(block_stitcher_test block_stitcher_test.cpp)
 target_link_libraries(block_stitcher_test PRIVATE adsb_dsp)
 add_test(NAME block_stitcher_test COMMAND block_stitcher_test)
 
+# The wsrpc runtime's tests, against wsrpc_test.proto's services, as a WebSocket client sees them. They also
+# check that protoc-gen-wsrpc's output for each kind of rpc compiles against the runtime.
+add_executable(wsrpc_test wsrpc_test.cpp)
+protobuf_generate(
+    TARGET wsrpc_test
+    PROTOS ${CMAKE_CURRENT_SOURCE_DIR}/wsrpc_test.proto
+    IMPORT_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
+    PROTOC_OUT_DIR ${CMAKE_CURRENT_BINARY_DIR}
+)
+wsrpc_generate(
+    TARGET wsrpc_test
+    PROTOS ${CMAKE_CURRENT_SOURCE_DIR}/wsrpc_test.proto
+    IMPORT_DIRS ${CMAKE_CURRENT_SOURCE_DIR}
+    PROTOC_OUT_DIR ${CMAKE_CURRENT_BINARY_DIR}
+)
+target_include_directories(wsrpc_test PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+target_link_libraries(wsrpc_test PRIVATE adsb_wsrpc)
+add_test(NAME wsrpc_test COMMAND wsrpc_test)
+
 # The UI API server's tests, as a WebSocket client sees it.
 add_executable(api_server_test api_server_test.cpp)
 target_link_libraries(api_server_test PRIVATE adsb_output SQLite::SQLite3)

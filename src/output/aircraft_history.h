@@ -58,13 +58,13 @@ public:
      * before `t`, with its latest state at `t` and its positions in the window, oldest first. `t_min`/`t_max`
      * span the whole database, and are unset when it's empty.
      */
-    [[nodiscard]] coro::Coro<std::optional<api::Snapshot>> snapshot(api::SnapshotRequest req);
+    [[nodiscard]] coro::Coro<std::optional<api::Snapshot>> snapshot(api::GetSnapshotRequest req);
 
     /**
      * One aircraft's recent history, for the UI's detail charts: its updates in the kHistoryAircraftWindowS
      * before `req.t` (default: its latest update), oldest first, each field unset where not yet known.
      */
-    [[nodiscard]] coro::Coro<std::optional<api::AircraftHistory>> aircraft(api::AircraftHistoryRequest req);
+    [[nodiscard]] coro::Coro<std::optional<api::AircraftHistory>> aircraft(api::GetAircraftHistoryRequest req);
 
     /**
      * How busy the sky was, for the UI's scrubber: the number of distinct aircraft updated in each
@@ -73,7 +73,7 @@ public:
      * latest; `t0` is unset and `counts` empty when there are none. The last bucket may still be filling, so
      * ask again from its start for an update. About 15 ms per hour of history for the whole database.
      */
-    [[nodiscard]] coro::Coro<std::optional<api::Activity>> activity(api::ActivityRequest req);
+    [[nodiscard]] coro::Coro<std::optional<api::Activity>> activity(api::GetActivityRequest req);
 
     /**
      * Where aircraft flew, for the UI's map heatmap. The request's area (degrees; east > west, north > south)
@@ -91,7 +91,7 @@ public:
      * Reads every position in the time range: about 0.2 s per 200k positions.
      * @return the heatmap, or nullopt also if the area is empty
      */
-    [[nodiscard]] coro::Coro<std::optional<api::Heatmap>> heatmap(api::HeatmapRequest req);
+    [[nodiscard]] coro::Coro<std::optional<api::Heatmap>> heatmap(api::GetHeatmapRequest req);
 
 private:
     // Requests a handle can send. A query carries the sender for its reply.
@@ -101,25 +101,25 @@ private:
         std::vector<api::Aircraft> rows;
     };
     struct Snapshot {
-        api::SnapshotRequest req;
+        api::GetSnapshotRequest req;
         Reply<api::Snapshot> reply;
     };
     struct Aircraft {
-        api::AircraftHistoryRequest req;
+        api::GetAircraftHistoryRequest req;
         Reply<api::AircraftHistory> reply;
     };
     struct Activity {
-        api::ActivityRequest req;
+        api::GetActivityRequest req;
         Reply<api::Activity> reply;
     };
     struct Heatmap {
-        api::HeatmapRequest req;
+        api::GetHeatmapRequest req;
         Reply<api::Heatmap> reply;
     };
     using Request = std::variant<Insert, Snapshot, Aircraft, Activity, Heatmap>;
 
     // Requests that can wait for the history task before a send waits too. One per block from the demod loop,
-    // and a few per WebSocket client (api_server.cpp's kClientCalls).
+    // and a few per WebSocket client (wsrpc::Limits::client_calls).
     static constexpr size_t kQueueRequests = 16;
 
     class Db;  // the connection, in aircraft_history.cpp

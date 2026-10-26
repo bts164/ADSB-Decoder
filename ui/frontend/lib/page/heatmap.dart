@@ -68,7 +68,7 @@ extension _Heatmap on _FrameTablePageState {
   /// the shown time. Needs a history db; does nothing while it's off.
   Future<void> _requestHeatmap() async {
     final range = _heatmapRangeS;
-    if (range == null || !_mapReady || _client == null || _historyStartS == null) return;
+    if (range == null || !_mapReady || _history == null || _historyStartS == null) return;
     if (_heatmapInFlight) {
       _heatmapQueued = true;
       return;
@@ -81,7 +81,7 @@ extension _Heatmap on _FrameTablePageState {
     final width = cells(camera.size.width);
     final height = cells(camera.size.height);
     _heatmapInFlight = true;
-    final reply = await _ask((c) => c.heatmap(api.HeatmapRequest(
+    final reply = await _ask((c) => c.getHeatmap(api.GetHeatmapRequest(
           west: bounds.west,
           south: bounds.south,
           east: bounds.east,

@@ -48,8 +48,19 @@ class ApiClient {
   /// Completes when the connection closes, from either end.
   Future<void> get done => _done.future;
 
-  Future<api.ServerInfo> serverInfo() async =>
-      (await _call(api.ClientMessage(serverInfo: api.ServerInfoRequest()))).serverInfo;
+  /// The server's info now, and again each time it changes, such as when a client sets the capture directory.
+  /// Starts when listened to; cancelling the subscription cancels the call.
+  Stream<api.ServerInfo> serverInfo() =>
+      _stream(api.ClientMessage(serverInfo: api.ServerInfoRequest())).map((m) => m.serverInfo);
+
+  /// Sets the capture directory for every client, or turns captures off with an empty [dir]. Replies with the
+  /// directory as the server resolved it.
+  Future<String> setCaptureDir(String dir) async =>
+      (await _call(api.ClientMessage(captureDir: api.CaptureDirRequest(dir: dir)))).captureDir.dir;
+
+  /// The captures in the capture directory, newest first.
+  Future<api.CaptureFiles> captureFiles() async =>
+      (await _call(api.ClientMessage(captureFiles: api.CaptureFilesRequest()))).captureFiles;
 
   /// Starts when listened to; cancelling the subscription cancels the call.
   Stream<api.Update> subscribe(api.SubscribeRequest request) =>

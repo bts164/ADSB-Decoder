@@ -1,21 +1,23 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:math' as math;
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 
 // Prefixed: the generated Error would hide dart:core's.
 import '../api/adsb/api/v1/api.pb.dart' as api;
-import '../api_client.dart';
+import '../api/adsb/api/v1/api.wsrpc.dart';
 import '../lazy_table.dart';
 import '../models.dart';
 import '../painters.dart';
 import '../settings.dart';
 import '../settings_panel.dart';
+import '../wsrpc/channel.dart';
 
 part 'aircraft_table.dart';
 part 'capture.dart';
@@ -48,15 +50,20 @@ class _FrameTablePageState extends State<FrameTablePage> {
   // socket only, and "localhost" can resolve to ::1 first on Linux, which
   // fails to connect instead of falling back to the v4 address.
   final _urlController = TextEditingController(text: 'ws://127.0.0.1:8765');
-  ApiClient? _client;
-  StreamSubscription<api.Update>? _updates;
+  WsRpcChannel? _channel;
+  // A client for each service the server serves, while connected: Receiver with a live input, History with a
+  // history db.
+  ReceiverClient? _receiver;
+  HistoryClient? _history;
+  api.ReceiverInfo? _receiverInfo;
+  // The live watches, in progress while connected to a server with Receiver.
+  final List<StreamSubscription<Object>> _watches = [];
   // The spectrum call, in progress while the spectrum pane is shown and connected.
   StreamSubscription<api.SpectrumRow>? _spectrum;
-  // Whether the last server connected to answers the spectrum call; the toggle is shown only if it does.
+  // Whether the last server connected to serves Receiver, and so the spectrum; the toggle is shown only if it does.
   bool _spectrumAvailable = false;
-  // Whether the last server connected to takes capture calls, and the longest it takes.
-  bool _captureAvailable = false;
-  double _captureMaxS = 0;
+  // The settings as the settings watch last sent them, while connected: another client can change them.
+  final _settings = ValueNotifier<api.Settings?>(null);
   // The capture call in progress, if any.
   final _capture = ValueNotifier<_CaptureInProgress?>(null);
   bool _connected = false;
@@ -276,10 +283,12 @@ class _FrameTablePageState extends State<FrameTablePage> {
     _uiUpdateTimer?.cancel();
     _activityTimer?.cancel();
     _heatmapDebounce?.cancel();
-    _updates?.cancel();
+    for (final w in _watches) {
+      w.cancel();
+    }
     _spectrum?.cancel();
     _capture.value?.subscription.cancel();
-    _client?.close();
+    _channel?.close();
     _urlController.dispose();
     _searchController.dispose();
     // Not _clearSpectrum(): nothing is listening to be told.
@@ -292,6 +301,7 @@ class _FrameTablePageState extends State<FrameTablePage> {
     _framesChanged.dispose();
     _inputStatus.dispose();
     _capture.dispose();
+    _settings.dispose();
     _aircraftChanged.dispose();
     _clockTick.dispose();
     super.dispose();
@@ -348,9 +358,9 @@ class _FrameTablePageState extends State<FrameTablePage> {
     _framesChanged.notify();
     _aircraftChanged.notify();
     setState(() => _error = null);
-    final ApiClient client;
+    final WsRpcChannel channel;
     try {
-      client = await ApiClient.connect(Uri.parse(url));
+      channel = await WsRpcChannel.connect(Uri.parse(url), [ReceiverClient.service, HistoryClient.service]);
     } catch (e) {
       setState(() {
         _error = '$e';
@@ -358,33 +368,40 @@ class _FrameTablePageState extends State<FrameTablePage> {
       });
       return;
     }
-    _client = client;
-    setState(() => _connected = true);
+    _channel = channel;
+    final receiver = channel.services.contains(ReceiverClient.service) ? ReceiverClient(channel) : null;
+    final history = channel.services.contains(HistoryClient.service) ? HistoryClient(channel) : null;
+    _receiver = receiver;
+    _history = history;
+    channel.done.then((_) {
+      if (identical(channel, _channel)) _disconnect(error: 'the connection closed');
+    });
+    setState(() {
+      _connected = true;
+      _spectrumAvailable = receiver != null;
+      if (receiver == null) _showSpectrum = false;
+    });
     try {
-      final info = await client.serverInfo();
-      if (!identical(client, _client)) return;
-      setState(() {
-        _spectrumAvailable = info.spectrum;
-        if (!info.spectrum) _showSpectrum = false;
-        _captureAvailable = info.capture;
-        _captureMaxS = info.captureMaxS;
-      });
-      if (_showSpectrum) _startSpectrum();
-      // The subscription reports a disconnect, and the server never ends it.
-      _updates = client.subscribe(api.SubscribeRequest()).listen(
-        _onUpdate,
-        onError: (Object e) => _disconnect(error: '$e'),
-        onDone: _disconnect,
-        cancelOnError: true,
-      );
-      // Subscribed first so nothing is missed in between. The updates wait in the buffers until the flush
-      // timer starts, so they apply on top of the backfill.
-      if (info.history) _onSnapshot(AircraftSnapshot.fromProto(await client.snapshot(api.SnapshotRequest())));
-    } on ApiException catch (e) {
-      if (identical(client, _client)) _disconnect(error: '$e');
+      if (receiver != null) {
+        _receiverInfo = await receiver.getReceiverInfo(api.GetReceiverInfoRequest());
+        if (!identical(channel, _channel)) return;
+        _watch(channel, receiver.watchSettings(api.WatchSettingsRequest()), (s) => _settings.value = s);
+        _watch(channel, receiver.watchFrames(api.WatchFramesRequest()), _onFrames);
+        _watch(channel, receiver.watchAircraft(api.WatchAircraftRequest()), _onAircraft);
+        _watch(channel, receiver.watchInputStatus(api.WatchInputStatusRequest()),
+            (s) => _inputStatus.value = InputStatus.fromProto(s));
+        if (_showSpectrum) _startSpectrum();
+      }
+      // Watched first so nothing is missed in between. The live data waits in the buffers until the flush timer
+      // starts, so it applies on top of the backfill.
+      if (history != null) {
+        _onSnapshot(AircraftSnapshot.fromProto(await history.getSnapshot(api.GetSnapshotRequest())));
+      }
+    } on RpcException catch (e) {
+      if (identical(channel, _channel)) _disconnect(error: '$e');
       return;
     }
-    if (!identical(client, _client)) return;
+    if (!identical(channel, _channel)) return;
     _uiUpdateTimer = Timer.periodic(_uiUpdateInterval, (_) => _flushUpdates());
     _activityTimer = Timer.periodic(_activityPollInterval, (_) {
       _requestActivity();
@@ -393,15 +410,29 @@ class _FrameTablePageState extends State<FrameTablePage> {
     });
   }
 
-  /// Makes a call on this connection. Null if it failed, or if the connection has changed since: the
-  /// subscription reports a disconnect, and any other failure is printed here.
-  Future<T?> _ask<T>(Future<T> Function(ApiClient client) call) async {
-    final client = _client;
-    if (client == null) return null;
+  /// A live watch for as long as the connection: the server ends one only when it fails, which disconnects.
+  void _watch<T extends Object>(WsRpcChannel channel, Stream<T> watch, void Function(T reply) onReply) {
+    void ended(String why) {
+      if (identical(channel, _channel)) _disconnect(error: why);
+    }
+
+    _watches.add(watch.listen(
+      onReply,
+      onError: (Object e) => ended('$e'),
+      onDone: () => ended('the server ended a watch'),
+      cancelOnError: true,
+    ));
+  }
+
+  /// Makes a history call on this connection. Null without a history db, if it failed, or if the connection
+  /// has changed since: the channel reports a disconnect, and any other failure is printed here.
+  Future<T?> _ask<T>(Future<T> Function(HistoryClient history) call) async {
+    final history = _history;
+    if (history == null) return null;
     try {
-      final reply = await call(client);
-      return identical(client, _client) ? reply : null;
-    } on ApiException catch (e) {
+      final reply = await call(history);
+      return identical(history, _history) ? reply : null;
+    } on RpcException catch (e) {
       if (e.code != null) debugPrint('$e');
       return null;
     }
@@ -531,16 +562,16 @@ class _FrameTablePageState extends State<FrameTablePage> {
     return DateTime.now().difference(t).inMilliseconds / 1000;
   }
 
-  // Handles one live update. Frames/aircraft can arrive at rates far higher
-  // than the UI can (or should) redraw at, so they are just buffered here --
-  // _flushUpdates, on a timer, is what actually triggers a rebuild.
-  void _onUpdate(api.Update update) {
-    _pendingFrames.addAll(update.frames.map(FrameRecord.fromProto));
-    for (final a in update.aircraft) {
+  // Frames/aircraft can arrive at rates far higher than the UI can (or
+  // should) redraw at, so they are just buffered here -- _flushUpdates, on a
+  // timer, is what actually triggers a rebuild.
+  void _onFrames(api.FrameBatch batch) => _pendingFrames.addAll(batch.frames.map(FrameRecord.fromProto));
+
+  void _onAircraft(api.AircraftChanges changes) {
+    for (final a in changes.aircraft) {
       final ac = AircraftRecord.fromProto(a);
       _pendingAircraft[ac.icao] = ac;
     }
-    if (update.hasInputStatus()) _inputStatus.value = InputStatus.fromProto(update.inputStatus);
   }
 
   // The server computes the spectrum only while a spectrum call is in progress, so the call follows the pane.
@@ -550,13 +581,13 @@ class _FrameTablePageState extends State<FrameTablePage> {
   }
 
   void _startSpectrum() {
-    final client = _client;
-    if (client == null || _spectrum != null) return;
-    _spectrum = client.spectrum(api.SpectrumRequest()).listen(
+    final receiver = _receiver;
+    if (receiver == null || _spectrum != null) return;
+    _spectrum = receiver.watchSpectrum(api.WatchSpectrumRequest()).listen(
       _onSpectrumRow,
-      // The subscription reports a disconnect; any other failure is printed here.
+      // The channel reports a disconnect; any other failure is printed here.
       onError: (Object e) {
-        if (e is ApiException && e.code != null) debugPrint('$e');
+        if (e is RpcException && e.code != null) debugPrint('$e');
         _spectrum = null;
       },
       onDone: () => _spectrum = null,
@@ -664,12 +695,18 @@ class _FrameTablePageState extends State<FrameTablePage> {
     _uiUpdateTimer = null;
     _activityTimer?.cancel();
     _activityTimer = null;
-    _updates?.cancel();
+    for (final w in _watches) {
+      w.cancel();
+    }
+    _watches.clear();
     _stopSpectrum();
     _dropCapture();
-    _client?.close();
-    _updates = null;
-    _client = null;
+    _channel?.close();
+    _settings.value = null;
+    _channel = null;
+    _receiver = null;
+    _history = null;
+    _receiverInfo = null;
     _seekInFlight = false;
     _queuedSeekS = null;
     _heatmapInFlight = false;
@@ -771,10 +808,7 @@ class _FrameTablePageState extends State<FrameTablePage> {
                 onSelected: _setShowSpectrum,
               ),
             ],
-            if (_captureAvailable && _connected) ...[
-              const SizedBox(width: 6),
-              _buildCaptureControl(),
-            ],
+            if (_connected) _buildCaptureControl(),
             const SizedBox(width: 12),
             ValueListenableBuilder(
               valueListenable: _inputStatus,

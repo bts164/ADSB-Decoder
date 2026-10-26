@@ -4,9 +4,9 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string>
 #include <unordered_map>
 #include <utility>
-#include <variant>
 #include <vector>
 
 #include <coro/sync/broadcast.h>
@@ -24,18 +24,27 @@
  */
 
 /**
- * One block's frames, or one spectrum row. Shared, since a broadcast keeps each value in its queue for the other
- * receivers, so every receive copies it out: the shared pointer makes that copy a reference count rather than a
- * deep copy.
+ * One block's frames, and one spectrum row, as the broadcasts carry them. Shared, since a broadcast keeps each
+ * value in its queue for the other receivers, so every receive copies it out: the shared pointer makes that copy
+ * a reference count rather than a deep copy.
  */
-using LiveItem = std::variant<std::shared_ptr<const std::vector<api::Frame>>, std::shared_ptr<const api::SpectrumRow>>;
+using LiveFrames = std::shared_ptr<const std::vector<api::Frame>>;
+using LiveSpectrumRow = std::shared_ptr<const api::SpectrumRow>;
 
 /** The aircraft published recently, by ICAO address, each as last published. */
 using LiveAircraft = std::unordered_map<uint32_t, api::Aircraft>;
 
-/** What the pipeline's tasks are asked to do, written by the API server. */
-struct PipelineSettings {
-    int spectrum_viewers = 0;  /**< spectrum calls in progress; the spectrum task computes while above 0 */
+/** What clients' calls need the pipeline to compute, counted by the API server. */
+struct PipelineDemand {
+    int spectrum_viewers = 0;  /**< WatchSpectrum calls in progress; the spectrum tap computes while above 0 */
+};
+
+/** Both ends of the settings' watch, which every connection shares. Each is for one task at a time: clone. */
+struct SettingsWatch {
+    coro::WatchSender<api::Settings> tx;
+    coro::WatchReceiver<api::Settings> rx;
+
+    SettingsWatch clone() const { return {tx.clone(), rx.clone()}; }
 };
 
 /**
@@ -43,36 +52,44 @@ struct PipelineSettings {
  * but `captures` is for one task at a time: clone for another.
  */
 struct ApiSenders {
-    coro::BroadcastSender<LiveItem> live;
+    coro::BroadcastSender<LiveFrames> frames;
+    coro::BroadcastSender<LiveSpectrumRow> spectrum;
     coro::WatchSender<LiveAircraft> aircraft;
     coro::WatchSender<std::optional<api::InputStatus>> input_status;  /**< unset until the input reports one */
-    coro::WatchReceiver<PipelineSettings> settings;
+    // These two run the other way: the server writes them, and the pipeline reads them.
+    coro::WatchReceiver<PipelineDemand> demand;
+    coro::WatchReceiver<api::Settings> settings;
     coro::MpscReceiver<CaptureCall> captures;  /**< the capture calls, for one task only */
 };
 
 /** The server's ends. */
 struct ApiReceivers {
-    coro::BroadcastReceiver<LiveItem> live;
+    coro::BroadcastReceiver<LiveFrames> frames;
+    coro::BroadcastReceiver<LiveSpectrumRow> spectrum;
     coro::WatchReceiver<LiveAircraft> aircraft;
     coro::WatchReceiver<std::optional<api::InputStatus>> input_status;
-    coro::WatchSender<PipelineSettings> settings;
+    coro::WatchSender<PipelineDemand> demand;
+    SettingsWatch settings;
     coro::MpscSender<CaptureCall> captures;
+
+    /** Ends for another task: the broadcasts resubscribed, the rest cloned. */
+    ApiReceivers clone() const;
 };
 
-/** Makes the server's channels; each watch starts empty. */
-std::pair<ApiSenders, ApiReceivers> api_channels();
+/**
+ * Makes the server's channels. The aircraft and the input status start empty.
+ * @param settings the settings to start with, such as --capture-dir, from resolve_capture_dir()
+ */
+std::pair<ApiSenders, ApiReceivers> api_channels(api::Settings settings);
 
 /**
- * Starts the server on `port`, on all interfaces, as a detached task the runtime cancels when it shuts down.
- * Call from within the coro runtime.
+ * Starts the server on `port`, on all interfaces, as a detached task the runtime cancels when it shuts down. It
+ * serves `Receiver` with a pipeline and `History` with a database. Call from within the coro runtime.
  * @param port TCP port to listen on
- * @param default_interval time between a subscription's updates, unless its request says otherwise
- * @param live whether there's a pipeline publishing on `inputs`; without one the spectrum call fails with
- *     NO_LIVE_INPUT
- * @param capture whether the pipeline takes capture calls on `inputs` (--capture-dir); without it the capture
- *     call fails with NO_CAPTURE
- * @param inputs what the calls are answered from, and the settings they write
- * @param history what the history calls are answered from; without one they fail with NO_HISTORY
+ * @param default_interval time between a watch's replies, unless its request says otherwise
+ * @param live the pipeline's channels, from api_channels(); unset without a pipeline
+ * @param source the input's subcommand, for ReceiverInfo
+ * @param history what the history calls are answered from; unset without a database
  */
-void api_server_spawn(uint16_t port, std::chrono::nanoseconds default_interval, bool live, bool capture,
-                      ApiReceivers inputs, std::optional<AircraftHistory> history);
+void api_server_spawn(uint16_t port, std::chrono::nanoseconds default_interval, std::optional<ApiReceivers> live,
+                      std::string source, std::optional<AircraftHistory> history);

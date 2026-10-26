@@ -1,0 +1,45 @@
+// A service with one rpc of each kind, for the wsrpc runtime's tests and for checking protoc-gen-wsrpc's output.
+
+syntax = "proto3";
+
+package wsrpc_test.v1;
+
+import "google/protobuf/empty.proto";
+
+// Each rpc answers from its requests' values, so a test can tell which replies came from which requests.
+service Echo {
+  // Replies with the request's value.
+  rpc Echo(EchoRequest) returns (EchoReply);
+  // Replies `count` times, with value, value + 1, and so on. With count 0, goes on until it's cancelled.
+  rpc Count(CountRequest) returns (stream EchoReply);
+  // Replies once the client ends its side, with the sum of the values it sent. Starts reading them only after
+  // a delay, so a client can send more than the call's input queue holds.
+  rpc Sum(stream EchoRequest) returns (EchoReply);
+  // Replies to each request with its value, as it arrives.
+  rpc EchoEach(stream EchoRequest) returns (stream EchoReply);
+}
+
+// Request and reply types from other places: a nested message, another package's, and an acronym in a name.
+service Shapes {
+  rpc GetURLList(google.protobuf.Empty) returns (Lists.Urls);
+  rpc WatchNested(Lists.Urls) returns (stream google.protobuf.Empty);
+}
+
+message EchoRequest {
+  int64 value = 1;
+}
+
+message CountRequest {
+  int64 value = 1;
+  uint32 count = 2;
+}
+
+message EchoReply {
+  int64 value = 1;
+}
+
+message Lists {
+  message Urls {
+    repeated string urls = 1;
+  }
+}

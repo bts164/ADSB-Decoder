@@ -52,6 +52,7 @@
 #include "input/vita49_stream.h"
 #include "output/aircraft_history.h"
 #include "output/api_server.h"
+#include "output/capture.h"
 
 namespace {
 
@@ -108,6 +109,10 @@ void add_options(argparse::ArgumentParser& program, Commands& cmds) {
     program.add_argument("--history-db").help(
         "record every aircraft update to this SQLite file, live, for the UI's time scrubber; --ws-port "
         "clients get the recent sky on connect and can seek through it (default: not recorded)");
+    program.add_argument("--capture-dir").help(
+        "with --ws-port and a source, start with the API's capture calls, which record the input IQ or the "
+        "demodulator's envelope for a while as SigMF, writing into this directory; a client can change it or turn "
+        "captures off and on (default: off until a client sets one)");
 
     FileStreamParams::add_options(cmds.file);
     Vita49StreamParams::add_options(cmds.vita49);
@@ -180,8 +185,8 @@ bool parse_command_line(argparse::ArgumentParser& program, const Commands& cmds,
         if (const auto dir = program.present("--capture-dir")) {
             if (!program.present<uint16_t>("--ws-port") || program.is_subcommand_used(cmds.serve))
                 throw std::runtime_error("--capture-dir needs --ws-port and a source");
-            if (!std::filesystem::is_directory(*dir))
-                throw std::runtime_error("--capture-dir " + *dir + " is not a directory");
+            if (auto resolved = resolve_capture_dir(*dir); !resolved)
+                throw std::runtime_error("--capture-dir: " + resolved.error());
         }
         for (const argparse::ArgumentParser* cmd : {&cmds.file, &cmds.vita49, &cmds.rtlsdr}) {
             if (cmd->is_used("--rate") && !(cmd->get<double>("--rate") > 0.0))
@@ -252,6 +257,9 @@ coro::Coro<int> async_main(int argc, char** argv) {
     const auto ws_interval = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::duration<double>(program.get<double>("--ws-interval")));
     const std::optional<std::string> history_db_path = program.present("--history-db");
+    // parse_command_line() has checked that it resolves.
+    std::optional<std::string> capture_dir;
+    if (const auto dir = program.present("--capture-dir")) capture_dir = *resolve_capture_dir(*dir);
 
     if (program.is_subcommand_used(cmds.serve)) {
         // AircraftHistory::open() would create a missing file; serving an empty one is never what was meant.
@@ -261,8 +269,7 @@ coro::Coro<int> async_main(int argc, char** argv) {
         }
         std::optional<AircraftHistory> history = AircraftHistory::open(*history_db_path);
         if (!history) co_return 1;
-        // Nothing is published, so the senders go now.
-        api_server_spawn(*ws_port, ws_interval, false, false, api_channels().second, std::move(history));
+        api_server_spawn(*ws_port, ws_interval, std::nullopt, "", std::move(history));
         LOGF(INFO, "serving %s on port %u (Ctrl+C to stop)", *history_db_path, *ws_port);
         co_await coro::signal(SIGINT);
         LOGF(INFO, "stopping after SIGINT");
@@ -284,9 +291,15 @@ coro::Coro<int> async_main(int argc, char** argv) {
         if (ws_port) {
             std::optional<AircraftHistory> ws_history;
             if (history) ws_history = history->clone();
-            auto [senders, receivers] = api_channels();
-            api_server_spawn(*ws_port, ws_interval, true, loop_params.capture_dir.has_value(), std::move(receivers),
-                             std::move(ws_history));
+            api::Settings settings;
+            if (capture_dir) settings.set_capture_dir(*capture_dir);
+            auto [senders, receivers] = api_channels(std::move(settings));
+            // The source's subcommand, for the UI.
+            std::string source;
+            for (const char* name : {"file", "vita49", "rtlsdr", "sidekiq", "uhd"}) {
+                if (program.is_subcommand_used(name)) source = name;
+            }
+            api_server_spawn(*ws_port, ws_interval, std::move(receivers), std::move(source), std::move(ws_history));
             ws = std::move(senders);
         }
 

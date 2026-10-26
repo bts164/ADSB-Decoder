@@ -288,7 +288,9 @@ How to read the diagram:
   polls in the same way. The two white boxes inside the ws_client task are not tasks
   either: they are its reader and its writer, run together with
   `coro::join()`, and whichever ends first, on a disconnect or a send that
-  takes over 20 s, cancels the other. The grey cylinders are files.
+  takes over 20 s, cancels the other. A thick border means there can be more
+  than one at once: a ws_call task per call, a `coro::parallel()` part per
+  worker, and a ws_client task and a UI per client. The grey cylinders are files.
 - **Arrows:** each arrow is labelled with its channel and its depth, in
   blocks or requests where no unit is given. A dashed arrow or box is there
   only with the option it names. The tee, the spectrum task and the input status are
@@ -314,7 +316,7 @@ The pieces fit together like this:
    shows, however short. Every 50 ms it broadcasts the peaks, on its own clone
    of the frames' sender, to the WebSocket clients for the waterfall. While it
    is busy, blocks go to the demodulator alone, so the spectrum never holds
-   the demodulator back. With `--capture-dir`, a second branch, 8 blocks
+   the demodulator back. With `--ws-port`, a second branch, 8 blocks
    deep, feeds the input capture task, which writes the blocks to a file while
    a `capture` call is in progress and drops them otherwise. Then
    `demodulate()` ([demod.h](src/dsp/demod.h)) demodulates each block, splitting its resampling and preamble search across the runtime's
@@ -331,7 +333,7 @@ The pieces fit together like this:
     - with `--history-db`, one insert of the block's aircraft updates to the
       history actor, which owns the database and also answers the clients'
       history calls;
-    - with `--capture-dir`, while an envelope capture is in progress, the
+    - with `--ws-port`, while an envelope capture is in progress, the
       block's envelope to the envelope capture task;
     - with `--debug-h5`, the frames and their IQ, to a recorder task, so
       writing the file doesn't hold up the loop.
@@ -356,7 +358,7 @@ the filter and picks the source. Every source then feeds the same
 | `--ws-port` | off | Serve the UI's API over WebSocket on this port (see [WebSocket](#websocket)) |
 | `--ws-interval` | 1.0 | Seconds between a subscription's live updates, unless it asks for another interval |
 | `--history-db` | off | SQLite file recording every aircraft update, for the UI's time scrubber |
-| `--capture-dir` | off | With `--ws-port`, answer `capture` calls, which record the input IQ or the demodulator's envelope as SigMF into this existing directory (see [WebSocket](#websocket)) |
+| `--capture-dir` | off | With `--ws-port`, the capture directory to start with: `capture` calls record the input IQ or the demodulator's envelope as SigMF into it. A client can change it, or turn captures off and on (see [WebSocket](#websocket)) |
 | `--debug-h5` | off | Write every decoded frame, with its IQ and everything needed to rerun the demodulator, to this HDF5 file (see [Debug HDF5](#debug-hdf5)). Not in a build without `ADSB_WITH_HDF5`. |
 | `--debug-h5-failed-only` | | With `--debug-h5`, record only frames that fail CRC (not unchecked ones) |
 | `--log-level` | info | Least severe log message written to stderr: `info`, `warning`, `error`, `fatal`, or `none` |
@@ -802,74 +804,95 @@ frame idx=<sample> bits=112 confidence=<c> df=<n> icao=<hex|??????> crc=<ok|fixe
 
 #### WebSocket
 
-`--ws-port` serves the UI's API: calls, like gRPC's, over one WebSocket per
-client. [api.proto](proto/adsb/api/v1/api.proto) defines the messages, and
-[ui_api.md](doc/design/ui_api.md) describes the protocol and its design. In
-short:
+`--ws-port` serves the UI's API: gRPC-style services, called over one
+WebSocket per client. [api.proto](proto/adsb/api/v1/api.proto) defines the
+services and their messages, [wsrpc.proto](proto/wsrpc/v1/wsrpc.proto) the
+framing, and [ui_api.md](doc/design/ui_api.md) describes the protocol and its
+design. In short:
 
-- Each WebSocket message is one binary protobuf: a `ClientMessage` from the
-  client, or a `ServerMessage` from `adsb`.
-- A client starts a call by sending its request with a new `id`, larger than
-  every earlier one on the connection. Each reply carries the call's `id`.
-- Every call ends with exactly one message with `end` set: a unary call's
-  reply, a streaming call's last message, or an `Error`. A client stops a
-  call early by sending a `cancel` with its `id`. The call then ends with a
-  `CANCELLED` error, unless its `end` was already on its way.
+- Each WebSocket message is one binary protobuf: a `ClientFrame` from the
+  client, or a `ServerFrame` from `adsb`.
+- The client starts with a hello, id 0, listing the services it knows by
+  their full names. `adsb` answers with those it serves:
+    - `adsb.api.v1.Receiver`, from every subcommand but `serve`;
+    - `adsb.api.v1.History`, with `--history-db`.
+- A client starts a call by sending its method's path, such as
+  `/adsb.api.v1.History/GetSnapshot`, and its request, with a new `id`,
+  larger than every earlier one on the connection. Each reply carries the
+  call's `id`.
+- Every call ends with exactly one frame with `end` set: a unary call's
+  reply, a streaming call's last frame, or an `Error`. A client stops a call
+  early by sending a `cancel` with its `id`. The call then ends with
+  `CANCELLED`, unless its `end` was already on its way.
 - A call can also be one the client streams. Its later requests carry the
-  call's `id`, and the client's last message has `end` set. The protocol
+  call's `id`, and the client's last frame has `end` set. The protocol
   supports these, though none of today's calls is one.
-- A call that fails ends with an `Error`, whose code says why:
-    - `NO_HISTORY`, a history call to an `adsb` without `--history-db`;
-    - `NO_LIVE_INPUT`, a spectrum call to `adsb serve`;
-    - `NO_CAPTURE`, a capture call to an `adsb` without `--capture-dir`;
+- A call that fails ends with an `Error`, with gRPC's codes:
+    - `UNIMPLEMENTED`, a method or service this `adsb` doesn't serve, such as
+      a history call without `--history-db`;
     - `INVALID_ARGUMENT`, a bad request, such as an `id` that isn't new, an
-      empty heatmap area, or a client stream's message for another kind of
-      call;
-    - `RESOURCE_EXHAUSTED`, a ninth call while a connection already has 8 in
+      empty heatmap area, a capture directory that isn't a writable
+      directory, or a capture name that already exists;
+    - `FAILED_PRECONDITION`, a capture call while captures are off;
+    - `RESOURCE_EXHAUSTED`, a 17th call while a connection already has 16 in
       progress, a capture of a point already being captured, or a client
-      stream that sent more than 16 messages ahead of its call;
-    - `UNIMPLEMENTED`, a call this `adsb` doesn't know;
+      stream that sent more than 16 requests ahead of its call;
     - `INTERNAL`, a failure `adsb` has logged.
-- A client that takes over 20 s to accept a message is disconnected.
+- A client that takes over 20 s to accept a frame is disconnected.
 
-The UI's [ApiClient](ui/frontend/lib/api_client.dart) makes each call a
-method, and the UI makes them in this order: `server_info`, `subscribe`, then
-with history a `snapshot` to backfill the sky. It makes a `spectrum` call
-while its Spectrum pane is shown, and a `capture` call from its capture
-button.
+The UI's [WsRpcChannel](ui/frontend/lib/wsrpc/channel.dart) owns the
+connection, and [api.wsrpc.dart](ui/frontend/lib/api/adsb/api/v1/api.wsrpc.dart),
+generated from `api.proto`, has a client per service with a method per rpc.
+On connect the UI calls `GetReceiverInfo`, watches the settings, frames,
+aircraft and input status, and with `History` calls `GetSnapshot` to
+backfill the sky. It calls `WatchSpectrum` while its Spectrum pane is shown,
+`RecordCapture` from its capture button, and `ListCaptures` and
+`UpdateSettings` from its Captures dialog.
 
-**`server_info`** says what this `adsb` serves: whether it answers the
-history calls (`--history-db`), whether it answers the spectrum call (any
-subcommand but `serve`), whether it answers the capture call
-(`--capture-dir`) and for how long at most, and its `--ws-interval`.
+The `Receiver` service:
 
-**`subscribe`** streams the live data. It sends an `Update` every
-`interval_s` (default `--ws-interval`, at least 0.1 s). An update holds:
-
-- the frames published since the last update, in order;
-- each aircraft that changed since the last update, as it was last published;
-  the first update holds every aircraft heard in the last 10 minutes;
-- the input status, if it changed.
-
-An interval with none of these sends nothing.
-
-**`spectrum`** streams the spectrum rows for the waterfall, one `SpectrumRow`
-per reply. `adsb` computes them only while at least one spectrum call is open.
-
-**`capture`** records one point of the pipeline to `<name>.sigmf-data` and
-`<name>.sigmf-meta` in `--capture-dir`, for up to 60 s of stream time, and
-replies when it is done:
-
-- The point is `INPUT`, the IQ as the source delivered it, which `adsb file`
-  replays, or `ENVELOPE`, the demodulator's resampled magnitude as `rf32_le`
-  at 12 Msps.
-- It never overwrites a file, and takes one capture per point at a time.
-- Cancelling the call stops the capture, keeping what it has written.
-- The reply has the data file's path, its datatype and rate, the stream index
-  of its first sample, and the samples written and missing.
-- Samples the writer falls behind on are dropped, not waited for, so the
-  demodulator never slows. Each gap starts a new SigMF capture segment, at
-  the `core:global_index` where the samples resume, and is logged.
+- **`GetReceiverInfo`** gives what is fixed for the run: the subcommand, the
+  watches' default interval (`--ws-interval`), and the longest capture it
+  takes, 60 s.
+- **`WatchFrames`** sends a `FrameBatch` every `interval_s` (default
+  `--ws-interval`, at least 0.1 s) that has any frames: those decoded since
+  the last, in order. A client that reads too slowly misses some, and the
+  next batch says so with `frames_dropped`.
+- **`WatchAircraft`** sends every aircraft heard in the last 10 minutes at
+  once, then, every `interval_s`, each aircraft that changed, as it was last
+  published.
+- **`WatchInputStatus`** sends the input status once there is one, then each
+  time it changes.
+- **`WatchSpectrum`** sends the spectrum's rows for the waterfall, one
+  `SpectrumRow` per reply. `adsb` computes them only while at least one
+  spectrum call is open.
+- **`WatchSettings`** sends the settings, now and each time a client changes
+  them. The only one today is the capture directory: absolute, or empty
+  while captures are off. It starts as `--capture-dir`, or off without it.
+- **`UpdateSettings`** changes the settings for every client, and replies
+  with them as they are after the change. The capture directory must be an
+  existing, writable directory on the server, relative to `adsb`'s working
+  directory or absolute, or empty to turn captures off. A capture in
+  progress carries on in its directory.
+- **`ListCaptures`** lists the captures in the capture directory, newest
+  first: each `.sigmf-data` file's name, path, size and time, and from its
+  `.sigmf-meta`, if it has a valid one, its datatype, rate, frequency,
+  description and duration. It lists at most 1000, and says how many older
+  ones it left out.
+- **`RecordCapture`** records one point of the pipeline to `<name>.sigmf-data`
+  and `<name>.sigmf-meta` in the capture directory, for up to 60 s of stream
+  time:
+    - The point is `INPUT`, the IQ as the source delivered it, which `adsb
+      file` replays, or `ENVELOPE`, the demodulator's resampled magnitude as
+      `rf32_le` at 12 Msps.
+    - It never overwrites a file, and takes one capture per point at a time.
+    - It reports its progress about twice a second: the stream index of its
+      first sample, and the samples written and missing so far. The last
+      report also has the capture as written.
+    - Cancelling the call stops the capture, keeping what it has written.
+    - Samples the writer falls behind on are dropped, not waited for, so the
+      demodulator never slows. Each gap starts a new SigMF capture segment,
+      at the `core:global_index` where the samples resume, and is logged.
 
 A `Frame` is sent for every frame. Besides the frame itself it has:
 
@@ -944,10 +967,10 @@ The UI shows a red warning in the top bar when `ok` is false. The warning
 gives the percentage demodulated and has `summary` as its tooltip. The UI
 hides the warning once it is 6 s old.
 
-The history calls answer from `--history-db`, and fail with `NO_HISTORY`
-without it. Each is unary. Times are Unix seconds.
+The `History` service is served with `--history-db`. Each call is unary.
+Times are Unix seconds.
 
-**`snapshot`** gives the sky at time `t`, default the newest update:
+**`GetSnapshot`** gives the sky at time `t`, default the newest update:
 
 - `aircraft` holds every aircraft updated in the 10 minutes up to `t`, each
   with its latest `state` and its `track`: its positions in the window, up to
@@ -956,7 +979,7 @@ without it. Each is unary. Times are Unix seconds.
 - The UI asks for one on connect, to backfill the live sky, and one for each
   seek of its scrubber.
 
-**`aircraft_history`** gives one aircraft's recent history:
+**`GetAircraftHistory`** gives one aircraft's recent history:
 
 - It takes the aircraft's `icao` and a `t`, default the aircraft's latest
   update.
@@ -964,7 +987,7 @@ without it. Each is unary. Times are Unix seconds.
   oldest first, each field unset where not yet known.
 - The UI uses it for the selected aircraft's detail charts.
 
-**`activity`** counts aircraft over time:
+**`GetActivity`** counts aircraft over time:
 
 - It takes a `from`, default the whole database.
 - `counts` holds the number of distinct aircraft updated in each `bucket_s`
@@ -979,7 +1002,7 @@ without it. Each is unary. Times are Unix seconds.
   per hour of history. It then re-fetches from the last bucket every 30 s.
   This drives the scrubber's histogram.
 
-**`heatmap`** gives traffic density over an area:
+**`GetHeatmap`** gives traffic density over an area:
 
 - It takes the area (`west`, `south`, `east` and `north`, in degrees), a
   grid size (`width` and `height`), and `t0` and `t1`, default the whole
@@ -1116,6 +1139,11 @@ a scrubber bar under both.
   speed, vertical rate and signal.
   - With a history db, these charts start full.
   - Without one, they fill in from live updates.
+- **Captures.** With a live input, the record button in the top bar captures
+  the input IQ or the envelope to a file on the server. The folder button
+  beside it opens the Captures dialog, which lists the capture directory's
+  files, newest first, and sets the directory, or clears it to turn captures
+  off, for every client.
 
 With a history db, the scrubber shows the table and map (with trails) as of
 any past time. It narrows down in three levels:

@@ -35,14 +35,15 @@ dependencies:
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
 
-  # The WebSocket that ApiClient makes the UI API's calls over (adsb's
+  # The WebSocket that WsRpcChannel makes the UI API's calls over (adsb's
   # --ws-port; see doc/design/ui_api.md).
   web_socket_channel: ^3.0.1
   flutter_map: ^8.3.2
   latlong2: ^0.10.1
   # Saves the display settings (units, clock) between runs.
   shared_preferences: ^2.5.5
-  # The UI API's messages, generated into lib/api/ by tools/gen_api_dart.sh.
+  # The UI API's messages and clients, generated into lib/api/ by
+  # tools/gen_api_dart.sh.
   protobuf: ^5.0.0
   fixnum: ^1.1.1
 

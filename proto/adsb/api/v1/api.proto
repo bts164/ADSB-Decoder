@@ -1,90 +1,68 @@
-// The calls between adsb and the UI, over a WebSocket: doc/design/ui_api.md describes the protocol.
-//
-// Every WebSocket message is one binary frame holding one envelope: a ClientMessage from the UI, or a
-// ServerMessage from adsb. A request and its reply share a field number in the two oneofs.
+// The services adsb offers its UI. One WebSocket connection carries calls to any of them, framed by
+// proto/wsrpc/v1/wsrpc.proto; doc/design/ui_api.md describes the protocol. A server serves only the services
+// it has: the hello's answer lists them.
 
 syntax = "proto3";
 
 package adsb.api.v1;
 
-// ---- Envelopes ----
+// ---- Services ----
 
-message ClientMessage {
-  // A new call's: larger than every earlier id on this connection. For cancel, the call to cancel; for a later
-  // message of a client-streaming call, that call.
-  uint32 id = 1;
-  bool end = 15;  // a client-streaming call's last message: the client sends no more on it
-  oneof call {    // unset only on an `end` with no last request
-    Cancel cancel = 2;
-    ServerInfoRequest server_info = 3;
-    SubscribeRequest subscribe = 4;
-    SpectrumRequest spectrum = 5;
-    SnapshotRequest snapshot = 10;
-    AircraftHistoryRequest aircraft_history = 11;
-    ActivityRequest activity = 12;
-    HeatmapRequest heatmap = 13;
-    CaptureRequest capture = 14;
-  }
+// The live pipeline. Served with a live input, not by `serve`.
+service Receiver {
+  rpc GetReceiverInfo(GetReceiverInfoRequest) returns (ReceiverInfo);
+
+  // The frames decoded, a batch per interval that has any.
+  rpc WatchFrames(WatchFramesRequest) returns (stream FrameBatch);
+  // The aircraft: every one heard in the last 600 s at once, then those that changed, per interval that has any.
+  rpc WatchAircraft(WatchAircraftRequest) returns (stream AircraftChanges);
+  // The input's status, once there is one, then at each change.
+  rpc WatchInputStatus(WatchInputStatusRequest) returns (stream InputStatus);
+  // The spectrum's rows as they're computed. The server computes them only while one of these calls is open.
+  rpc WatchSpectrum(WatchSpectrumRequest) returns (stream SpectrumRow);
+
+  // The settings clients set, now and at each change, from any client.
+  rpc WatchSettings(WatchSettingsRequest) returns (stream Settings);
+  // Changes the settings for every client; replies with them as they are after the change.
+  rpc UpdateSettings(UpdateSettingsRequest) returns (Settings);
+
+  // Records one point of the pipeline to a SigMF recording in Settings.capture_dir, from the next block on,
+  // reporting its progress. One capture per point at a time; cancelling stops it, keeping what's written.
+  rpc RecordCapture(RecordCaptureRequest) returns (stream RecordCaptureProgress);
+  // The recordings in the capture directory: every .sigmf-data there, whoever wrote it.
+  rpc ListCaptures(ListCapturesRequest) returns (ListCapturesResponse);
 }
 
-message ServerMessage {
-  uint32 id = 1;  // the call this belongs to
-  bool end = 2;   // the call's last message
-  oneof body {    // unset only on the end of a stream that finished normally
-    Error error = 9;  // always with end
-    ServerInfo server_info = 3;
-    Update update = 4;
-    SpectrumRow spectrum = 5;
-    Snapshot snapshot = 10;
-    AircraftHistory aircraft_history = 11;
-    Activity activity = 12;
-    Heatmap heatmap = 13;
-    CaptureResult capture = 14;
-  }
+// The history database. Served with --history-db.
+service History {
+  // Every aircraft as it was at a time, with its track up to then.
+  rpc GetSnapshot(GetSnapshotRequest) returns (Snapshot);
+  // One aircraft's values over time, up to a time.
+  rpc GetAircraftHistory(GetAircraftHistoryRequest) returns (AircraftHistory);
+  // How many aircraft were heard, per time bucket.
+  rpc GetActivity(GetActivityRequest) returns (Activity);
+  // How many flights crossed each cell of an area.
+  rpc GetHeatmap(GetHeatmapRequest) returns (Heatmap);
 }
 
-message Cancel {}
+// ---- Receiver: info and live data ----
 
-message Error {
-  enum Code {
-    CODE_UNSPECIFIED = 0;
-    UNIMPLEMENTED = 1;       // a call this server doesn't know
-    INVALID_ARGUMENT = 2;    // e.g. an id not larger than the last, an empty heatmap area, or a client stream's
-                             // message for another kind of call
-    NO_HISTORY = 3;          // a history call without --history-db
-    INTERNAL = 4;            // the handler failed; the server logged why
-    CANCELLED = 5;           // the client cancelled it
-    RESOURCE_EXHAUSTED = 6;  // kClientCalls calls already in progress, or a client stream sent too far ahead
-    NO_LIVE_INPUT = 7;       // a spectrum call to a server with no live input (`serve`)
-    NO_CAPTURE = 8;          // a capture call without --capture-dir
-  }
-  Code code = 1;
-  string message = 2;
+message GetReceiverInfoRequest {}
+
+// Fixed for the run.
+message ReceiverInfo {
+  string source = 1;              // the subcommand: "file", "vita49", "rtlsdr", "sidekiq" or "uhd"
+  double default_interval_s = 2;  // --ws-interval: a watch's interval when its request leaves it unset
+  double max_capture_s = 3;       // the longest RecordCapture takes
 }
 
-// ---- Server info and live updates ----
-
-message ServerInfoRequest {}
-
-message ServerInfo {
-  bool history = 1;   // the history calls are answered
-  bool spectrum = 2;  // the spectrum call is answered
-  double default_interval_s = 3;  // --ws-interval
-  bool capture = 4;  // the capture call is answered (--capture-dir)
-  double capture_max_s = 5;  // longest capture the call takes; 0 without capture
+message WatchFramesRequest {
+  optional double interval_s = 1;  // unset for ReceiverInfo.default_interval_s; at least 0.1, at most 3600
 }
 
-message SubscribeRequest {
-  optional double interval_s = 1;  // unset for --ws-interval; at least kMinUpdateIntervalS
-}
-
-// One reply of a subscription: what was published since its last update. Frames are in the order they were
-// published; aircraft are those that changed since the last update, each as last published. The first update
-// has every aircraft heard in the last 600 s.
-message Update {
-  repeated Frame frames = 1;
-  repeated Aircraft aircraft = 3;
-  InputStatus input_status = 4;  // set only when it changed
+message FrameBatch {
+  repeated Frame frames = 1;  // in the order they were decoded
+  bool frames_dropped = 2;    // some before these were dropped, as the client read too slowly
 }
 
 message Frame {
@@ -100,49 +78,12 @@ message Frame {
   string summary = 10;  // empty when there's none
 }
 
-// The spectrum's rows, one reply each, as they're computed. The server computes them only while a spectrum
-// call is in progress.
-message SpectrumRequest {}
-
-message SpectrumRow {
-  double freq_hz = 1;
-  double rate_hz = 2;
-  repeated float bins_db = 3;
+message WatchAircraftRequest {
+  optional double interval_s = 1;  // unset for ReceiverInfo.default_interval_s; at least 0.1, at most 3600
 }
 
-// Records one point in the pipeline to a SigMF recording in --capture-dir, from the next block on, for
-// duration_s of stream time. One capture per point at a time; cancelling stops it, keeping what's written.
-message CaptureRequest {
-  enum Point {
-    POINT_UNSPECIFIED = 0;
-    INPUT = 1;     // the input IQ after stitching, as the source delivered it: replayable with `adsb file`
-    ENVELOPE = 2;  // the demodulator's resampled envelope magnitude, real float32 at its output rate
-  }
-  Point point = 1;
-  double duration_s = 2;  // stream time; over 0, and at most ServerInfo.capture_max_s
-  string name = 3;        // file name in --capture-dir: no '/', not starting with '.'; .sigmf-data/-meta added
-}
-
-// Sent when the capture has covered its duration, or the input ended first.
-message CaptureResult {
-  string data_path = 1;  // the .sigmf-data on the server; its .sigmf-meta is beside it
-  string datatype = 2;   // SigMF core:datatype, e.g. "cf32_le"
-  double rate_hz = 3;
-  uint64 start_index = 4;  // the point's stream index of the first sample: an input index is Frame.idx's
-  uint64 samples = 5;      // samples written
-  uint64 missing = 6;      // samples of the duration not written: dropped behind a slow disk, or lost by the
-                           // source; each gap starts a new SigMF capture segment
-}
-
-message InputStatus {
-  double window_s = 1;
-  double rate_hz = 2;
-  double stream_s = 3;
-  double lost_s = 4;
-  double dropped_s = 5;
-  optional uint64 kernel_drops = 6;
-  bool ok = 7;
-  string summary = 8;
+message AircraftChanges {
+  repeated Aircraft aircraft = 1;  // each as last published
 }
 
 message Aircraft {
@@ -196,9 +137,97 @@ message AutopilotModes {
   repeated Mode modes = 1;
 }
 
-// ---- History calls ----
+message WatchInputStatusRequest {}
 
-message SnapshotRequest {
+message InputStatus {
+  double window_s = 1;
+  double rate_hz = 2;
+  double stream_s = 3;
+  double lost_s = 4;
+  double dropped_s = 5;
+  optional uint64 kernel_drops = 6;
+  bool ok = 7;
+  string summary = 8;
+}
+
+message WatchSpectrumRequest {}
+
+message SpectrumRow {
+  double freq_hz = 1;
+  double rate_hz = 2;
+  repeated float bins_db = 3;
+}
+
+// ---- Receiver: settings ----
+
+message WatchSettingsRequest {}
+
+// Each reply of WatchSettings is the whole of it.
+message Settings {
+  string capture_dir = 1;  // where RecordCapture writes, absolute; empty with captures off. Starts as --capture-dir
+}
+
+// Each field set is changed; each unset is left as it is.
+message UpdateSettingsRequest {
+  // An existing, writable directory on the server, relative to its working directory or absolute; empty turns
+  // captures off. A capture in progress carries on in the directory it started in.
+  optional string capture_dir = 1;
+}
+
+// ---- Receiver: captures ----
+
+enum CapturePoint {
+  CAPTURE_POINT_UNSPECIFIED = 0;
+  INPUT = 1;     // the input IQ after stitching, as the source delivered it: replayable with `adsb file`
+  ENVELOPE = 2;  // the demodulator's resampled envelope magnitude, real float32 at its output rate
+}
+
+message RecordCaptureRequest {
+  CapturePoint point = 1;
+  double duration_s = 2;  // stream time; over 0, and at most ReceiverInfo.max_capture_s
+  string name = 3;        // file name in the capture directory: no '/', not starting with '.'; .sigmf-data/-meta
+                          // added. An existing name is refused.
+}
+
+// About twice a second while the capture runs, and a last one when it has covered its duration or the input
+// ended first.
+message RecordCaptureProgress {
+  uint64 start_index = 1;  // the point's stream index of the first sample: an input index is Frame.idx's
+  uint64 samples = 2;      // samples written so far
+  uint64 missing = 3;      // samples not written so far: dropped behind a slow disk, or lost by the source; each
+                           // gap starts a new SigMF capture segment
+  Capture capture = 4;     // on the last reply only: the recording as written
+}
+
+message ListCapturesRequest {}
+
+message ListCapturesResponse {
+  string dir = 1;                 // the capture directory listed
+  repeated Capture captures = 2;  // newest first, at most 1000
+  uint32 not_listed = 3;          // older ones beyond those
+}
+
+// One recording in the capture directory.
+message Capture {
+  string name = 1;             // without .sigmf-data, as RecordCaptureRequest.name
+  string data_path = 2;        // the .sigmf-data on the server; its .sigmf-meta is beside it
+  uint64 data_bytes = 3;
+  double modified_unix_s = 4;  // the .sigmf-data's last write
+  CaptureMeta meta = 5;        // unset when the .sigmf-meta is missing or invalid
+}
+
+// What a recording's .sigmf-meta says.
+message CaptureMeta {
+  string datatype = 1;          // core:datatype, e.g. "cf32_le"
+  double rate_hz = 2;           // core:sample_rate
+  optional double freq_hz = 3;  // the first segment's core:frequency, if it has one
+  string description = 4;       // core:description
+  double duration_s = 5;        // of the samples in the .sigmf-data, from its size, datatype and rate
+}
+
+// ---- History ----
+
+message GetSnapshotRequest {
   optional double t = 1;  // Unix s; unset for the latest
 }
 
@@ -219,9 +248,9 @@ message TrackPoint {
   optional int32 altitude_ft = 3;
 }
 
-message AircraftHistoryRequest {
+message GetAircraftHistoryRequest {
   uint32 icao = 1;
-  optional double t = 2;  // unset for its latest update
+  optional double t = 2;  // Unix s; unset for its latest update
 }
 
 message AircraftHistory {
@@ -237,8 +266,8 @@ message AircraftHistory {
   repeated Point points = 2;  // oldest first
 }
 
-message ActivityRequest {
-  optional double from = 1;  // unset for the whole database
+message GetActivityRequest {
+  optional double from = 1;  // Unix s; unset for the whole database
 }
 
 message Activity {
@@ -247,15 +276,15 @@ message Activity {
   repeated uint32 counts = 3;
 }
 
-message HeatmapRequest {
+message GetHeatmapRequest {
   double west = 1;
   double south = 2;
   double east = 3;
   double north = 4;
   uint32 width = 5;
   uint32 height = 6;
-  optional double t0 = 7;
-  optional double t1 = 8;
+  optional double t0 = 7;  // Unix s; unset for the database's start
+  optional double t1 = 8;  // Unix s; unset for its end
 }
 
 message Heatmap {

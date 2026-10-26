@@ -158,10 +158,10 @@ public:
     }
 
     void insert(const std::vector<api::Aircraft>& rows);
-    std::optional<api::Snapshot> snapshot(const api::SnapshotRequest& req);
-    std::optional<api::AircraftHistory> aircraft(const api::AircraftHistoryRequest& req);
-    std::optional<api::Activity> activity(const api::ActivityRequest& req);
-    std::optional<api::Heatmap> heatmap(const api::HeatmapRequest& req);
+    std::optional<api::Snapshot> snapshot(const api::GetSnapshotRequest& req);
+    std::optional<api::AircraftHistory> aircraft(const api::GetAircraftHistoryRequest& req);
+    std::optional<api::Activity> activity(const api::GetActivityRequest& req);
+    std::optional<api::Heatmap> heatmap(const api::GetHeatmapRequest& req);
 
 private:
     explicit Db(sqlite3* db) : m_db(db) {}
@@ -269,7 +269,7 @@ void AircraftHistory::Db::insert(const std::vector<api::Aircraft>& rows) {
         LOGF(ERROR, "history commit failed: %s", sqlite3_errmsg(m_db));
 }
 
-std::optional<api::Snapshot> AircraftHistory::Db::snapshot(const api::SnapshotRequest& req) {
+std::optional<api::Snapshot> AircraftHistory::Db::snapshot(const api::GetSnapshotRequest& req) {
     TRACE_ZONE("history_snapshot");
 
     Statement range;
@@ -287,7 +287,8 @@ std::optional<api::Snapshot> AircraftHistory::Db::snapshot(const api::SnapshotRe
     // Each aircraft's latest state at t. SQLite takes a bare column alongside
     // max() from the row holding the max.
     Statement states;
-    if (!prepare(m_db, states, "SELECT icao, state, max(t) FROM aircraft_updates WHERE t > ?1 AND t <= ?2 GROUP BY icao;"))
+    if (!prepare(m_db, states,
+                 "SELECT icao, state, max(t) FROM aircraft_updates WHERE t > ?1 AND t <= ?2 GROUP BY icao;"))
         return std::nullopt;
     sqlite3_bind_double(states.stmt, 1, t0);
     sqlite3_bind_double(states.stmt, 2, t);
@@ -327,12 +328,13 @@ std::optional<api::Snapshot> AircraftHistory::Db::snapshot(const api::SnapshotRe
     return msg;
 }
 
-std::optional<api::AircraftHistory> AircraftHistory::Db::aircraft(const api::AircraftHistoryRequest& req) {
+std::optional<api::AircraftHistory> AircraftHistory::Db::aircraft(const api::GetAircraftHistoryRequest& req) {
     TRACE_ZONE("history_aircraft");
 
     Statement points;
-    if (!prepare(m_db, points, "SELECT t, altitude_ft, ground_speed_kt, vertical_rate_fpm, signal_db, "
-                         "selected_altitude_ft FROM aircraft_updates WHERE icao = ?1 AND t > ?2 AND t <= ?3 ORDER BY t;"))
+    if (!prepare(m_db, points,
+                 "SELECT t, altitude_ft, ground_speed_kt, vertical_rate_fpm, signal_db, selected_altitude_ft "
+                 "FROM aircraft_updates WHERE icao = ?1 AND t > ?2 AND t <= ?3 ORDER BY t;"))
         return std::nullopt;
     // Without t, the window ends at this aircraft's latest update.
     double t = 0;
@@ -362,7 +364,7 @@ std::optional<api::AircraftHistory> AircraftHistory::Db::aircraft(const api::Air
     return msg;
 }
 
-std::optional<api::Activity> AircraftHistory::Db::activity(const api::ActivityRequest& req) {
+std::optional<api::Activity> AircraftHistory::Db::activity(const api::GetActivityRequest& req) {
     TRACE_ZONE("history_activity");
 
     Statement counts;
@@ -389,7 +391,7 @@ std::optional<api::Activity> AircraftHistory::Db::activity(const api::ActivityRe
     return msg;
 }
 
-std::optional<api::Heatmap> AircraftHistory::Db::heatmap(const api::HeatmapRequest& req) {
+std::optional<api::Heatmap> AircraftHistory::Db::heatmap(const api::GetHeatmapRequest& req) {
     if (!(req.east() > req.west()) || !(req.north() > req.south())) return std::nullopt;
     TRACE_ZONE("history_heatmap");
     const int width = static_cast<int>(std::clamp<uint32_t>(req.width(), 1, kHistoryHeatmapMaxCells));
@@ -465,19 +467,19 @@ coro::Coro<std::optional<Result>> AircraftHistory::ask(Req req) {
     co_return answer ? std::move(*answer) : std::nullopt;
 }
 
-coro::Coro<std::optional<api::Snapshot>> AircraftHistory::snapshot(api::SnapshotRequest req) {
+coro::Coro<std::optional<api::Snapshot>> AircraftHistory::snapshot(api::GetSnapshotRequest req) {
     return ask<Snapshot, api::Snapshot>(std::move(req));
 }
 
-coro::Coro<std::optional<api::AircraftHistory>> AircraftHistory::aircraft(api::AircraftHistoryRequest req) {
+coro::Coro<std::optional<api::AircraftHistory>> AircraftHistory::aircraft(api::GetAircraftHistoryRequest req) {
     return ask<Aircraft, api::AircraftHistory>(std::move(req));
 }
 
-coro::Coro<std::optional<api::Activity>> AircraftHistory::activity(api::ActivityRequest req) {
+coro::Coro<std::optional<api::Activity>> AircraftHistory::activity(api::GetActivityRequest req) {
     return ask<Activity, api::Activity>(std::move(req));
 }
 
-coro::Coro<std::optional<api::Heatmap>> AircraftHistory::heatmap(api::HeatmapRequest req) {
+coro::Coro<std::optional<api::Heatmap>> AircraftHistory::heatmap(api::GetHeatmapRequest req) {
     return ask<Heatmap, api::Heatmap>(std::move(req));
 }
 

@@ -98,9 +98,6 @@ void DemodLoopParams::add_options(argparse::ArgumentParser& program) {
         "preamble correlation score threshold");
     program.add_argument("--slice-mag-min").scan<'g', float>().default_value(2.0f * 56.0f).help(
         "bit-slice magnitude threshold");
-    program.add_argument("--capture-dir").help(
-        "with --ws-port, take the API's capture calls, which record the input IQ or the demodulator's envelope "
-        "for a while as SigMF into this directory (default: no captures)");
 #ifdef ADSB_WITH_HDF5
     program.add_argument("--debug-h5").help(
         "write every decoded frame, with its IQ, envelope and the filter and parameters to rerun the demodulator "
@@ -124,7 +121,6 @@ DemodLoopParams DemodLoopParams::from_options(const argparse::ArgumentParser& pr
 #endif
                 .command_line = std::move(command_line),
             },
-        .capture_dir = program.present("--capture-dir"),
     };
 }
 
@@ -150,10 +146,10 @@ struct RecordItem {
     std::vector<DecodedFrameView> views;  // one per frame
 };
 
-// Passes on the blocks from `in` that arrive while `settings` has a spectrum viewer, checking every
+// Passes on the blocks from `in` that arrive while `demand` has a spectrum viewer, checking every
 // kSpectrumInterval. Peaks held when the last viewer goes are in the first row the next one sees.
 coro::CoroStream<IqBlock> while_viewed(coro::MpscReceiver<IqBlock> in,
-                                       coro::WatchReceiver<PipelineSettings> settings) {
+                                       coro::WatchReceiver<PipelineDemand> demand) {
     auto next_check = std::chrono::steady_clock::now();
     bool computing = false;
     while (auto block = co_await coro::next(in)) {
@@ -161,7 +157,7 @@ coro::CoroStream<IqBlock> while_viewed(coro::MpscReceiver<IqBlock> in,
             next_check = now + kSpectrumInterval;
             // Races with a spectrum call starting or ending, harmlessly: a new viewer waits up to one interval
             // longer for its first row, and one more row may follow the last viewer's going.
-            const int viewers = settings.get().spectrum_viewers;
+            const int viewers = demand.get().spectrum_viewers;
             if ((viewers > 0) != computing) {
                 computing = viewers > 0;
                 LOGF(INFO, "spectrum: %s (%d viewer(s))", computing ? "computing" : "stopped", viewers);
@@ -173,10 +169,10 @@ coro::CoroStream<IqBlock> while_viewed(coro::MpscReceiver<IqBlock> in,
 
 // The spectrum's own task, so its FFTs run on another worker rather than in the demodulator's. Publishes
 // spectrum_rows() of the blocks from `in` on `publish`, while a client watches.
-coro::Coro<void> publish_spectrum(coro::MpscReceiver<IqBlock> in, coro::BroadcastSender<LiveItem> publish,
-                                  coro::WatchReceiver<PipelineSettings> settings, double rate_hz, double freq_hz) {
+coro::Coro<void> publish_spectrum(coro::MpscReceiver<IqBlock> in, coro::BroadcastSender<LiveSpectrumRow> publish,
+                                  coro::WatchReceiver<PipelineDemand> demand, double rate_hz, double freq_hz) {
     coro::CoroStream<SpectrumFrame> rows =
-        spectrum_rows(while_viewed(std::move(in), std::move(settings)), kSpectrumInterval, rate_hz, freq_hz);
+        spectrum_rows(while_viewed(std::move(in), std::move(demand)), kSpectrumInterval, rate_hz, freq_hz);
     while (auto row = co_await coro::next(rows)) {
         // Fails only with no client to receive it, which is fine.
         (void)publish.send(std::make_shared<const api::SpectrumRow>(to_proto(*row)));
@@ -197,8 +193,9 @@ coro::Coro<void> route_captures(coro::MpscReceiver<CaptureCall> calls, coro::Mps
                                 coro::MpscSender<CaptureCall> envelope) {
     while (auto call = co_await coro::next(calls)) {
         // The server has checked the point.
-        auto& to = call->request.point() == api::CaptureRequest::INPUT ? input : envelope;
-        // Fails only once the capture task has stopped, which the call's dropped reply tells its client.
+        auto& to = call->request.point() == api::INPUT ? input : envelope;
+        // Fails only once the capture task has stopped, which the call's closed progress channel tells its
+        // client.
         (void)co_await to.send(std::move(*call));
     }
 }
@@ -244,16 +241,16 @@ coro::Coro<uint64_t> run_demod_loop(FilterBank filter, double rate_hz, double fr
         auto [tx, rx] = coro::mpsc_channel<IqBlock>(kSpectrumQueueBlocks);
         branches.push_back(std::move(tx));
         spectrum = coro::build_task().name("spectrum").spawn(
-            publish_spectrum(std::move(rx), ws->live.clone(), ws->settings.clone(), rate_hz, freq_hz));
+            publish_spectrum(std::move(rx), ws->spectrum.clone(), ws->demand.clone(), rate_hz, freq_hz));
     }
     std::optional<coro::MpscSender<EnvelopeRun>> to_envelope_capture;
     std::optional<coro::WatchReceiver<bool>> envelope_wanted;
     std::vector<coro::JoinHandle<void>> captures;  // cancelled when this returns and drops them
-    if (ws && params.capture_dir) {
+    if (ws) {
         const double envelope_rate_hz = demod_output_rate_hz();
-        LOGF(INFO, "capture: on a capture call, into %s, up to %g s of the input (as the source delivers it, at "
-             "%g Hz) or of the envelope (rf32_le at %g Hz)",
-             *params.capture_dir, CaptureCall::kMaxDurationS, rate_hz, envelope_rate_hz);
+        LOGF(INFO, "capture: on a capture call while a capture directory is set, up to %g s of the input (as the "
+             "source delivers it, at %g Hz) or of the envelope (rf32_le at %g Hz)",
+             CaptureCall::kMaxDurationS, rate_hz, envelope_rate_hz);
         auto [input_tx, input_rx] = coro::mpsc_channel<IqBlock>(kCaptureQueueBlocks);
         auto [envelope_tx, envelope_rx] = coro::mpsc_channel<EnvelopeRun>(kCaptureQueueBlocks);
         auto [input_calls_tx, input_calls_rx] = coro::mpsc_channel<CaptureCall>(kCaptureCalls);
@@ -263,10 +260,10 @@ coro::Coro<uint64_t> run_demod_loop(FilterBank filter, double rate_hz, double fr
         to_envelope_capture = std::move(envelope_tx);
         envelope_wanted = std::move(wanted_rx);
         captures.push_back(coro::build_task().name("capture_input").spawn(
-            capture_input(*params.capture_dir, {"input", "capture input missing", rate_hz, freq_hz},
+            capture_input({"input", "capture input missing", rate_hz, freq_hz},
                           std::move(input_rx), std::move(input_calls_rx))));
         captures.push_back(coro::build_task().name("capture_envelope").spawn(
-            capture_envelope(*params.capture_dir, {"envelope", "capture envelope missing", envelope_rate_hz, {}},
+            capture_envelope({"envelope", "capture envelope missing", envelope_rate_hz, {}},
                              std::move(envelope_rx), std::move(envelope_calls_rx), std::move(wanted_tx))));
         captures.push_back(coro::build_task().name("capture_calls").spawn(route_captures(
             std::move(ws->captures), std::move(input_calls_tx), std::move(envelope_calls_tx))));
@@ -326,7 +323,7 @@ coro::Coro<uint64_t> run_demod_loop(FilterBank filter, double rate_hz, double fr
             }
             // Fails only with no client to receive it, which is fine.
             if (ws && !frames.empty())
-                (void)ws->live.send(std::make_shared<const std::vector<api::Frame>>(std::move(frames)));
+                (void)ws->frames.send(std::make_shared<const std::vector<api::Frame>>(std::move(frames)));
             if (ws && !aircraft.empty()) {
                 auto live = ws->aircraft.borrow_mut();
                 for (const api::Aircraft& ac : aircraft) (*live)[ac.icao()] = ac;

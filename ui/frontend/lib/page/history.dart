@@ -18,7 +18,7 @@ extension _History on _FrameTablePageState {
     _activityInFlight = true;
     final t0 = _activityT0;
     final from = t0 == null ? null : t0 + math.max(0, _activity.length - 1) * _activityBucketS;
-    final reply = await _ask((c) => c.activity(api.ActivityRequest(from: from)));
+    final reply = await _ask((c) => c.getActivity(api.GetActivityRequest(from: from)));
     _activityInFlight = false;
     if (reply != null) _onActivity(reply);
   }
@@ -54,7 +54,7 @@ extension _History on _FrameTablePageState {
       return;
     }
     _seekInFlight = true;
-    final reply = await _ask((c) => c.snapshot(api.SnapshotRequest(t: t)));
+    final reply = await _ask((c) => c.getSnapshot(api.GetSnapshotRequest(t: t)));
     _seekInFlight = false;
     if (reply != null) _onSnapshot(AircraftSnapshot.fromProto(reply));
     final queued = _queuedSeekS;
@@ -72,7 +72,9 @@ extension _History on _FrameTablePageState {
   /// of the history when shorter), from _scrubRangeStartS or ending at end.
   (double, double) _scrubRange(double start, double end) {
     final length = math.min(_scrubRangeS, end - start);
-    final lo = (_scrubRangeStartS ?? end - length).clamp(start, end - length);
+    // When length is end - start, end - length can round to just under start,
+    // and clamp() throws if its upper limit is below its lower one.
+    final lo = (_scrubRangeStartS ?? end - length).clamp(start, math.max<double>(start, end - length));
     return (lo, lo + length);
   }
 
@@ -81,7 +83,7 @@ extension _History on _FrameTablePageState {
   /// _scrubWindowStartS or ending at rangeHi.
   (double, double) _scrubWindow(double rangeLo, double rangeHi) {
     final length = math.min(_scrubWindowS, rangeHi - rangeLo);
-    final lo = (_scrubWindowStartS ?? rangeHi - length).clamp(rangeLo, rangeHi - length);
+    final lo = (_scrubWindowStartS ?? rangeHi - length).clamp(rangeLo, math.max<double>(rangeLo, rangeHi - length));
     return (lo, lo + length);
   }
 
@@ -101,7 +103,8 @@ extension _History on _FrameTablePageState {
     final (rangeLo, rangeHi) = _scrubRange(start, end);
     final rangeLength = rangeHi - rangeLo;
     final half = math.min(_scrubWindowS, rangeLength) / 2;
-    _scrubRangeStartS = centreRange ? t - rangeLength / 2 : rangeLo.clamp(t + half - rangeLength, t - half);
+    final rangeLoMin = t + half - rangeLength;
+    _scrubRangeStartS = centreRange ? t - rangeLength / 2 : rangeLo.clamp(rangeLoMin, math.max<double>(rangeLoMin, t - half));
     _scrubWindowStartS = t - half;
     _onScrub(t);
   }
@@ -165,8 +168,8 @@ extension _History on _FrameTablePageState {
       _selectedHistoryIcao = icao;
     }
     if (icao == null || !_backfilled) return;
-    final request = api.AircraftHistoryRequest(icao: int.parse(icao, radix: 16), t: _snapshot?.timeS);
-    final reply = await _ask((c) => c.aircraftHistory(request));
+    final request = api.GetAircraftHistoryRequest(icao: int.parse(icao, radix: 16), t: _snapshot?.timeS);
+    final reply = await _ask((c) => c.getAircraftHistory(request));
     // Dropped if the selection changed meanwhile.
     if (reply != null && icao == _selectedIcao) _onAircraftHistory(reply);
   }

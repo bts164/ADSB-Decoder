@@ -3,7 +3,8 @@
 //     dot -Tsvg pipeline.dot -o pipeline.svg
 //
 // Colours: blue, a task; amber, a task on a blocking thread; white in a grey frame, a stage run in its frame's
-// task, not a task of its own; grey cylinders, files. Dashed, there only with the option an arrow names.
+// task, not a task of its own; grey cylinders, files. Dashed, there only with the option an arrow names. A thick
+// border, more than one at once.
 digraph pipeline {
     graph [
         rankdir=TB, newrank=true, compound=true, bgcolor="white", pad=0.3, nodesep=0.35, ranksep=0.5,
@@ -38,7 +39,7 @@ digraph pipeline {
              style="rounded,filled,dashed"];
         DEMOD [label=<demodulate()<br/>AdsbDemod: resample,<br/>preamble, slice>];
     }
-    PAR [label=<coro::parallel() parts<br/>one per worker>];
+    PAR [label=<coro::parallel() parts<br/>one per worker>, penwidth=3];
 
     SINK [label=<<b>run_demod_loop task</b><br/>handle_frame(): validate,<br/>decode, AircraftTracker>];
 
@@ -54,10 +55,10 @@ digraph pipeline {
     subgraph cluster_ws {
         label="WebSocket server"; style="rounded,filled"; fillcolor="#f9fafb"; color="#9ca3af";
         ACC [label=<<b>ws_accept task</b>>];
-        CALL [label=<<b>ws_call task</b><br/>one per call, at most 8>];
+        CALL [label=<<b>ws_call task</b><br/>one per call, at most 8 per client>, penwidth=3];
         subgraph cluster_client {
-            label="ws_client task: one per client"; style="rounded,filled"; fillcolor="#f3f4f6"; color="#6b7280";
-            node [fillcolor="white", color="#6b7280"];
+            label="ws_client task: one per client"; style="rounded,filled"; fillcolor="#f3f4f6"; color="#6b7280"; penwidth=3;
+            node [fillcolor="white", color="#6b7280", penwidth=1.2];
             READ [label=<read_socket()<br/>starts, cancels<br/>and ends calls>];
             WRITE [label=<write_socket()<br/>sends in the order queued>];
         }
@@ -67,7 +68,7 @@ digraph pipeline {
     H5 [label="HDF5"];
     DB [label="SQLite"];
     SIGMF [label="SigMF"];
-    UI [shape=box, style="rounded,filled", fillcolor="#dcfce7", color="#16a34a", label=<<b>UI</b>>];
+    UI [shape=box, style="rounded,filled", fillcolor="#dcfce7", color="#16a34a", penwidth=3, label=<<b>UI</b>>];
 
     // Rows, top to bottom.
     { rank=same; TEE; }
@@ -84,7 +85,7 @@ digraph pipeline {
     STITCH -> TEE;
     TEE -> DEMOD;
     TEE -> SPEC [label="mpsc, 2 blocks,\nskips when full", style=dashed];
-    TEE -> CAPI [label="--capture-dir: mpsc, 8 blocks,\nskips when full", style=dashed];
+    TEE -> CAPI [label="--ws-port: mpsc, 8 blocks,\nskips when full", style=dashed];
     DEMOD -> PAR [label="fork / join", dir=both];
     DEMOD -> SINK [label="buffered, 64 blocks"];
 
@@ -105,9 +106,9 @@ digraph pipeline {
     // Into and out of the WebSocket server.
     SPEC -> CALL [label="spectrum:\nbroadcast, 64", style=dashed];
     //SRC:vita49:s -> CALL [label="input status: watch", style=dashed, constraint=false];
-    CALL -> SPEC [label="settings: watch", style=dashed, constraint=false];
+    CALL -> SPEC [label="demand: watch", style=dashed, constraint=false];
     CALL -> HIST [label="queries,\noneshot replies", style=dashed, constraint=false];
-    CALL -> CAPR [label="capture calls: mpsc, 4,\noneshot replies", style=dashed, constraint=false];
+    CALL -> CAPR [label="capture calls: mpsc, 4,\nprogress: mpsc, 2 each", style=dashed, constraint=false];
 
     // Inside it.
     ACC -> READ [lhead=cluster_client];

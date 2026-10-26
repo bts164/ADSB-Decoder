@@ -6,7 +6,7 @@ import 'api/adsb/api/v1/api.pb.dart' as api;
 /// An ICAO address as the UI shows and keys it: six lowercase hex digits.
 String icaoHex(int icao) => icao.toRadixString(16).padLeft(6, '0');
 
-/// One decoded frame, from a live update (api.Frame).
+/// One decoded frame, from the frames watch (api.Frame).
 class FrameRecord {
   final int idx;
   final int bits;
@@ -52,8 +52,8 @@ class FrameRecord {
   }
 }
 
-/// Current tracked state of one aircraft (api.Aircraft), from a live update or
-/// a snapshot, with each unset field null. Unlike FrameRecord this isn't
+/// Current tracked state of one aircraft (api.Aircraft), from the aircraft
+/// watch or a snapshot, with each unset field null. Unlike FrameRecord this isn't
 /// appended to a log -- each update carries the aircraft's full current
 /// state, so the frontend just replaces its map entry for that ICAO wholesale.
 class AircraftRecord {
@@ -195,7 +195,7 @@ const categoryNames = {
 /// What the emergency squawks mean.
 const emergencySquawks = {'7500': 'Hijack', '7600': 'Radio failure', '7700': 'Emergency'};
 
-/// The sky at one time, from the backend's history db (a snapshot call; see
+/// The sky at one time, from the backend's history db (GetSnapshot; see
 /// src/output/aircraft_history.h: AircraftHistory::snapshot): every
 /// aircraft updated in the ten minutes before `timeS`, with its state as of
 /// `timeS` and its track over those minutes.
@@ -284,8 +284,8 @@ int compareNullable(num? a, num? b) {
 }
 
 /// The backend's report on whether its live input keeps up with real time
-/// (an update's api.InputStatus, sent every couple of seconds while packets
-/// arrive).
+/// (api.InputStatus, from the input status watch, every couple of seconds
+/// while packets arrive).
 class InputStatus {
   InputStatus.fromProto(api.InputStatus s)
       : ok = s.ok,
