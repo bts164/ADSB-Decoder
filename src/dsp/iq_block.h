@@ -182,9 +182,8 @@ private:
 
 /**
  * A finished block, its padding filled: what stitch() yields and every stage after it reads. Its samples are
- * read-only and held by reference count, so a stage that needs a block another also reads takes a share() of
- * it rather than a copy, and the buffer goes back to its pool when the last share is dropped. Never copied
- * implicitly: share() and clone() say which is meant.
+ * read-only and held by reference count, so a copy is another reference to the same samples, and the buffer
+ * goes back to its pool when the last copy is dropped. clone() copies the samples themselves.
  *
  * A stage that takes blocks from any source reads them with visit(), or to_float() for a run of samples; the
  * typed accessors throw for any format but the block's.
@@ -194,13 +193,11 @@ public:
     /** Takes `buffer`'s samples, as final: stitch() makes each block this way. */
     explicit IqBlock(IqBuffer&& buffer);
 
-    IqBlock(const IqBlock&) = delete;
-    IqBlock& operator=(const IqBlock&) = delete;
+    IqBlock(const IqBlock&) = default;
+    IqBlock& operator=(const IqBlock&) = default;
     IqBlock(IqBlock&&) noexcept = default;
     IqBlock& operator=(IqBlock&&) noexcept = default;
 
-    /** Another reference to the same samples. */
-    IqBlock share() const { return IqBlock(m_n, m_lead, m_start, m_samples); }
     /** A copy of the samples, which has no pool. */
     IqBlock clone() const;
 

@@ -44,7 +44,8 @@ class ReceiverClient {
       _channel.unary('/adsb.api.v1.Receiver/UpdateSettings', request, Settings.fromBuffer);
 
   /// Records one point of the pipeline to a SigMF recording in Settings.capture_dir, from the next block on,
-  /// reporting its progress. One capture per point at a time; cancelling stops it, keeping what's written.
+  /// reporting its progress. Any number run at once, of either point; cancelling one stops it, keeping what's
+  /// written.
   $async.Stream<RecordCaptureProgress> recordCapture(RecordCaptureRequest request) =>
       _channel.serverStreaming('/adsb.api.v1.Receiver/RecordCapture', request, RecordCaptureProgress.fromBuffer);
 

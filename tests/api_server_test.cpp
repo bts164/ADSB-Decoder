@@ -1,8 +1,8 @@
 // Tests for the UI API's server, as a client sees it: each test starts the server on a port of its own,
-// connects over a WebSocket, and makes calls to its services, publishing what the server answers from on the
-// server's channels, or putting it in the history database, and standing in for the pipeline's capture task.
-// tests/wsrpc_test.cpp covers the framing itself. Last, the history database's refusal of a file from another
-// version of adsb.
+// connects over a WebSocket, and makes calls to its services, publishing what the server answers from on
+// channels it creates as the pipeline does, or putting it in the history database. The capture tests write
+// real files. tests/wsrpc_test.cpp covers the framing itself. Last, the history database's refusal of a file
+// from another version of adsb.
 
 #include <chrono>
 #include <cmath>
@@ -25,11 +25,14 @@
 #include <coro/coro.h>
 #include <coro/io/ws_stream.h>
 #include <coro/runtime/runtime.h>
+#include <coro/sync/broadcast.h>
 #include <coro/sync/sleep.h>
 #include <coro/sync/timeout.h>
+#include <coro/sync/watch.h>
 #include <sqlite3.h>
 
 #include "adsb/api/v1/api.wsrpc.h"
+#include "dsp/iq_block.h"
 #include "output/api_server.h"
 #include "wsrpc/v1/wsrpc.pb.h"
 
@@ -53,9 +56,59 @@ int g_failures = 0;
 // A watch's interval unless its request says otherwise.
 constexpr auto kDefaultInterval = 100ms;
 
-// The capture directory the live tests' server starts with. Nothing is written there: the test stands in for
-// the capture task.
+// The capture directory the live tests' server starts with. Only the capture tests write, each into a
+// directory of its own.
 constexpr std::string_view kCaptureDir = "/nonexistent/captures";
+
+// The capture points' rates, and the input's center frequency.
+constexpr double kInputRateHz = 1000;
+constexpr double kEnvelopeRateHz = 2000;
+constexpr double kFreqHz = 1.09e9;
+
+// The pipeline's end of each output, which a test publishes on as the pipeline's stages do.
+struct Feeds {
+    coro::BroadcastSender<LiveFrames> frames;
+    coro::WatchSender<LiveAircraft> aircraft;
+    coro::BroadcastSender<LiveSpectrumRow> spectrum;
+    coro::BroadcastSender<IqBlock> input;
+    coro::BroadcastSender<EnvelopeShare> envelope;
+    coro::WatchSender<std::optional<api::InputStatus>> input_status;
+};
+
+// The outputs' channels, as deep as the pipeline's: the test's ends, and the server's.
+std::pair<Feeds, ReceiverFeeds> make_feeds(api::Settings settings) {
+    auto [frames, frames_rx] = coro::broadcast_channel<LiveFrames>(64);
+    auto [aircraft, aircraft_rx] = coro::watch_channel(LiveAircraft{});
+    auto [spectrum, spectrum_rx] = coro::broadcast_channel<LiveSpectrumRow>(64);
+    auto [input, input_rx] = coro::broadcast_channel<IqBlock>(8);
+    auto [envelope, envelope_rx] = coro::broadcast_channel<EnvelopeShare>(8);
+    auto [status, status_rx] = coro::watch_channel(std::optional<api::InputStatus>{});
+    ReceiverFeeds served{
+        .outputs =
+            {
+                .frames = frames.inactive(),
+                .aircraft = std::move(aircraft_rx),
+                .spectrum = spectrum.inactive(),
+                .input = input.inactive(),
+                .envelope = envelope.inactive(),
+                .input_point = {"input", "capture input missing", kInputRateHz, kFreqHz},
+                .envelope_point = {"envelope", "capture envelope missing", kEnvelopeRateHz, {}},
+            },
+        .input_status = std::move(status_rx),
+        .settings = std::move(settings),
+    };
+    return {Feeds{std::move(frames), std::move(aircraft), std::move(spectrum), std::move(input),
+                  std::move(envelope), std::move(status)},
+            std::move(served)};
+}
+
+// A block of `n` zero samples of cf32, from stream index `start`.
+IqBlock block(size_t n, uint64_t start) { return IqBlock(IqBuffer::zeroed<iq::F32>(IqPadding{}, n, start)); }
+
+// An envelope run of `n` samples, from stream index `start`.
+EnvelopeShare envelope_run(size_t n, uint64_t start) {
+    return std::make_shared<const EnvelopeRun>(EnvelopeRun{start, std::vector<float>(n, 1.0f)});
+}
 
 // The server starts listening in a task of its own, so the first tries may be refused.
 coro::Coro<coro::WsStream> connect(uint16_t port) {
@@ -159,11 +212,13 @@ coro::Coro<std::optional<Reply>> unary(coro::WsStream& ws, const ClientFrame& fr
     co_return reply_of<Reply>(answer, frame.id());
 }
 
-// Whether the spectrum calls in progress come to `n` within a second: a call starts and ends in a task of
-// its own, so the count follows the frames that start and end it a little later.
-coro::Coro<bool> viewers_reach(const ApiSenders& senders, int n) {
+// Whether `out` comes to have readers, or to have none, as `read` says, within a second: a call starts and
+// ends in a task of its own, so it activates and drops its receiver a little after the frames that start and
+// end it.
+template<typename T>
+coro::Coro<bool> read_within(const coro::BroadcastSender<T>& out, bool read) {
     for (int i = 0; i < 50; i++) {
-        if (senders.demand.get().spectrum_viewers == n) co_return true;
+        if (out.all_receivers_dropped() != read) co_return true;
         co_await coro::sleep_for(20ms);
     }
     co_return false;
@@ -189,7 +244,7 @@ api::Aircraft recorded(uint32_t icao, double t, int32_t altitude_ft, double lat 
 
 // What the server serves in a run().
 struct Served {
-    bool live = true;                                    // Receiver, with the channels' ends in a test's senders
+    bool live = true;                                    // Receiver, with the channels' other ends in the test's
     std::string capture_dir = std::string(kCaptureDir);  // the settings' to start with
     std::optional<std::vector<api::Aircraft>> history;   // History, from an in-memory database holding these
 };
@@ -201,7 +256,7 @@ void run(uint16_t port, Test test, Served served = {}) {
     coro::Runtime(2).block_on([](uint16_t port, Test test, Served served) -> coro::Coro<void> {
         api::Settings settings;
         settings.set_capture_dir(served.capture_dir);
-        auto [senders, receivers] = api_channels(std::move(settings));
+        auto [feeds, outputs] = make_feeds(std::move(settings));
         std::optional<AircraftHistory> db;
         if (served.history) {
             db = AircraftHistory::open(":memory:");
@@ -209,14 +264,14 @@ void run(uint16_t port, Test test, Served served = {}) {
             // Queued ahead of every query, which the server sends on clones of its own.
             if (db) co_await db->insert(std::move(*served.history));
         }
-        std::optional<ApiReceivers> live;
-        if (served.live) live = std::move(receivers);
+        std::optional<ReceiverFeeds> live;
+        if (served.live) live = std::move(outputs);
         api_server_spawn(port, kDefaultInterval, std::move(live), "file", std::move(db));
         coro::WsStream ws = co_await connect(port);
         co_await send(ws, hello({api::Receiver::kName, api::History::kName}));
         auto answer = co_await receive(ws);
         CHECK(answer && answer->id() == 0 && answer->has_hello());
-        co_await test(ws, senders);
+        co_await test(ws, feeds);
     }(port, test, std::move(served)));
 }
 
@@ -224,9 +279,9 @@ void run(uint16_t port, Test test, Served served = {}) {
 void test_hello() {
     for (bool live : {true, false}) {
         coro::Runtime(2).block_on([](bool live) -> coro::Coro<void> {
-            auto [senders, receivers] = api_channels(api::Settings{});
-            std::optional<ApiReceivers> rx;
-            if (live) rx = std::move(receivers);
+            auto [feeds, outputs] = make_feeds(api::Settings{});
+            std::optional<ReceiverFeeds> rx;
+            if (live) rx = std::move(outputs);
             const uint16_t port = live ? 18701 : 18702;
             api_server_spawn(port, kDefaultInterval, std::move(rx), "file", AircraftHistory::open(":memory:"));
             coro::WsStream ws = co_await connect(port);
@@ -243,16 +298,16 @@ void test_hello() {
 }
 
 void test_receiver_info() {
-    run(18703, [](coro::WsStream& ws, ApiSenders&) -> coro::Coro<void> {
+    run(18703, [](coro::WsStream& ws, Feeds&) -> coro::Coro<void> {
         auto info =
             co_await unary<api::ReceiverInfo>(ws, receiver(1, "GetReceiverInfo", api::GetReceiverInfoRequest{}));
         CHECK(info && info->source() == "file" && info->default_interval_s() == 0.1);
-        CHECK(info && info->max_capture_s() == CaptureCall::kMaxDurationS);
+        CHECK(info && info->max_capture_s() == CapturePoint::kMaxDurationS);
     });
 }
 
-// WatchSettings sends the settings now, and again each time a client changes them, and the pipeline sees each
-// change. ListCaptures lists the directory they name.
+// WatchSettings sends the settings now, and again each time a client changes them. ListCaptures lists the
+// directory they name.
 void test_settings() {
     const std::filesystem::path dir = std::filesystem::temp_directory_path() / "api_server_test_captures";
     std::filesystem::remove_all(dir);
@@ -264,7 +319,7 @@ void test_settings() {
     std::ofstream(dir / "ignored.txt") << "not a capture";
     run(
         18704,
-        [dir](coro::WsStream& ws, ApiSenders& senders) -> coro::Coro<void> {
+        [dir](coro::WsStream& ws, Feeds&) -> coro::Coro<void> {
             co_await send(ws, receiver(1, "WatchSettings", api::WatchSettingsRequest{}));
             auto first = reply_of<api::Settings>(co_await receive(ws), 1);
             CHECK(first && first->capture_dir().empty());
@@ -285,7 +340,6 @@ void test_settings() {
                 if (watch && !frame->end()) watched = watch->capture_dir() == dir.string();
             }
             CHECK(replied && watched);
-            CHECK(senders.settings.get().capture_dir() == dir.string());
             // Setting the directory it already has changes nothing, so the watch sends nothing.
             auto same = co_await unary<api::Settings>(ws, update_settings(5, dir.string()));
             CHECK(same && same->capture_dir() == dir.string());
@@ -303,8 +357,12 @@ void test_settings() {
             }
 
             co_await send(ws, update_settings(7, ""));
-            for (int i = 0; i < 2; i++) (void)co_await receive(ws);
-            CHECK(senders.settings.get().capture_dir().empty());
+            bool off = false;
+            for (int i = 0; i < 2; i++) {
+                auto frame = co_await receive(ws);
+                if (auto reply = reply_of<api::Settings>(frame, 7)) off = reply->capture_dir().empty();
+            }
+            CHECK(off);
             co_await send(ws, receiver(8, "ListCaptures", api::ListCapturesRequest{}));
             CHECK(is_error(co_await receive(ws), 8, Error::FAILED_PRECONDITION));
         },
@@ -314,11 +372,11 @@ void test_settings() {
 
 // A batch carries the frames published since the last, and a watch with nothing published sends nothing.
 void test_frames() {
-    run(18705, [](coro::WsStream& ws, ApiSenders& senders) -> coro::Coro<void> {
+    run(18705, [](coro::WsStream& ws, Feeds& feeds) -> coro::Coro<void> {
         co_await send(ws, receiver(1, "WatchFrames", api::WatchFramesRequest{}));
         CHECK(!co_await receive(ws, 3 * kDefaultInterval));
-        (void)senders.frames.send(std::make_shared<const std::vector<api::Frame>>(2));
-        (void)senders.frames.send(std::make_shared<const std::vector<api::Frame>>(1));
+        (void)feeds.frames.send(std::make_shared<const std::vector<api::Frame>>(2));
+        (void)feeds.frames.send(std::make_shared<const std::vector<api::Frame>>(1));
         int seen = 0;
         while (seen < 3) {
             auto batch = reply_of<api::FrameBatch>(co_await receive(ws), 1);
@@ -338,24 +396,24 @@ void test_frames() {
 // The first reply has every aircraft, even none; each later one has those that changed. A cancelled watch sends
 // nothing more, though what it would send is still being published.
 void test_aircraft() {
-    run(18706, [](coro::WsStream& ws, ApiSenders& senders) -> coro::Coro<void> {
+    run(18706, [](coro::WsStream& ws, Feeds& feeds) -> coro::Coro<void> {
         co_await send(ws, receiver(1, "WatchAircraft", api::WatchAircraftRequest{}));
         auto first = reply_of<api::AircraftChanges>(co_await receive(ws), 1);
         CHECK(first && first->aircraft_size() == 0);
 
-        (void)senders.aircraft.send(LiveAircraft{{0xabc, aircraft(0xabc, 1000)}});
+        (void)feeds.aircraft.send(LiveAircraft{{0xabc, aircraft(0xabc, 1000)}});
         auto changes = reply_of<api::AircraftChanges>(co_await receive(ws), 1);
         CHECK(changes && changes->aircraft_size() == 1 && changes->aircraft(0).icao() == 0xabc);
 
         // Published again unchanged, and with one more: only the new one is sent.
-        (void)senders.aircraft.send(LiveAircraft{{0xabc, aircraft(0xabc, 1000)}, {0xdef, aircraft(0xdef, 2000)}});
+        (void)feeds.aircraft.send(LiveAircraft{{0xabc, aircraft(0xabc, 1000)}, {0xdef, aircraft(0xdef, 2000)}});
         changes = reply_of<api::AircraftChanges>(co_await receive(ws), 1);
         CHECK(changes && changes->aircraft_size() == 1 && changes->aircraft(0).icao() == 0xdef);
 
         co_await send(ws, cancel(1));
         CHECK(is_error(co_await receive(ws), 1, Error::CANCELLED));
         for (int i = 0; i < 3; i++) {
-            (void)senders.aircraft.send(LiveAircraft{{0xabc, aircraft(0xabc, 2000 + i)}});
+            (void)feeds.aircraft.send(LiveAircraft{{0xabc, aircraft(0xabc, 2000 + i)}});
             CHECK(!co_await receive(ws, 3 * kDefaultInterval));
         }
     });
@@ -363,109 +421,219 @@ void test_aircraft() {
 
 // Nothing until the input reports its status, then each report.
 void test_input_status() {
-    run(18707, [](coro::WsStream& ws, ApiSenders& senders) -> coro::Coro<void> {
+    run(18707, [](coro::WsStream& ws, Feeds& feeds) -> coro::Coro<void> {
         co_await send(ws, receiver(1, "WatchInputStatus", api::WatchInputStatusRequest{}));
         CHECK(!co_await receive(ws, 100ms));
         api::InputStatus status;
         status.set_ok(true);
         status.set_summary("fine");
-        (void)senders.input_status.send(status);
+        (void)feeds.input_status.send(status);
         auto reply = reply_of<api::InputStatus>(co_await receive(ws), 1);
         CHECK(reply && reply->ok() && reply->summary() == "fine");
     });
 }
 
-// Each spectrum watch sends every row published while it's in progress. It counts as a viewer until it ends,
-// by a cancel or by its connection closing.
+// Each spectrum watch sends every row published while it's in progress, through a receiver of its own that it
+// drops when it ends, by a cancel or by its connection closing. Nothing reads the rows before or after.
 void test_spectrum() {
-    run(18708, [](coro::WsStream& ws, ApiSenders& senders) -> coro::Coro<void> {
-        CHECK(senders.demand.get().spectrum_viewers == 0);
+    run(18708, [](coro::WsStream& ws, Feeds& feeds) -> coro::Coro<void> {
+        CHECK(feeds.spectrum.all_receivers_dropped());
         co_await send(ws, receiver(1, "WatchSpectrum", api::WatchSpectrumRequest{}));
         co_await send(ws, receiver(2, "WatchSpectrum", api::WatchSpectrumRequest{}));
-        CHECK(co_await viewers_reach(senders, 2));
-
-        auto row = std::make_shared<api::SpectrumRow>();
-        row->set_freq_hz(1.09e9);
-        (void)senders.spectrum.send(std::move(row));
-        unsigned ids = 0;  // a bit for each call that sent the row
-        for (int i = 0; i < 2; i++) {
+        // Numbered rows until one reaches both calls; each call's earlier ones come before it.
+        double both = 0;
+        for (int i = 1; i <= 50 && both == 0; i++) {
+            auto row = std::make_shared<api::SpectrumRow>();
+            row->set_freq_hz(i);
+            if (feeds.spectrum.send(std::move(row)).value_or(0) == 2) both = i;
+            else co_await coro::sleep_for(20ms);
+        }
+        CHECK(both != 0);
+        unsigned ids = 0;  // a bit for each call that sent the row both had
+        for (int i = 0; i < 100 && ids != 0b110; i++) {
             auto frame = co_await receive(ws);
+            if (!frame) break;
             for (uint32_t id : {1u, 2u}) {
                 auto r = reply_of<api::SpectrumRow>(frame, id);
-                if (r && r->freq_hz() == 1.09e9) ids |= 1u << id;
+                if (r && r->freq_hz() == both) ids |= 1u << id;
             }
         }
         CHECK(ids == 0b110);
 
         co_await send(ws, cancel(1));
         CHECK(is_error(co_await receive(ws), 1, Error::CANCELLED));
-        CHECK(co_await viewers_reach(senders, 1));
+        CHECK(!feeds.spectrum.all_receivers_dropped());
         ws = co_await connect(18708);  // closes the first connection, and its call
-        CHECK(co_await viewers_reach(senders, 0));
+        CHECK(co_await read_within(feeds.spectrum, false));
     });
 }
 
-// The server checks a capture's request, hands it to the pipeline, and relays the pipeline's reports until the
-// last, or its error. A cancel closes the reports' channel.
+// The capture call `id`'s last report, after any progress reports before it, and then its end.
+coro::Coro<std::optional<api::RecordCaptureProgress>> last_report(coro::WsStream& ws, uint32_t id) {
+    for (int i = 0; i < 20; i++) {
+        auto report = reply_of<api::RecordCaptureProgress>(co_await receive(ws), id);
+        if (!report) co_return std::nullopt;
+        if (!report->has_capture()) continue;
+        if (!is_end(co_await receive(ws), id)) co_return std::nullopt;
+        co_return report;
+    }
+    co_return std::nullopt;
+}
+
+// Whether the capture call `id` reports `samples` written within its next few progress reports, sent twice a
+// second.
+coro::Coro<bool> written(coro::WsStream& ws, uint32_t id, uint64_t samples) {
+    for (int i = 0; i < 6; i++) {
+        auto report = reply_of<api::RecordCaptureProgress>(co_await receive(ws), id);
+        if (!report || report->has_capture()) co_return false;
+        if (report->samples() == samples) co_return true;
+    }
+    co_return false;
+}
+
+// A capture directory of the test's own, empty.
+std::filesystem::path capture_dir(const char* name) {
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / name;
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directory(dir);
+    return dir;
+}
+
+// The server checks a capture's request, and the call then records the point's blocks from those sent after it
+// starts. Nothing reads a point before a capture of it, or after.
 void test_capture() {
-    run(18709, [](coro::WsStream& ws, ApiSenders& senders) -> coro::Coro<void> {
-        co_await send(ws, record_capture(1, api::CAPTURE_POINT_UNSPECIFIED, 1, "a"));
-        CHECK(is_error(co_await receive(ws), 1, Error::INVALID_ARGUMENT));
-        co_await send(ws, record_capture(2, api::INPUT, 0, "a"));
-        CHECK(is_error(co_await receive(ws), 2, Error::INVALID_ARGUMENT));
-        co_await send(ws, record_capture(3, api::INPUT, CaptureCall::kMaxDurationS + 1, "a"));
-        CHECK(is_error(co_await receive(ws), 3, Error::INVALID_ARGUMENT));
-        uint32_t id = 4;
-        for (const char* name : {"", ".a", "x/a"}) {
-            co_await send(ws, record_capture(id, api::INPUT, 1, name));
-            CHECK(is_error(co_await receive(ws), id, Error::INVALID_ARGUMENT));
-            id++;
-        }
+    const std::filesystem::path dir = capture_dir("api_server_test_capture");
+    run(
+        18709,
+        [dir](coro::WsStream& ws, Feeds& feeds) -> coro::Coro<void> {
+            co_await send(ws, record_capture(1, api::CAPTURE_POINT_UNSPECIFIED, 1, "a"));
+            CHECK(is_error(co_await receive(ws), 1, Error::INVALID_ARGUMENT));
+            co_await send(ws, record_capture(2, api::INPUT, 0, "a"));
+            CHECK(is_error(co_await receive(ws), 2, Error::INVALID_ARGUMENT));
+            co_await send(ws, record_capture(3, api::INPUT, CapturePoint::kMaxDurationS + 1, "a"));
+            CHECK(is_error(co_await receive(ws), 3, Error::INVALID_ARGUMENT));
+            uint32_t id = 4;
+            for (const char* name : {"", ".a", "x/a"}) {
+                co_await send(ws, record_capture(id, api::INPUT, 1, name));
+                CHECK(is_error(co_await receive(ws), id, Error::INVALID_ARGUMENT));
+                id++;
+            }
+            CHECK(feeds.input.all_receivers_dropped() && feeds.envelope.all_receivers_dropped());
 
-        co_await send(ws, record_capture(10, api::ENVELOPE, 1, "a"));
-        auto c = co_await senders.captures.recv();
-        CHECK(c && c->request.point() == api::ENVELOPE && c->request.name() == "a" && c->dir == kCaptureDir);
-        if (!c) co_return;
-        api::RecordCaptureProgress progress;
-        progress.set_samples(10);
-        CHECK(co_await c->progress.send(progress));
-        progress.set_samples(20);
-        progress.mutable_capture()->set_name("a");
-        CHECK(co_await c->progress.send(progress));
-        auto reply = reply_of<api::RecordCaptureProgress>(co_await receive(ws), 10);
-        CHECK(reply && reply->samples() == 10 && !reply->has_capture());
-        reply = reply_of<api::RecordCaptureProgress>(co_await receive(ws), 10);
-        CHECK(reply && reply->samples() == 20 && reply->capture().name() == "a");
-        CHECK(is_end(co_await receive(ws), 10));
+            // 10 samples of the input, in three blocks, the last running past the end.
+            co_await send(ws, record_capture(10, api::INPUT, 10 / kInputRateHz, "a"));
+            CHECK(co_await read_within(feeds.input, true));
+            for (uint64_t start : {0, 4, 8}) (void)feeds.input.send(block(4, start));
+            auto last = co_await last_report(ws, 10);
+            CHECK(last && last->samples() == 10 && last->missing() == 0 && last->start_index() == 0);
+            CHECK(last && last->capture().name() == "a" && last->capture().data_bytes() == 80);
+            CHECK(last && last->capture().meta().datatype() == "cf32_le");
+            CHECK(last && last->capture().meta().rate_hz() == kInputRateHz);
+            CHECK(last && last->capture().meta().freq_hz() == kFreqHz);
+            CHECK(std::filesystem::file_size(dir / "a.sigmf-data") == 80);
+            CHECK(std::filesystem::exists(dir / "a.sigmf-meta"));
+            CHECK(co_await read_within(feeds.input, false));
 
-        // The pipeline's error is the call's.
-        co_await send(ws, record_capture(11, api::INPUT, 1, "b"));
-        c = co_await senders.captures.recv();
-        CHECK(c);
-        if (!c) co_return;
-        CHECK(co_await c->progress.send(std::unexpected(wsrpc::CallError(Error::FAILED_PRECONDITION, "b exists"))));
-        CHECK(is_error(co_await receive(ws), 11, Error::FAILED_PRECONDITION));
+            // A capture never overwrites one.
+            co_await send(ws, record_capture(11, api::INPUT, 1, "a"));
+            CHECK(is_error(co_await receive(ws), 11, Error::INVALID_ARGUMENT));
 
-        co_await send(ws, record_capture(12, api::INPUT, 1, "c"));
-        c = co_await senders.captures.recv();
-        CHECK(c);
-        if (!c) co_return;
-        co_await send(ws, cancel(12));
-        CHECK(is_error(co_await receive(ws), 12, Error::CANCELLED));
-        bool closed = false;
-        for (int i = 0; i < 50 && !closed; i++) {
-            closed = c->progress.is_closed();
-            if (!closed) co_await coro::sleep_for(20ms);
-        }
-        CHECK(closed);
-    });
+            // The envelope, as rf32_le, with no center frequency.
+            co_await send(ws, record_capture(12, api::ENVELOPE, 10 / kEnvelopeRateHz, "b"));
+            CHECK(co_await read_within(feeds.envelope, true));
+            (void)feeds.envelope.send(envelope_run(6, 100));
+            (void)feeds.envelope.send(envelope_run(6, 106));
+            last = co_await last_report(ws, 12);
+            CHECK(last && last->samples() == 10 && last->missing() == 0 && last->start_index() == 100);
+            CHECK(last && last->capture().data_bytes() == 40);
+            CHECK(last && last->capture().meta().datatype() == "rf32_le");
+            CHECK(last && last->capture().meta().rate_hz() == kEnvelopeRateHz);
+            CHECK(last && !last->capture().meta().has_freq_hz());
+            CHECK(co_await read_within(feeds.envelope, false));
+
+            // Samples that don't arrive are missing, and the capture covers its stream time all the same.
+            co_await send(ws, record_capture(13, api::INPUT, 10 / kInputRateHz, "c"));
+            CHECK(co_await read_within(feeds.input, true));
+            (void)feeds.input.send(block(4, 0));
+            (void)feeds.input.send(block(4, 6));
+            last = co_await last_report(ws, 13);
+            CHECK(last && last->samples() == 8 && last->missing() == 2);
+
+            // Two of one point at once, each through its receiver. Blocks repeat until both have one; a capture
+            // skips the samples it already has.
+            co_await send(ws, record_capture(14, api::INPUT, 10 / kInputRateHz, "d"));
+            co_await send(ws, record_capture(15, api::INPUT, 10 / kInputRateHz, "e"));
+            bool both = false;
+            for (int i = 0; i < 50 && !both; i++) {
+                both = feeds.input.send(block(4, 0)).value_or(0) == 2;
+                if (!both) co_await coro::sleep_for(20ms);
+            }
+            CHECK(both);
+            for (uint64_t start : {4, 8}) (void)feeds.input.send(block(4, start));
+            int done = 0;
+            for (int i = 0; i < 20 && done < 4; i++) {
+                auto frame = co_await receive(ws);
+                if (!frame) break;
+                for (uint32_t call : {14u, 15u}) {
+                    if (is_end(frame, call)) done++;
+                    auto r = reply_of<api::RecordCaptureProgress>(frame, call);
+                    if (r && r->has_capture()) {
+                        CHECK(r->samples() == 10 && r->missing() == 0);
+                        done++;
+                    }
+                }
+            }
+            CHECK(done == 4);
+
+            // A writer that falls behind the ring loses blocks, which are missing, rather than hold the input
+            // back. After its first, the other 39 go at once, so it lags unless it keeps up.
+            co_await send(ws, record_capture(16, api::INPUT, 160 / kInputRateHz, "f"));
+            CHECK(co_await read_within(feeds.input, true));
+            (void)feeds.input.send(block(4, 0));
+            CHECK(co_await written(ws, 16, 4));
+            for (uint64_t start = 4; start < 160; start += 4) (void)feeds.input.send(block(4, start));
+            last = co_await last_report(ws, 16);
+            CHECK(last && last->samples() + last->missing() == 160);
+
+            // A cancel ends the capture, and its writer, keeping what it wrote.
+            co_await send(ws, record_capture(17, api::INPUT, 1, "g"));
+            CHECK(co_await read_within(feeds.input, true));
+            (void)feeds.input.send(block(4, 0));
+            CHECK(co_await written(ws, 17, 4));
+            co_await send(ws, cancel(17));
+            CHECK(is_error(co_await receive(ws), 17, Error::CANCELLED));
+            CHECK(co_await read_within(feeds.input, false));
+            CHECK(std::filesystem::file_size(dir / "g.sigmf-data") == 32);
+            CHECK(std::filesystem::exists(dir / "g.sigmf-meta"));
+        },
+        {.capture_dir = dir.string(), .history = std::nullopt});
+    std::filesystem::remove_all(dir);
+}
+
+// A capture running when the input ends finishes with what it has.
+void test_capture_input_ends() {
+    const std::filesystem::path dir = capture_dir("api_server_test_capture_ends");
+    run(
+        18714,
+        [](coro::WsStream& ws, Feeds& feeds) -> coro::Coro<void> {
+            co_await send(ws, record_capture(1, api::INPUT, 1, "a"));
+            CHECK(co_await read_within(feeds.input, true));
+            {
+                coro::BroadcastSender<IqBlock> input = std::move(feeds.input);
+                (void)input.send(block(4, 0));
+            }
+            auto last = co_await last_report(ws, 1);
+            CHECK(last && last->samples() == 4 && last->capture().data_bytes() == 32);
+        },
+        {.capture_dir = dir.string(), .history = std::nullopt});
+    std::filesystem::remove_all(dir);
 }
 
 // With captures off, the capture calls are refused, as is a call to a service that isn't served.
 void test_captures_off() {
     run(
         18710,
-        [](coro::WsStream& ws, ApiSenders&) -> coro::Coro<void> {
+        [](coro::WsStream& ws, Feeds&) -> coro::Coro<void> {
             co_await send(ws, record_capture(1, api::INPUT, 1, "a"));
             CHECK(is_error(co_await receive(ws), 1, Error::FAILED_PRECONDITION));
             co_await send(ws, history(2, "GetSnapshot", api::GetSnapshotRequest{}));
@@ -477,7 +645,7 @@ void test_captures_off() {
 void test_heatmap_area() {
     run(
         18711,
-        [](coro::WsStream& ws, ApiSenders&) -> coro::Coro<void> {
+        [](coro::WsStream& ws, Feeds&) -> coro::Coro<void> {
             api::GetHeatmapRequest area;
             area.set_west(10);
             area.set_east(10);
@@ -500,7 +668,7 @@ void test_history() {
     rows[0].set_ground_speed_kt(300);
     run(
         18712,
-        [](coro::WsStream& ws, ApiSenders&) -> coro::Coro<void> {
+        [](coro::WsStream& ws, Feeds&) -> coro::Coro<void> {
             auto snap = co_await unary<api::Snapshot>(ws, history(1, "GetSnapshot", api::GetSnapshotRequest{}));
             CHECK(snap);
             if (snap) {
@@ -555,14 +723,14 @@ void test_history() {
 
 // A client that disconnects with calls in progress doesn't disturb the next.
 void test_disconnect() {
-    run(18713, [](coro::WsStream& ws, ApiSenders& senders) -> coro::Coro<void> {
+    run(18713, [](coro::WsStream& ws, Feeds& feeds) -> coro::Coro<void> {
         co_await send(ws, receiver(1, "WatchAircraft", api::WatchAircraftRequest{}));
         co_await send(ws, receiver(2, "WatchFrames", api::WatchFramesRequest{}));
         CHECK(co_await receive(ws));
         ws = co_await connect(18713);  // closes the first connection
         for (int i = 0; i < 3; i++) {
-            (void)senders.aircraft.send(LiveAircraft{{0xabc, aircraft(0xabc, 2000 + i)}});
-            (void)senders.frames.send(std::make_shared<const std::vector<api::Frame>>(1));
+            (void)feeds.aircraft.send(LiveAircraft{{0xabc, aircraft(0xabc, 2000 + i)}});
+            (void)feeds.frames.send(std::make_shared<const std::vector<api::Frame>>(1));
             co_await coro::sleep_for(kDefaultInterval);
         }
         co_await send(ws, hello({api::Receiver::kName}));
@@ -619,6 +787,7 @@ int main() {
     test_input_status();
     test_spectrum();
     test_capture();
+    test_capture_input_ends();
     test_captures_off();
     test_heatmap_area();
     test_history();

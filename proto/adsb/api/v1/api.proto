@@ -27,7 +27,8 @@ service Receiver {
   rpc UpdateSettings(UpdateSettingsRequest) returns (Settings);
 
   // Records one point of the pipeline to a SigMF recording in Settings.capture_dir, from the next block on,
-  // reporting its progress. One capture per point at a time; cancelling stops it, keeping what's written.
+  // reporting its progress. Any number run at once, of either point; cancelling one stops it, keeping what's
+  // written.
   rpc RecordCapture(RecordCaptureRequest) returns (stream RecordCaptureProgress);
   // The recordings in the capture directory: every .sigmf-data there, whoever wrote it.
   rpc ListCaptures(ListCapturesRequest) returns (ListCapturesResponse);

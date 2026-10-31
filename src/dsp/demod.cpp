@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -120,7 +121,7 @@ public:
     // From the last exec(): the resampled envelope, outputs [0, n_out).
     std::span<const float> last_envelope() const { return {y_.data(), m_last_n_out}; }
     // From the last exec(): the envelope outputs the block owns, [0, scan_n), and the envelope stream index of
-    // the first (see DemodBlock::envelope_index).
+    // the first (see EnvelopeRun::index).
     std::span<const float> last_owned_envelope() const { return {y_.data(), m_last_scan_n}; }
     uint64_t last_envelope_index() const { return m_last_envelope_index; }
     // From the last exec(): the block's RMS envelope level.
@@ -218,7 +219,7 @@ AdsbDemodParams AdsbDemod::params() const {
     return p;
 }
 
-// ADSB_TIMING, set to anything but 0 (as for run_demod_loop's report): read once, at the first block, and logged then.
+// ADSB_TIMING, set to anything but 0 (as for demod_pipeline()'s report): read once, at the first block, and logged then.
 bool stage_timing_enabled() {
     static const bool enabled = [] {
         const char* env = std::getenv("ADSB_TIMING");
@@ -430,20 +431,10 @@ coro::Coro<std::vector<AdsbFrame>> AdsbDemod::exec(const IqBlock& block) {
     co_return finish_block(block, *plan, sumsq);
 }
 
-// One block's DemodBlock, with a snapshot of it when `snapshot` is set and it has frames, and its envelope when
-// `envelope` is set.
-coro::Coro<DemodBlock> demod_block(AdsbDemod& demod, IqBlock block, bool snapshot, bool envelope) {
-    DemodBlock out{.n = block.n(),
-                   .frames = co_await demod.exec(block),
-                   .candidates = {},
-                   .snapshot = std::nullopt,
-                   .envelope = {}};
+// One block's DemodBlock, with a snapshot of it when `snapshot` is set and it has frames.
+coro::Coro<DemodBlock> demod_block(AdsbDemod& demod, IqBlock block, bool snapshot) {
+    DemodBlock out{.n = block.n(), .frames = co_await demod.exec(block), .candidates = {}, .snapshot = std::nullopt};
     out.candidates.assign(demod.last_candidates().begin(), demod.last_candidates().end());
-    if (envelope) {
-        const std::span<const float> owned = demod.last_owned_envelope();
-        out.envelope.assign(owned.begin(), owned.end());
-        out.envelope_index = demod.last_envelope_index();
-    }
     if (snapshot && !out.frames.empty()) {
         const std::span<const float> envelope = demod.last_envelope();
         out.snapshot = DemodSnapshot{std::move(block), {envelope.begin(), envelope.end()}, demod.last_level()};
@@ -466,10 +457,17 @@ AdsbDemodParams demod_params(const FilterBank& filter, double sample_rate_hz, fl
 
 coro::CoroStream<DemodBlock> demodulate(coro::CoroStream<IqBlock> in, FilterBank filter, double sample_rate_hz,
                                         float preamble_score_min, float slice_magnitude_min, bool snapshots,
-                                        std::optional<coro::WatchReceiver<bool>> envelopes) {
+                                        std::optional<coro::BroadcastSender<EnvelopeShare>> envelopes) {
     AdsbDemod demod(filter, sample_rate_hz, preamble_score_min, slice_magnitude_min);
     while (auto block = co_await coro::next(in)) {
-        const bool envelope = envelopes && envelopes->get();
-        co_yield co_await demod_block(demod, std::move(*block), snapshots, envelope);
+        // Races with a capture starting or ending, harmlessly: one activated after the check starts at the next
+        // block's run, and a run sent after the last reader has gone is dropped.
+        const bool envelope = envelopes && !envelopes->all_receivers_dropped();
+        DemodBlock out = co_await demod_block(demod, std::move(*block), snapshots);
+        if (const std::span<const float> owned = demod.last_owned_envelope(); envelope && !owned.empty()) {
+            (void)envelopes->send(std::make_shared<const EnvelopeRun>(
+                EnvelopeRun{demod.last_envelope_index(), {owned.begin(), owned.end()}}));
+        }
+        co_yield std::move(out);
     }
 }

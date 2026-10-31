@@ -284,7 +284,7 @@ How to read the diagram:
   thread", run on coro's blocking pool (`spawn_blocking`). The white boxes
   inside the demodulate task are not tasks: each is a stage of the stream that task
   pulls, run in the task's polls, and the arrow between stages is a direct
-  call, with no queue. The stages listed in the run_demod_loop task's box run in its
+  call, with no queue. The stages listed in the demod_pipeline() task's box run in its
   polls in the same way. The two white boxes inside the ws_client task are not tasks
   either: they are its reader and its writer, run together with
   `coro::join()`, and whichever ends first, on a disconnect or a send that
@@ -293,9 +293,9 @@ How to read the diagram:
   worker, and a ws_client task and a UI per client. The grey cylinders are files.
 - **Arrows:** each arrow is labelled with its channel and its depth, in
   blocks or requests where no unit is given. A dashed arrow or box is there
-  only with the option it names. The tee, the spectrum task and the input status are
-  for WebSocket clients, so they are there only with `--ws-port`; without it,
-  `stitch()` feeds `demodulate()` directly.
+  only with the option it names. An arrow labelled "while" is a channel its
+  readers activate, sent on only while one does; only WebSocket calls read
+  them, so with no `--ws-port` nothing is ever sent on them.
 - **`serve`:** the subcommand has no source and no demodulation. It runs only
   the history actor and the WebSocket server.
 
@@ -306,41 +306,47 @@ The pieces fit together like this:
    through `stitch()` ([iq_block.h](src/dsp/iq_block.h)) first. It fills
    each buffer's padding from its neighbors and yields it as an `IqBlock`,
    read-only and reference counted, so a stage that needs a block another
-   stage also reads takes a share of it rather than a copy. With
-   `--ws-port`, the next stage is `tee()` ([pipeline.cpp](src/apps/adsb/pipeline.cpp)). It passes every block
-   on unchanged, and hands a share of each to every side branch whose queue
-   isn't full. The one branch is the spectrum task, whose queue holds 2 blocks.
-   While a client has a spectrum call open, which it reads from the server's
-   settings watch, it runs 4096-point FFTs over every sample of the blocks it
-   gets, and keeps each bin's peak, so each burst
-   shows, however short. Every 50 ms it broadcasts the peaks, on its own clone
-   of the frames' sender, to the WebSocket clients for the waterfall. While it
-   is busy, blocks go to the demodulator alone, so the spectrum never holds
-   the demodulator back. With `--ws-port`, a second branch, 8 blocks
-   deep, feeds the input capture task, which writes the blocks to a file while
-   a `capture` call is in progress and drops them otherwise. Then
-   `demodulate()` ([demod.h](src/dsp/demod.h)) demodulates each block, splitting its resampling and preamble search across the runtime's
-   workers. The demodulate task can run ahead of the demod loop, through a
-   buffered stream (4 blocks deep with `--debug-h5`, since each block then
-   holds its IQ buffer).
+   stage also reads takes a share of it rather than a copy. The next stage is
+   `tee()` ([pipeline.cpp](src/apps/adsb/pipeline.cpp)). It passes every block
+   on unchanged, and offers a share of each to its two side branches, neither
+   of which it waits for:
+    - the spectrum task, whose queue holds 2 blocks. While a client watches
+      the spectrum, it runs 4096-point FFTs over every sample of the blocks
+      it gets, and keeps each bin's peak, so each burst shows, however short.
+      Every 50 ms it broadcasts the peaks to the WebSocket clients for the
+      waterfall. While it is busy, blocks go to the demodulator alone, so the
+      spectrum never holds the demodulator back. With no client watching, its
+      queue is inactive and takes nothing;
+    - the input broadcast, 8 blocks deep, which each capture call of the
+      input reads into a SigMF file. With no capture reading it, it stores
+      nothing.
+
+   Then `demodulate()` ([demod.h](src/dsp/demod.h)) demodulates each block,
+   splitting its resampling and preamble search across the runtime's workers.
+   While a capture of the envelope is in progress, it also sends each block's
+   envelope on a broadcast, 8 blocks deep, to each capture reading it. The
+   demodulate task can run ahead of the demod loop, through a buffered
+   stream (4 blocks deep with `--debug-h5`, since each block then holds its
+   IQ buffer).
 3. The demod loop validates and decodes each block's frames in order, and
    keeps each aircraft's state in its `AircraftTracker`. It then hands the
    block's results to the outputs:
-    - with `--ws-port`, one broadcast send of the block's frames to the
-      WebSocket clients, and one update of the live aircraft in a watch,
-      which keeps each aircraft heard in the last 10 minutes as last
-      published. Each subscription builds its own updates from these;
+    - while a client watches the frames, one broadcast send of the block's
+      frames to the WebSocket clients;
+    - one update of the live aircraft in a watch, which keeps each aircraft
+      heard in the last 10 minutes as last published. Each subscription
+      builds its own updates from these;
     - with `--history-db`, one insert of the block's aircraft updates to the
       history actor, which owns the database and also answers the clients'
       history calls;
-    - with `--ws-port`, while an envelope capture is in progress, the
-      block's envelope to the envelope capture task;
     - with `--debug-h5`, the frames and their IQ, to a recorder task, so
       writing the file doesn't hold up the loop.
 
 [main.cpp](src/apps/adsb/main.cpp) only parses the command line, designs
 the filter and picks the source. Every source then feeds the same
-`run_demod_loop` call in [pipeline.h](src/apps/adsb/pipeline.h).
+`demod_pipeline()` ([pipeline.h](src/apps/adsb/pipeline.h)). The pipeline makes
+its output channels, and with `--ws-port` hands the WebSocket server an
+inactive end of each, its `PipelineOutputs`; a call activates one for itself.
 
 ### Options
 

@@ -4,7 +4,7 @@
 //
 // Colours: blue, a task; amber, a task on a blocking thread; white in a grey frame, a stage run in its frame's
 // task, not a task of its own; grey cylinders, files. Dashed, there only with the option an arrow names. A thick
-// border, more than one at once.
+// border, more than one at once. A label starting "while": a channel its reader activates, sent on only then.
 digraph pipeline {
     graph [
         rankdir=TB, newrank=true, compound=true, bgcolor="white", pad=0.3, nodesep=0.35, ranksep=0.5,
@@ -35,27 +35,24 @@ digraph pipeline {
         label="demodulate task"; style="rounded,filled"; fillcolor="#f3f4f6"; color="#6b7280";
         node [fillcolor="white", color="#6b7280"];
         STITCH [label=<stitch()<br/>BlockStitcher: padding,<br/>IqBuffer to IqBlock>];
-        TEE [label=<tee()<br/>passes every block on, shares<br/>one with each branch that isn't full>,
-             style="rounded,filled,dashed"];
-        DEMOD [label=<demodulate()<br/>AdsbDemod: resample,<br/>preamble, slice>];
+        TEE [label=<tee()<br/>passes every block on, and<br/>broadcasts it while read>];
+        DEMOD [label=<demodulate()<br/>AdsbDemod: resample, preamble,<br/>slice; the envelope while read>];
     }
     PAR [label=<coro::parallel() parts<br/>one per worker>, penwidth=3];
 
-    SINK [label=<<b>run_demod_loop task</b><br/>handle_frame(): validate,<br/>decode, AircraftTracker>];
+    SINK [label=<<b>demod_pipeline() task</b><br/>handle_frame(): validate,<br/>decode, AircraftTracker>];
 
     node [style="rounded,filled,dashed"];
     REC [label=<<b>debug_h5 task</b><br/>FrameRecorder>];
     HIST [label=<<b>history actor</b><br/>blocking thread>, fillcolor="#fef3c7", color="#d97706"];
-    SPEC [label=<<b>spectrum task</b><br/>peak-held FFTs<br/>while a client watches>];
-    CAPI [label=<<b>capture_input task</b><br/>SigMF writer>];
-    CAPR [label=<<b>capture_calls task</b><br/>routes by point>];
-    CAPE [label=<<b>capture_envelope task</b><br/>SigMF writer>];
+    SPEC [label=<<b>spectrum task</b><br/>peak-held FFTs,<br/>while its rows are read>];
+    CAPW [label=<<b>capture writer task</b><br/>a RecordCapture call's child,<br/>SigMF writer>, penwidth=3];
     node [style="rounded,filled"];
 
     subgraph cluster_ws {
         label="WebSocket server"; style="rounded,filled"; fillcolor="#f9fafb"; color="#9ca3af";
-        ACC [label=<<b>ws_accept task</b>>];
-        CALL [label=<<b>ws_call task</b><br/>one per call, at most 8 per client>, penwidth=3];
+        //ACC [label=<<b>ws_accept task</b>>];
+        CALL [label=<<b>ws_call task</b><br/>one per call, at most 16 per client>, penwidth=3];
         subgraph cluster_client {
             label="ws_client task: one per client"; style="rounded,filled"; fillcolor="#f3f4f6"; color="#6b7280"; penwidth=3;
             node [fillcolor="white", color="#6b7280", penwidth=1.2];
@@ -72,9 +69,9 @@ digraph pipeline {
 
     // Rows, top to bottom.
     { rank=same; TEE; }
-    { rank=same; PAR -> SINK [style=invis]; SPEC; CAPR; }
-    { rank=same; CALL; ACC; }
-    { rank=same; READ; WRITE; REC -> HIST [style=invis]; CAPI; CAPE; }
+    { rank=same; PAR -> SINK [style=invis]; SPEC; }
+    //{ rank=same; CALL -> ACC [style=invis]; }
+    { rank=same; READ; WRITE; REC -> HIST [style=invis]; CAPW; }
     { rank=same; H5; DB; SIGMF; UI; }
     // The main chain.
     SRC:file:s -> STITCH [label="buffered,\n4 blocks"];
@@ -84,8 +81,6 @@ digraph pipeline {
     SRC:uhd:s -> STITCH [label="mpsc, 4 blocks,\ndrops when full"];
     STITCH -> TEE;
     TEE -> DEMOD;
-    TEE -> SPEC [label="mpsc, 2 blocks,\nskips when full", style=dashed];
-    TEE -> CAPI [label="--ws-port: mpsc, 8 blocks,\nskips when full", style=dashed];
     DEMOD -> PAR [label="fork / join", dir=both];
     DEMOD -> SINK [label="buffered, 64 blocks"];
 
@@ -93,30 +88,30 @@ digraph pipeline {
     SINK -> REC [label="--debug-h5:\nmpsc, 4", style=dashed];
     SINK -> HIST [label="--history-db:\nmpsc, 16", style=dashed];
     SINK -> CALL [label="frames: broadcast, 64\naircraft: watch"];
-    SINK -> CAPE [label="envelope while captured:\nmpsc, 8, skips when full", style=dashed];
     REC -> H5;
     HIST -> DB [dir=both];
 
-    // Capture.
-    CAPR -> CAPI [label="mpsc, 2", style=dashed];
-    CAPR -> CAPE [label="mpsc, 2", style=dashed];
-    CAPI -> SIGMF;
-    CAPE -> SIGMF;
+    // The points the server reads, each through a receiver a call activates (PipelineOutputs).
+    TEE -> SPEC [style=dashed, label="--ws-port, while viewed:\nmpsc, 2 blocks, skips when full"];
+    SPEC -> CALL [style=dashed, label="spectrum rows:\nbroadcast, 64"];
+
+    // Capture: the call activates the point's receiver, and its writer task reads it.
+    TEE -> CAPW [style=dashed, label="while captured:\ninput: broadcast, 8"];
+    DEMOD -> CAPW [style=dashed, label="while captured:\nenvelope: broadcast, 8"];
+    CALL -> CAPW [label="child task;\nprogress: watch", style=dashed, dir=back];
+    CAPW -> SIGMF;
 
     // Into and out of the WebSocket server.
-    SPEC -> CALL [label="spectrum:\nbroadcast, 64", style=dashed];
     //SRC:vita49:s -> CALL [label="input status: watch", style=dashed, constraint=false];
-    CALL -> SPEC [label="demand: watch", style=dashed, constraint=false];
     CALL -> HIST [label="queries,\noneshot replies", style=dashed, constraint=false];
-    CALL -> CAPR [label="capture calls: mpsc, 4,\nprogress: mpsc, 2 each", style=dashed, constraint=false];
 
     // Inside it.
-    ACC -> READ [lhead=cluster_client];
+    //ACC -> READ [lhead=cluster_client];
     CALL -> READ [label="outcome: JoinSet"];
     READ -> CALL [label="request, cancel; a client\nstream's later requests:\nmpsc, 16", constraint=false];
     CALL -> WRITE [label="replies: mpsc, 16"];
     READ -> WRITE [label="ends, refusals:\nthe same mpsc"];
     { rank=same; READ; WRITE; }
-    READ -> UI [label="ClientMessage", dir=back];
-    WRITE -> UI [label="ServerMessage"];
+    READ -> UI [label="ClientFrame", dir=back];
+    WRITE -> UI [label="ServerFrame"];
 }

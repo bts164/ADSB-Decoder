@@ -3,11 +3,12 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <vector>
 
 #include <coro/coro_stream.h>
-#include <coro/sync/watch.h>
+#include <coro/sync/broadcast.h>
 
 #include "dsp/filter_bank.h"
 #include "dsp/iq_block.h"
@@ -81,14 +82,22 @@ struct DemodBlock {
      *  sample_index is one of these). For scoring the preamble scan on its own (apps/adsb_sim_eval). */
     std::vector<uint64_t> candidates;
     std::optional<DemodSnapshot> snapshot;  /**< with `snapshots`, for a block with frames */
-    /** While `envelopes` holds true: the resampled envelope outputs the block owns (those centered on its own samples).
-     *  While the blocks are contiguous each block's follow on from the last's, as one stream at
-     *  demod_output_rate_hz(), but for an output position jumping by under one output at each boundary. */
-    std::vector<float> envelope;
-    /** With an envelope: the envelope stream index of envelope[0]. After a gap in the blocks it restarts at the
-     *  block's start converted to the output rate. */
-    uint64_t envelope_index = 0;
 };
+
+/**
+ * The resampled envelope outputs one block owns: those centered on its own samples. While the blocks are
+ * contiguous each block's follow on from the last's, as one stream at demod_output_rate_hz(), but for an output
+ * position jumping by under one output at each boundary.
+ */
+struct EnvelopeRun {
+    /** The envelope stream index of samples[0]. After a gap in the blocks it restarts at the block's start
+     *  converted to the output rate. */
+    uint64_t index = 0;
+    std::vector<float> samples;
+};
+
+/** An EnvelopeRun as a broadcast carries it: shared, so every reader takes a reference rather than a copy. */
+using EnvelopeShare = std::shared_ptr<const EnvelopeRun>;
 
 /**
  * Demodulates Mode S frames from a stream of IQ blocks, one output per block, in order.
@@ -123,11 +132,11 @@ struct DemodBlock {
  * @param preamble_score_min preamble correlation threshold, in units of the block RMS
  * @param slice_magnitude_min bit-slice magnitude threshold, in units of the block RMS
  * @param snapshots whether to keep a DemodSnapshot of each block with frames
- * @param envelopes while it holds true, each block's own envelope outputs are copied into its DemodBlock; read
- *     once a block. Only while asked for, as at a low input rate they outnumber the block's samples.
+ * @param envelopes where each block's EnvelopeRun is sent while the broadcast has active receivers, checked once
+ *     a block. Only then, as at a low input rate the envelope outputs outnumber the block's samples.
  * @throws std::length_error (from the stream) if a block is too large
  * @throws std::invalid_argument (from the stream) if a block's padding is smaller than demod_padding()
  */
 coro::CoroStream<DemodBlock> demodulate(coro::CoroStream<IqBlock> in, FilterBank filter, double sample_rate_hz,
                                         float preamble_score_min, float slice_magnitude_min, bool snapshots = false,
-                                        std::optional<coro::WatchReceiver<bool>> envelopes = std::nullopt);
+                                        std::optional<coro::BroadcastSender<EnvelopeShare>> envelopes = std::nullopt);

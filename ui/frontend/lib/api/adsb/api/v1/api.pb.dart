@@ -2879,7 +2879,8 @@ class ReceiverApi {
           ctx, 'Receiver', 'UpdateSettings', request, Settings());
 
   /// Records one point of the pipeline to a SigMF recording in Settings.capture_dir, from the next block on,
-  /// reporting its progress. One capture per point at a time; cancelling stops it, keeping what's written.
+  /// reporting its progress. Any number run at once, of either point; cancelling one stops it, keeping what's
+  /// written.
   $async.Future<RecordCaptureProgress> recordCapture(
           $pb.ClientContext? ctx, RecordCaptureRequest request) =>
       _client.invoke<RecordCaptureProgress>(

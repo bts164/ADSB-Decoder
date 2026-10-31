@@ -9,7 +9,7 @@
 // `sidekiq`: sidekiq_stream.h, in a build with ADSB_WITH_SIDEKIQ, and `uhd`:
 // uhd_stream.h, in a build with ADSB_WITH_UHD), each
 // with its options beside it -- every source hands its stream to pipeline.h's
-// run_demod_loop the same way.
+// demod_pipeline() the same way.
 // The `serve` subcommand has no source: it only serves an existing history
 // database to WebSocket clients until Ctrl+C.
 // See pipeline.h/frame_decode.h/aircraft.h for frame decoding, api_server.h
@@ -287,21 +287,8 @@ coro::Coro<int> async_main(int argc, char** argv) {
             if (!history) co_return 1;
             LOGF(INFO, "recording aircraft history to %s", *history_db_path);
         }
-        std::optional<ApiSenders> ws;
-        if (ws_port) {
-            std::optional<AircraftHistory> ws_history;
-            if (history) ws_history = history->clone();
-            api::Settings settings;
-            if (capture_dir) settings.set_capture_dir(*capture_dir);
-            auto [senders, receivers] = api_channels(std::move(settings));
-            // The source's subcommand, for the UI.
-            std::string source;
-            for (const char* name : {"file", "vita49", "rtlsdr", "sidekiq", "uhd"}) {
-                if (program.is_subcommand_used(name)) source = name;
-            }
-            api_server_spawn(*ws_port, ws_interval, std::move(receivers), std::move(source), std::move(ws_history));
-            ws = std::move(senders);
-        }
+        // Beside the source, which isn't part of the pipeline. Only the vita49 source reports a status.
+        auto [input_status_tx, input_status] = coro::watch_channel(std::optional<api::InputStatus>{});
 
         // The filter is built for the source's rate, and the source pads its blocks for the filter.
         auto make_filter = [&](double rate_hz) {
@@ -317,13 +304,15 @@ coro::Coro<int> async_main(int argc, char** argv) {
         double freq_hz;
         FilterBank filter;
         std::optional<coro::CoroStream<IqBuffer>> stream;
+        std::string source;  // the subcommand, for the UI
         if (program.is_subcommand_used(cmds.vita49)) {
             Vita49StreamParams params = Vita49StreamParams::from_options(program, cmds.vita49);
-            // A clone of its own, as `ws` goes to run_demod_loop; shared, as on_status must be copyable.
-            if (ws)
+            source = "vita49";
+            // Shared, as on_status must be copyable.
+            if (ws_port)
                 params.receiver.on_status =
                     [status = std::make_shared<coro::WatchSender<std::optional<api::InputStatus>>>(
-                         ws->input_status.clone())](const InputStatus& s) { (void)status->send(to_proto(s)); };
+                         std::move(input_status_tx))](const InputStatus& s) { (void)status->send(to_proto(s)); };
             rate_hz = params.receiver.sample_rate_hz;
             freq_hz = params.freq_hz;
             filter = make_filter(rate_hz);
@@ -331,6 +320,7 @@ coro::Coro<int> async_main(int argc, char** argv) {
                                             Vita49StreamParams::kChunkSamples));
         } else if (program.is_subcommand_used(cmds.rtlsdr)) {
             RtlSdrStreamParams params = RtlSdrStreamParams::from_options(program, cmds.rtlsdr);
+            source = "rtlsdr";
             rate_hz = params.tuning.rate_hz;
             freq_hz = params.tuning.freq_hz;
             filter = make_filter(rate_hz);
@@ -338,6 +328,7 @@ coro::Coro<int> async_main(int argc, char** argv) {
 #ifdef ADSB_WITH_SIDEKIQ
         } else if (program.is_subcommand_used(cmds.sidekiq)) {
             SidekiqStreamParams params = SidekiqStreamParams::from_options(program, cmds.sidekiq);
+            source = "sidekiq";
             rate_hz = params.rate_hz;
             freq_hz = params.freq_hz;
             filter = make_filter(rate_hz);
@@ -347,6 +338,7 @@ coro::Coro<int> async_main(int argc, char** argv) {
 #ifdef ADSB_WITH_UHD
         } else if (program.is_subcommand_used(cmds.uhd)) {
             UhdStreamParams params = UhdStreamParams::from_options(program, cmds.uhd);
+            source = "uhd";
             rate_hz = params.rate_hz;
             freq_hz = params.freq_hz;
             filter = make_filter(rate_hz);
@@ -355,6 +347,7 @@ coro::Coro<int> async_main(int argc, char** argv) {
 #endif
         } else {
             FileStreamParams params = FileStreamParams::from_options(program, cmds.file);
+            source = "file";
             rate_hz = params.rate_hz;
             freq_hz = params.freq_hz;
             filter = make_filter(rate_hz);
@@ -362,9 +355,23 @@ coro::Coro<int> async_main(int argc, char** argv) {
                                           demod_padding(filter, rate_hz), FileStreamParams::kChunkSamples));
         }
 
+        std::optional<AircraftHistory> ws_history;
+        if (ws_port && history) ws_history = history->clone();
+        DemodPipeline pipeline = demod_pipeline(std::move(filter), rate_hz, freq_hz, std::move(*stream),
+                                                std::move(loop_params), std::move(history));
+        if (ws_port) {
+            api::Settings settings;
+            if (capture_dir) settings.set_capture_dir(*capture_dir);
+            api_server_spawn(*ws_port, ws_interval,
+                             ReceiverFeeds{.outputs = std::move(pipeline.outputs),
+                                           .input_status = std::move(input_status),
+                                           .settings = std::move(settings)},
+                             std::move(source), std::move(ws_history));
+        }
+
         // The demod task owns the source stream, and runs until the stream ends or Ctrl+C: this is the one place
         // the signal is handled, as no source watches for it itself. On Ctrl+C, select() drops the demod task's
-        // handle, which cancels run_demod_loop and drains it before select() returns. That destroys the stream,
+        // handle, which cancels the pipeline and drains it before select() returns. That destroys the stream,
         // and with it the source (its receive task, or its RtlSdr, whose destructor stops the read). A hardware source
         // opens its device when the demod first reads from it, so an error opening it ends the stream as one
         // receiving would, and is logged below.
@@ -373,9 +380,7 @@ coro::Coro<int> async_main(int argc, char** argv) {
             LOGF(WARNING, "the runtime has %u worker(s): the demodulator runs serially",
                  static_cast<unsigned>(coro::worker_count()));
         auto done = co_await coro::select(
-            coro::build_task().name("demod").spawn(run_demod_loop(std::move(filter), rate_hz, freq_hz,
-                                                                  std::move(*stream), std::move(loop_params),
-                                                                  std::move(history), std::move(ws))),
+            coro::build_task().name("demod").spawn(std::move(pipeline.run)),
             coro::signal(SIGINT));
         if (done.index() == 1) {
             LOGF(INFO, "stopping after SIGINT");

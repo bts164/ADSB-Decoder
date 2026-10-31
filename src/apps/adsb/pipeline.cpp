@@ -10,7 +10,10 @@
 
 #include <coro/coro_stream.h>
 #include <coro/runtime/runtime.h>
+#include <coro/stream.h>
+#include <coro/sync/broadcast.h>
 #include <coro/sync/mpsc.h>
+#include <coro/sync/watch.h>
 #include <coro/task/join_handle.h>
 #include <coro/task/spawn_builder.h>
 
@@ -20,7 +23,6 @@
 #include "common/trace.h"
 #include "decode/aircraft.h"
 #include "dsp/spectrum.h"
-#include "output/capture.h"
 #ifdef ADSB_WITH_HDF5
 #include "output/frame_recorder.h"
 #endif
@@ -30,7 +32,7 @@ namespace {
 // Longest an aircraft goes unpublished while frames from it keep arriving.
 constexpr double kAircraftRefreshS = 1.0;
 
-// Interval between run_demod_loop's `ADSB_TIMING` throughput reports.
+// Interval between the pipeline's `ADSB_TIMING` throughput reports.
 constexpr std::chrono::milliseconds kStatusReportInterval{1000};
 // Least time between published spectrum rows. Each is a peak-hold over the FFTs since the last, so a shorter
 // interval resolves bursts better in time without missing any.
@@ -126,19 +128,19 @@ DemodLoopParams DemodLoopParams::from_options(const argparse::ArgumentParser& pr
 
 namespace {
 
-// Demodulated blocks demodulate() may run ahead of run_demod_loop by. Each is only its frames, so this can
+// Demodulated blocks demodulate() may run ahead of the sink by. Each is only its frames, so this can
 // cover a long stall in publishing or the history database.
 constexpr size_t kDemodQueueBlocks = 64;
-// Blocks a capture task may fall behind by, in each of its branches. Each holds a block's buffer, or a copy of
-// its envelope, until the task has written it, or discarded it while no capture is in progress.
+// Blocks a capture may fall behind by, on the input and envelope broadcasts. Each holds a block's buffer, or
+// its envelope, until every capture has written it.
 constexpr size_t kCaptureQueueBlocks = 8;
-// Capture calls waiting for their capture task, which refuses all but one at a time.
-constexpr size_t kCaptureCalls = 2;
+// Blocks' frames, or spectrum rows, a broadcast holds for a call that hasn't taken them yet.
+constexpr size_t kLiveQueueItems = 64;
 // Blocks with frames the debug recorder may fall behind by, and with --debug-h5 the demod queue too: each
 // then holds a block's buffer, which its source can't reuse until the recorder is done with it.
 constexpr size_t kRecordQueueBlocks = 4;
 
-// A block's frames for record_frames(), validated (by handle_frame()), since only run_demod_loop may validate:
+// A block's frames for record_frames(), validated (by handle_frame()), since only the sink may validate:
 // its AircraftTracker keeps the set of confirmed addresses.
 struct RecordItem {
     DemodSnapshot snapshot;
@@ -146,62 +148,53 @@ struct RecordItem {
     std::vector<DecodedFrameView> views;  // one per frame
 };
 
-// Passes on the blocks from `in` that arrive while `demand` has a spectrum viewer, checking every
-// kSpectrumInterval. Peaks held when the last viewer goes are in the first row the next one sees.
-coro::CoroStream<IqBlock> while_viewed(coro::MpscReceiver<IqBlock> in,
-                                       coro::WatchReceiver<PipelineDemand> demand) {
-    auto next_check = std::chrono::steady_clock::now();
-    bool computing = false;
-    while (auto block = co_await coro::next(in)) {
-        if (auto now = std::chrono::steady_clock::now(); now >= next_check) {
-            next_check = now + kSpectrumInterval;
-            // Races with a spectrum call starting or ending, harmlessly: a new viewer waits up to one interval
-            // longer for its first row, and one more row may follow the last viewer's going.
-            const int viewers = demand.get().spectrum_viewers;
-            if ((viewers > 0) != computing) {
-                computing = viewers > 0;
-                LOGF(INFO, "spectrum: %s (%d viewer(s))", computing ? "computing" : "stopped", viewers);
+// The blocks from `in`, for spectrum_rows(), which takes a stream. `in` outlives the stream, in the spectrum
+// task's frame.
+coro::CoroStream<IqBlock> blocks_from(coro::MpscReceiver<IqBlock>& in) {
+    while (auto block = co_await coro::next(in)) co_yield std::move(*block);
+}
+
+// The spectrum's own task, so its FFTs run on another worker rather than in the demodulator's. Computes once for
+// every viewer, and only while `rows` has one: it reads the tee's blocks only then, and its input is inactive,
+// so the tee sends nothing, in between. Ends when the input does.
+coro::Coro<void> publish_spectrum(coro::InactiveMpscReceiver<IqBlock> idle,
+                                  coro::BroadcastSender<LiveSpectrumRow> rows, double rate_hz, double freq_hz) {
+    for (;;) {
+        co_await rows.receivers_active();
+        LOGF(INFO, "spectrum: computing, for a client watching it");
+        coro::MpscReceiver<IqBlock> in = std::move(idle).activate();
+        bool watched = true;
+        {
+            coro::CoroStream<SpectrumFrame> frames =
+                spectrum_rows(blocks_from(in), kSpectrumInterval, rate_hz, freq_hz);
+            while (watched) {
+                auto row = co_await coro::next(frames);
+                if (!row) co_return;
+                // Fails once the last viewer has gone. Races with a viewer arriving just after, harmlessly:
+                // receivers_active() then resolves at once, and that viewer waits one interval longer.
+                watched = rows.send(std::make_shared<const api::SpectrumRow>(to_proto(*row))).has_value();
             }
         }
-        if (computing) co_yield std::move(*block);
+        LOGF(INFO, "spectrum: stopped, no client watching it");
+        // Drops the blocks queued, so their buffers go back to the source.
+        idle = std::move(in).deactivate();
     }
 }
 
-// The spectrum's own task, so its FFTs run on another worker rather than in the demodulator's. Publishes
-// spectrum_rows() of the blocks from `in` on `publish`, while a client watches.
-coro::Coro<void> publish_spectrum(coro::MpscReceiver<IqBlock> in, coro::BroadcastSender<LiveSpectrumRow> publish,
-                                  coro::WatchReceiver<PipelineDemand> demand, double rate_hz, double freq_hz) {
-    coro::CoroStream<SpectrumFrame> rows =
-        spectrum_rows(while_viewed(std::move(in), std::move(demand)), kSpectrumInterval, rate_hz, freq_hz);
-    while (auto row = co_await coro::next(rows)) {
-        // Fails only with no client to receive it, which is fine.
-        (void)publish.send(std::make_shared<const api::SpectrumRow>(to_proto(*row)));
-    }
-}
-
-// Passes every block through, and sends a share of each to every branch that isn't full, so a branch gets
-// as many blocks as it keeps up with and never holds back the stream. Runs in demodulate()'s task.
-coro::CoroStream<IqBlock> tee(coro::CoroStream<IqBlock> in, std::vector<coro::MpscSender<IqBlock>> branches) {
+// Passes every block through, offers a copy to the spectrum task, which takes it unless it's full or inactive,
+// and sends one on `input`, which stores nothing while no capture reads it. Neither waits, so neither holds back
+// the stream. Runs in demodulate()'s task.
+coro::CoroStream<IqBlock> tee(coro::CoroStream<IqBlock> in, coro::MpscSender<IqBlock> spectrum,
+                              coro::BroadcastSender<IqBlock> input) {
     while (auto block = co_await coro::next(in)) {
-        for (auto& branch : branches) (void)branch.try_send(block->share());
+        (void)spectrum.try_send(*block);
+        (void)input.send(*block);
         co_yield std::move(*block);
     }
 }
 
-// Hands each capture call to its point's capture task.
-coro::Coro<void> route_captures(coro::MpscReceiver<CaptureCall> calls, coro::MpscSender<CaptureCall> input,
-                                coro::MpscSender<CaptureCall> envelope) {
-    while (auto call = co_await coro::next(calls)) {
-        // The server has checked the point.
-        auto& to = call->request.point() == api::INPUT ? input : envelope;
-        // Fails only once the capture task has stopped, which the call's closed progress channel tells its
-        // client.
-        (void)co_await to.send(std::move(*call));
-    }
-}
-
 #ifdef ADSB_WITH_HDF5
-// Writes every frame it is sent to the HDF5 debug file, until run_demod_loop stops sending.
+// Writes every frame it is sent to the HDF5 debug file, until the sink stops sending.
 coro::Coro<void> record_frames(coro::MpscReceiver<RecordItem> in, FrameRecorder recorder) {
     while (auto item = co_await coro::next(in)) {
         const DemodSnapshot& s = item->snapshot;
@@ -211,11 +204,26 @@ coro::Coro<void> record_frames(coro::MpscReceiver<RecordItem> in, FrameRecorder 
 }
 #endif
 
-}  // namespace
+// What the stages take: the senders, the spectrum task's input, and the settings.
+struct Stages {
+    FilterBank filter;
+    double rate_hz;
+    double freq_hz;
+    DemodLoopParams params;
+    std::optional<AircraftHistory> history;
+    coro::BroadcastSender<LiveFrames> frames;
+    coro::WatchSender<LiveAircraft> aircraft;
+    coro::BroadcastSender<LiveSpectrumRow> spectrum;
+    coro::MpscSender<IqBlock> spectrum_in;
+    coro::InactiveMpscReceiver<IqBlock> spectrum_reader;
+    coro::BroadcastSender<IqBlock> input;
+    coro::BroadcastSender<EnvelopeShare> envelope;
+};
 
-coro::Coro<uint64_t> run_demod_loop(FilterBank filter, double rate_hz, double freq_hz,
-                                    coro::CoroStream<IqBuffer> stream, DemodLoopParams params,
-                                    std::optional<AircraftHistory> history, std::optional<ApiSenders> ws) {
+// demod_pipeline()'s coroutine, which runs the stages.
+coro::Coro<uint64_t> run_stages(Stages stages, coro::CoroStream<IqBuffer> stream) {
+    const double rate_hz = stages.rate_hz;
+    const DemodLoopParams& params = stages.params;
     LOGF(INFO, "demodulator: preamble score threshold %g, bit-slice magnitude threshold %g", params.preamble_min,
          params.slice_mag_min);
     std::optional<coro::MpscSender<RecordItem>> to_recorder;
@@ -225,57 +233,27 @@ coro::Coro<uint64_t> run_demod_loop(FilterBank filter, double rate_hz, double fr
         LOGF(INFO, "recording %s to %s", params.debug.failed_only ? "the frames that fail CRC" : "every frame",
              *params.debug.path);
         // Created here, so a debug file that can't be created is an error at startup.
-        FrameRecorder file(*params.debug.path, demod_params(filter, rate_hz, params.preamble_min, params.slice_mag_min),
-                           filter, params.debug.command_line, params.debug.failed_only);
+        FrameRecorder file(*params.debug.path,
+                           demod_params(stages.filter, rate_hz, params.preamble_min, params.slice_mag_min),
+                           stages.filter, params.debug.command_line, params.debug.failed_only);
         auto [tx, rx] = coro::mpsc_channel<RecordItem>(kRecordQueueBlocks);
         to_recorder = std::move(tx);
         recorder = coro::build_task().name("debug_h5").spawn(record_frames(std::move(rx), std::move(file)));
     }
 #endif
 
-    coro::CoroStream<IqBlock> blocks = stitch(std::move(stream));
-    std::vector<coro::MpscSender<IqBlock>> branches;
-    coro::JoinHandle<void> spectrum;  // cancelled when this returns and drops it
-    if (ws) {
-        LOGF(INFO, "spectrum: computed while a client watches it, from as many blocks as it keeps up with");
-        auto [tx, rx] = coro::mpsc_channel<IqBlock>(kSpectrumQueueBlocks);
-        branches.push_back(std::move(tx));
-        spectrum = coro::build_task().name("spectrum").spawn(
-            publish_spectrum(std::move(rx), ws->spectrum.clone(), ws->demand.clone(), rate_hz, freq_hz));
-    }
-    std::optional<coro::MpscSender<EnvelopeRun>> to_envelope_capture;
-    std::optional<coro::WatchReceiver<bool>> envelope_wanted;
-    std::vector<coro::JoinHandle<void>> captures;  // cancelled when this returns and drops them
-    if (ws) {
-        const double envelope_rate_hz = demod_output_rate_hz();
-        LOGF(INFO, "capture: on a capture call while a capture directory is set, up to %g s of the input (as the "
-             "source delivers it, at %g Hz) or of the envelope (rf32_le at %g Hz)",
-             CaptureCall::kMaxDurationS, rate_hz, envelope_rate_hz);
-        auto [input_tx, input_rx] = coro::mpsc_channel<IqBlock>(kCaptureQueueBlocks);
-        auto [envelope_tx, envelope_rx] = coro::mpsc_channel<EnvelopeRun>(kCaptureQueueBlocks);
-        auto [input_calls_tx, input_calls_rx] = coro::mpsc_channel<CaptureCall>(kCaptureCalls);
-        auto [envelope_calls_tx, envelope_calls_rx] = coro::mpsc_channel<CaptureCall>(kCaptureCalls);
-        auto [wanted_tx, wanted_rx] = coro::watch_channel(false);
-        branches.push_back(std::move(input_tx));
-        to_envelope_capture = std::move(envelope_tx);
-        envelope_wanted = std::move(wanted_rx);
-        captures.push_back(coro::build_task().name("capture_input").spawn(
-            capture_input({"input", "capture input missing", rate_hz, freq_hz},
-                          std::move(input_rx), std::move(input_calls_rx))));
-        captures.push_back(coro::build_task().name("capture_envelope").spawn(
-            capture_envelope({"envelope", "capture envelope missing", envelope_rate_hz, {}},
-                             std::move(envelope_rx), std::move(envelope_calls_rx), std::move(wanted_tx))));
-        captures.push_back(coro::build_task().name("capture_calls").spawn(route_captures(
-            std::move(ws->captures), std::move(input_calls_tx), std::move(envelope_calls_tx))));
-    }
-    if (!branches.empty()) blocks = tee(std::move(blocks), std::move(branches));
-    // A task of its own, so the demodulator runs ahead while this loop handles, publishes and records.
+    // Cancelled when this returns and drops it.
+    coro::JoinHandle<void> spectrum = coro::build_task().name("spectrum").spawn(
+        publish_spectrum(std::move(stages.spectrum_reader), std::move(stages.spectrum), rate_hz, stages.freq_hz));
+    coro::CoroStream<IqBlock> blocks =
+        tee(stitch(std::move(stream)), std::move(stages.spectrum_in), std::move(stages.input));
+    // A task of its own, so the demodulator runs ahead while the sink handles, publishes and records.
     auto demodulated = coro::build_task()
                            .name("demodulate")
                            .buffer(to_recorder ? kRecordQueueBlocks : kDemodQueueBlocks)
-                           .spawn(demodulate(std::move(blocks), std::move(filter), rate_hz, params.preamble_min,
-                                             params.slice_mag_min, to_recorder.has_value(),
-                                             std::move(envelope_wanted)));
+                           .spawn(demodulate(std::move(blocks), std::move(stages.filter), rate_hz,
+                                             params.preamble_min, params.slice_mag_min, to_recorder.has_value(),
+                                             std::move(stages.envelope)));
 
     // ADSB_TIMING set to anything but 0: a throughput report every kStatusReportInterval rather than every
     // block, since a live stream runs for hours and each line is synchronous I/O.
@@ -315,34 +293,33 @@ coro::Coro<uint64_t> run_demod_loop(FilterBank filter, double rate_hz, double fr
         {
             // Closed before the sends to the history and the recorder below: a zone can't span a co_await.
             TRACE_ZONE_VALUE("sink_block", b->frames.size());
+            // Races with a frames call starting or ending, harmlessly: a new call gets frames from the next block
+            // on, and a send after the last has gone fails.
+            const bool publish_frames = !stages.frames.all_receivers_dropped();
             std::vector<api::Frame> frames;
             for (const AdsbFrame& f : b->frames) {
-                DecodedFrameView v = handle_frame(tracker, f, rate_hz, start_unix_s, ws ? &frames : nullptr,
-                                                  ws || history ? &aircraft : nullptr);
+                DecodedFrameView v =
+                    handle_frame(tracker, f, rate_hz, start_unix_s, publish_frames ? &frames : nullptr, &aircraft);
                 if (b->snapshot) views.push_back(v);
             }
             // Fails only with no client to receive it, which is fine.
-            if (ws && !frames.empty())
-                (void)ws->frames.send(std::make_shared<const std::vector<api::Frame>>(std::move(frames)));
-            if (ws && !aircraft.empty()) {
-                auto live = ws->aircraft.borrow_mut();
+            if (!frames.empty())
+                (void)stages.frames.send(std::make_shared<const std::vector<api::Frame>>(std::move(frames)));
+            if (!aircraft.empty()) {
+                auto live = stages.aircraft.borrow_mut();
                 for (const api::Aircraft& ac : aircraft) (*live)[ac.icao()] = ac;
                 const double oldest = aircraft.back().last_seen_unix_s() - kLiveAircraftWindowS;
                 std::erase_if(*live,
                               [oldest](const auto& entry) { return entry.second.last_seen_unix_s() < oldest; });
             }
         }
-        if (history && !aircraft.empty()) co_await history->insert(std::move(aircraft));
+        if (stages.history && !aircraft.empty()) co_await stages.history->insert(std::move(aircraft));
         frame_count += b->frames.size();
         sample_count += b->n;
         if (const double now_s = static_cast<double>(sample_count) / rate_hz; now_s - lost_checked_s >= kLostCheckS) {
             log_lost(tracker, lost_checked_s - kLiveAircraftWindowS, now_s - kLiveAircraftWindowS, now_s);
             lost_checked_s = now_s;
         }
-
-        // A run that doesn't fit is a gap in the capture, which its task logs.
-        if (!b->envelope.empty())
-            (void)to_envelope_capture->try_send(EnvelopeRun{b->envelope_index, std::move(b->envelope)});
 
         if (b->snapshot) {
             RecordItem item{std::move(*b->snapshot), std::move(b->frames), std::move(views)};
@@ -365,4 +342,44 @@ coro::Coro<uint64_t> run_demod_loop(FilterBank filter, double rate_hz, double fr
     to_recorder.reset();
     if (recorder.valid()) co_await recorder;
     co_return frame_count;
+}
+
+}  // namespace
+
+DemodPipeline demod_pipeline(FilterBank filter, double rate_hz, double freq_hz, coro::CoroStream<IqBuffer> stream,
+                             DemodLoopParams params, std::optional<AircraftHistory> history) {
+    // Each channel's own receiver is dropped here: the outputs hold inactive ones, which don't count.
+    auto [frames, frames_rx] = coro::broadcast_channel<LiveFrames>(kLiveQueueItems);
+    auto [aircraft, aircraft_rx] = coro::watch_channel(LiveAircraft{});
+    auto [spectrum, spectrum_rx] = coro::broadcast_channel<LiveSpectrumRow>(kLiveQueueItems);
+    auto [spectrum_in, spectrum_reader] = coro::mpsc_channel<IqBlock>(kSpectrumQueueBlocks);
+    auto [input, input_rx] = coro::broadcast_channel<IqBlock>(kCaptureQueueBlocks);
+    auto [envelope, envelope_rx] = coro::broadcast_channel<EnvelopeShare>(kCaptureQueueBlocks);
+    PipelineOutputs outputs{
+        .frames = frames.inactive(),
+        .aircraft = std::move(aircraft_rx),
+        .spectrum = spectrum.inactive(),
+        .input = input.inactive(),
+        .envelope = envelope.inactive(),
+        .input_point = {"input", "capture input missing", rate_hz, freq_hz},
+        .envelope_point = {"envelope", "capture envelope missing", demod_output_rate_hz(), {}},
+    };
+    // A coroutine starts suspended, so nothing runs until the caller spawns it.
+    coro::Coro<uint64_t> run = run_stages(
+        Stages{
+            .filter = std::move(filter),
+            .rate_hz = rate_hz,
+            .freq_hz = freq_hz,
+            .params = std::move(params),
+            .history = std::move(history),
+            .frames = std::move(frames),
+            .aircraft = std::move(aircraft),
+            .spectrum = std::move(spectrum),
+            .spectrum_in = std::move(spectrum_in),
+            .spectrum_reader = std::move(spectrum_reader).deactivate(),
+            .input = std::move(input),
+            .envelope = std::move(envelope),
+        },
+        std::move(stream));
+    return {.outputs = std::move(outputs), .run = std::move(run)};
 }

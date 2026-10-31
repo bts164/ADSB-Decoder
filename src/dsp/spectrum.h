@@ -12,7 +12,7 @@
  * @file
  * Spectrum for the UI waterfall, computed from the raw pre-resample IQ.
  *
- * A side channel off the blocks run_demod_loop (pipeline.h) hands to demodulate(): before resampling, so it
+ * A side channel off the blocks demod_pipeline() (pipeline.h) hands to demodulate(): before resampling, so it
  * shows the true center-frequency offset and out-of-band noise. Each row is a peak-hold over the FFTs since the
  * last one, so a burst as short as an ADS-B reply shows even though the row covers far longer.
  */

@@ -18,9 +18,14 @@
 #include <unistd.h>
 
 #include <coro/coro_stream.h>
+#include <coro/future.h>
 #include <coro/io/file.h>
+#include <coro/runtime/runtime.h>
 #include <coro/sync/select.h>
-#include <coro/sync/when.h>
+#include <coro/sync/sleep.h>
+#include <coro/sync/watch.h>
+#include <coro/task/join_handle.h>
+#include <coro/task/spawn_builder.h>
 #include <nlohmann/json.hpp>
 
 #include "common/log.h"
@@ -36,13 +41,11 @@ constexpr auto kReportInterval = std::chrono::milliseconds(500);
 
 static_assert(std::endian::native == std::endian::little, "cf32_le and rf32_le are written as the host's floats");
 
-CaptureCall::Report failure(wsrpc::Code code, const std::string& message) {
-    return std::unexpected(wsrpc::CallError(code, message));
-}
+// A capture's last report, or why it failed.
+using Result = std::expected<api::RecordCaptureProgress, wsrpc::CallError>;
 
-// What a capture task needs of each item it takes: its first sample's stream index at the point, its sample
-// count, its SigMF datatype, and a run of its samples as bytes in that datatype. A copy, which only a capture
-// in progress makes, so the item's buffer goes back to its source at once either way.
+// What a capture needs of each item it takes: its first sample's stream index at the point, its sample count,
+// its SigMF datatype, and a run of its samples as bytes in that datatype.
 
 uint64_t first_index(const IqBlock& b) { return b.start(); }
 size_t count(const IqBlock& b) { return b.n(); }
@@ -67,9 +70,12 @@ std::vector<std::byte> bytes(const EnvelopeRun& r, size_t from, size_t n) {
     return std::vector<std::byte>(run.begin(), run.end());
 }
 
+// The item a broadcast value carries.
+const IqBlock& item_of(const IqBlock& b) { return b; }
+const EnvelopeRun& item_of(const EnvelopeShare& r) { return *r; }
+
 // The capture in progress.
 struct Capture {
-    coro::MpscSender<CaptureCall::Report> progress;
     std::string name;
     std::string data_path;
     std::string meta_path;
@@ -80,7 +86,6 @@ struct Capture {
     uint64_t written = 0;
     std::string datatype;
     nlohmann::json segments = nlohmann::json::array();  // SigMF captures, one per run without a gap
-    std::chrono::steady_clock::time_point next_report = std::chrono::steady_clock::now() + kReportInterval;
 };
 
 // Bytes per sample of a SigMF core:datatype, such as cf32_le (8) or ru8 (1); 0 for one it can't parse.
@@ -144,18 +149,18 @@ coro::Coro<void> write_meta(const Capture& c, const CapturePoint& point) {
     (void)co_await file.write_exact(meta.dump(2) + "\n");
 }
 
-// Opens the capture a call asks for, or reports why it can't and returns nullopt.
-coro::Coro<std::optional<Capture>> start(const CapturePoint& point, CaptureCall call) {
-    const std::string base = (std::filesystem::path(call.dir) / call.request.name()).string();
+// Opens the capture a call asks for.
+coro::Coro<Capture> start(const CapturePoint& point, const api::RecordCaptureRequest& request,
+                          const std::string& dir) {
+    const std::string base = (std::filesystem::path(dir) / request.name()).string();
     const std::string data_path = base + ".sigmf-data";
     const std::string meta_path = base + ".sigmf-meta";
     // Checked rather than opened exclusively, which coro::File can't do: only a second capture of the same
     // name racing this one gets past it.
     if (std::filesystem::exists(data_path) || std::filesystem::exists(meta_path)) {
         LOGF(WARNING, "capture %s: refused, %s exists", point.name, data_path);
-        (void)co_await call.progress.send(
-            failure(wsrpc::v1::Error::INVALID_ARGUMENT, data_path + " exists, and a capture never overwrites one"));
-        co_return std::nullopt;
+        throw wsrpc::CallError(wsrpc::v1::Error::INVALID_ARGUMENT,
+                               data_path + " exists, and a capture never overwrites one");
     }
     std::optional<coro::File> data;
     std::string failed;
@@ -166,15 +171,13 @@ coro::Coro<std::optional<Capture>> start(const CapturePoint& point, CaptureCall 
     }
     if (!data) {
         LOGF(ERROR, "capture %s: can't create %s: %s", point.name, data_path, failed);
-        (void)co_await call.progress.send(failure(wsrpc::v1::Error::INTERNAL, data_path + ": " + failed));
-        co_return std::nullopt;
+        throw wsrpc::CallError(wsrpc::v1::Error::INTERNAL, data_path + ": " + failed);
     }
     const auto samples =
-        std::max<uint64_t>(1, static_cast<uint64_t>(std::llround(call.request.duration_s() * point.rate_hz)));
-    LOGF(INFO, "capture %s: started, %g s (%u samples at %g Hz) to %s", point.name, call.request.duration_s(),
-         samples, point.rate_hz, data_path);
-    co_return Capture{.progress = std::move(call.progress),
-                      .name = call.request.name(),
+        std::max<uint64_t>(1, static_cast<uint64_t>(std::llround(request.duration_s() * point.rate_hz)));
+    LOGF(INFO, "capture %s: started, %g s (%u samples at %g Hz) to %s", point.name, request.duration_s(), samples,
+         point.rate_hz, data_path);
+    co_return Capture{.name = request.name(),
                       .data_path = data_path,
                       .meta_path = meta_path,
                       .data = std::move(*data),
@@ -235,8 +238,8 @@ api::RecordCaptureProgress report_of(const Capture& c) {
     return r;
 }
 
-// Writes the final metadata and sends the last report; `why` is for the log.
-coro::Coro<void> finish(Capture& c, const CapturePoint& point, const char* why) {
+// Writes the final metadata, and returns the last report; `why` is for the log.
+coro::Coro<api::RecordCaptureProgress> finish(const Capture& c, const CapturePoint& point, const char* why) {
     if (c.start) co_await write_meta(c, point);
     api::RecordCaptureProgress last = report_of(c);
     api::Capture& capture = *last.mutable_capture();
@@ -255,88 +258,84 @@ coro::Coro<void> finish(Capture& c, const CapturePoint& point, const char* why) 
     }
     LOGF(INFO, "capture %s: %s, %u samples (%.3f s) in %s, %u missing", point.name, why, c.written,
          static_cast<double>(c.written) / point.rate_hz, c.data_path, last.missing());
-    // Waits for room, since it carries the result. Fails only for a cancelled call, which has no one to tell.
-    (void)co_await c.progress.send(std::move(last));
+    co_return last;
 }
 
-// The loop both capture tasks run. Writing holds the task back from `in`, whose sender drops what doesn't fit,
-// so a slow disk loses samples rather than slowing the pipeline.
+// A capture's writer task: writes the items from `in` until the capture is done or the input ends, updating
+// `progress` after each. Writing holds it back from `in`, whose ring overtakes it rather than wait, so a slow disk
+// loses samples rather than slowing the pipeline.
 template <class Item>
-coro::Coro<void> run_captures(CapturePoint point, coro::MpscReceiver<Item> in,
-                              coro::MpscReceiver<CaptureCall> calls, coro::WatchSender<bool>* active_flag) {
-    std::optional<Capture> active;
-    auto set_active = [&](bool on) {
-        if (active_flag) (void)active_flag->send(on);
-    };
-    bool calls_open = true;
+coro::Coro<Result> write_capture(Capture c, CapturePoint point, coro::BroadcastReceiver<Item> in,
+                                 coro::WatchSender<api::RecordCaptureProgress> progress) {
+    // The call's cancel drops this frame at a co_await, before the capture finishes. What's written stays, with
+    // the metadata written at its last segment, which covers it.
+    struct CancelLog {
+        const Capture& c;
+        const CapturePoint& point;
+        bool ended = false;
+        ~CancelLog() {
+            if (!ended)
+                LOGF(INFO, "capture %s: cancelled, %u samples (%.3f s) in %s, %u missing", point.name, c.written,
+                     static_cast<double>(c.written) / point.rate_hz, c.data_path, missing(c));
+        }
+    } cancel_log{c, point};
+    std::optional<api::RecordCaptureProgress> last;
     std::string failed;
-    for (;;) {
-        auto woke = co_await coro::select(in.recv(), coro::when(calls_open, [&] { return calls.recv(); }));
-        if (woke.index() == 1) {
-            auto& call = std::get<1>(woke).value;
-            if (!call) {
-                calls_open = false;
-            } else if (active) {
-                (void)co_await call->progress.send(failure(
-                    wsrpc::v1::Error::RESOURCE_EXHAUSTED, std::string("a capture of the ") + point.name +
-                                                              " is in progress"));
-            } else {
-                active = co_await start(point, std::move(*call));
-                if (active) set_active(true);
-            }
-            continue;
-        }
-        auto& item = std::get<0>(woke).value;
-        if (!item) break;
-        if (!active) continue;
+    try {
         const char* why = nullptr;
-        try {
-            if (active->progress.is_closed()) {
-                why = "cancelled";
-            } else if (co_await write(*active, point, *item)) {
-                why = "done";
-            } else if (const auto now = std::chrono::steady_clock::now(); now >= active->next_report) {
-                // Dropped when the server hasn't taken the last two: the next one says as much.
-                (void)active->progress.try_send(report_of(*active));
-                active->next_report = now + kReportInterval;
+        while (!why) {
+            auto value = co_await in.recv();
+            if (value) {
+                if (co_await write(c, point, item_of(*value))) why = "done";
+                (void)progress.send(report_of(c));
+            } else if (value.error().kind != coro::BroadcastRecvError::Kind::Lagged) {
+                why = "ended early with the input";
             }
-            if (why) co_await finish(*active, point, why);
-        } catch (const std::exception& e) {
-            failed = e.what();
+            // A lag is a gap, which the next item's index shows, and write() logs and plots with its size.
         }
-        if (!failed.empty()) {
-            LOGF(ERROR, "capture %s: failed writing %s: %s", point.name, active->data_path, failed);
-            (void)co_await active->progress.send(
-                failure(wsrpc::v1::Error::INTERNAL, active->data_path + ": " + failed));
-            failed.clear();
-            why = "failed";
-        }
-        if (why) {
-            active.reset();
-            set_active(false);
-        }
+        last = co_await finish(c, point, why);
+    } catch (const std::exception& e) {
+        failed = e.what();
     }
-    if (active) {
-        try {
-            co_await finish(*active, point, "ended early with the input");
-        } catch (const std::exception& e) {
-            failed = e.what();
+    cancel_log.ended = true;
+    if (last) co_return std::move(*last);
+    LOGF(ERROR, "capture %s: failed writing %s: %s", point.name, c.data_path, failed);
+    co_return std::unexpected(wsrpc::CallError(wsrpc::v1::Error::INTERNAL, c.data_path + ": " + failed));
+}
+
+// Both points' run_capture().
+template <class Item>
+coro::CoroStream<api::RecordCaptureProgress> capture_stream(CapturePoint point, coro::BroadcastReceiver<Item> in,
+                                                            api::RecordCaptureRequest request, std::string dir) {
+    Capture c = co_await start(point, request, dir);
+    auto [progress_tx, progress] = coro::watch_channel(api::RecordCaptureProgress{});
+    // Held in this frame, so dropping the stream cancels it.
+    coro::JoinHandle<Result> writer = coro::build_task().name("capture_writer").spawn(
+        write_capture(std::move(c), point, std::move(in), std::move(progress_tx)));
+    for (;;) {
+        auto woke = co_await coro::select(coro::ref(writer), coro::sleep_for(kReportInterval));
+        if (woke.index() == 0) {
+            Result last = std::move(std::get<0>(woke).value);
+            if (!last) throw std::move(last.error());
+            co_yield std::move(*last);
+            co_return;
         }
-        if (!failed.empty()) LOGF(ERROR, "capture %s: failed writing %s: %s", point.name, active->meta_path, failed);
-        set_active(false);
+        // The writer carries on while this waits for a slow client here.
+        co_yield progress.get();
     }
 }
 
 }  // namespace
 
-coro::Coro<void> capture_input(CapturePoint point, coro::MpscReceiver<IqBlock> in,
-                               coro::MpscReceiver<CaptureCall> calls) {
-    co_await run_captures(point, std::move(in), std::move(calls), nullptr);
+coro::CoroStream<api::RecordCaptureProgress> run_capture(CapturePoint point, coro::BroadcastReceiver<IqBlock> in,
+                                                         api::RecordCaptureRequest request, std::string dir) {
+    return capture_stream(point, std::move(in), std::move(request), std::move(dir));
 }
 
-coro::Coro<void> capture_envelope(CapturePoint point, coro::MpscReceiver<EnvelopeRun> in,
-                                  coro::MpscReceiver<CaptureCall> calls, coro::WatchSender<bool> active) {
-    co_await run_captures(point, std::move(in), std::move(calls), &active);
+coro::CoroStream<api::RecordCaptureProgress> run_capture(CapturePoint point,
+                                                         coro::BroadcastReceiver<EnvelopeShare> in,
+                                                         api::RecordCaptureRequest request, std::string dir) {
+    return capture_stream(point, std::move(in), std::move(request), std::move(dir));
 }
 
 std::expected<std::string, std::string> resolve_capture_dir(const std::string& dir) {

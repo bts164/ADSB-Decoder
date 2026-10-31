@@ -120,14 +120,14 @@ void test_to_float() {
     }
 }
 
-// A block's buffer goes back to its pool once its last share is dropped. A clone is a copy the pool never gets.
+// A block's buffer goes back to its pool once its last copy is dropped. A clone is a copy the pool never gets.
 void test_recycle() {
     auto [tx, rx] = coro::mpsc_channel<iq::SamplesVariant>(4);
     IqBuffer buffer = IqBuffer::uninitialized<iq::F32>(
         kPad, 5, 0, std::make_shared<coro::MpscSender<iq::SamplesVariant>>(std::move(tx)), {});
     std::ranges::fill(buffer.iq<iq::F32>(), 1.0f);
     std::optional<IqBlock> block(IqBlock(std::move(buffer)));
-    std::optional<IqBlock> shared = block->share();
+    std::optional<IqBlock> shared = *block;
     std::optional<IqBlock> cloned = block->clone();
     CHECK(shared->iq<iq::F32>().data() == block->iq<iq::F32>().data());
     CHECK(cloned->iq<iq::F32>().data() != block->iq<iq::F32>().data());

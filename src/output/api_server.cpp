@@ -12,7 +12,6 @@
 
 #include <coro/coro.h>
 #include <coro/coro_stream.h>
-#include <coro/defer.h>
 #include <coro/io/ws_listener.h>
 #include <coro/io/ws_stream.h>
 #include <coro/stream.h>
@@ -35,11 +34,22 @@ using google::protobuf::util::MessageDifferencer;
 using wsrpc::CallError;
 using Error = wsrpc::v1::Error;
 
-// Blocks' frames, or spectrum rows, a broadcast holds for a call that hasn't taken them yet.
-constexpr size_t kLiveQueueItems = 64;
+// Both ends of the settings' watch, which every connection shares. Each is for one task at a time: clone.
+struct SettingsWatch {
+    coro::WatchSender<api::Settings> tx;
+    coro::WatchReceiver<api::Settings> rx;
 
-// Capture calls on their way to the pipeline, from all the connections.
-constexpr size_t kCaptureQueue = 4;
+    SettingsWatch clone() const { return {tx.clone(), rx.clone()}; }
+};
+
+// What the Receiver handlers answer from, as the server holds it. Each is for one task at a time: clone.
+struct Live {
+    PipelineOutputs outputs;
+    coro::WatchReceiver<std::optional<api::InputStatus>> input_status;
+    SettingsWatch settings;
+
+    Live clone() const { return {outputs.clone(), input_status.clone(), settings.clone()}; }
+};
 
 // Every call runs in a task of its own, so a handler takes its own clone of anything that is for one task
 // at a time.
@@ -50,12 +60,12 @@ public:
     // Longest time between a watch's replies; a request for more is refused, as it would overflow.
     static constexpr double kMaxIntervalS = 3600;
 
-    ReceiverHandlers(ApiReceivers live, api::ReceiverInfo info) : m_live(std::move(live)), m_info(std::move(info)) {}
+    ReceiverHandlers(Live live, api::ReceiverInfo info) : m_live(std::move(live)), m_info(std::move(info)) {}
 
     coro::Coro<api::ReceiverInfo> get_receiver_info(const api::GetReceiverInfoRequest&) override { co_return m_info; }
 
     coro::CoroStream<api::FrameBatch> watch_frames(const api::WatchFramesRequest& request) override {
-        auto frames = m_live.frames.resubscribe();
+        auto frames = m_live.outputs.frames.activate();
         coro::IntervalTimer timer(interval(request));
         api::FrameBatch batch;
         for (;;) {
@@ -79,7 +89,7 @@ public:
     }
 
     coro::CoroStream<api::AircraftChanges> watch_aircraft(const api::WatchAircraftRequest& request) override {
-        auto aircraft = m_live.aircraft.clone();
+        auto aircraft = m_live.outputs.aircraft.clone();
         coro::IntervalTimer timer(interval(request));
         // Copies, so no watch lock is held past the statement.
         LiveAircraft sent = *aircraft.borrow_and_update();
@@ -111,21 +121,9 @@ public:
         }
     }
 
-    // While this is in progress, the pipeline computes the spectrum rows it sends.
+    // While this is in progress, its receiver is one of the rows' readers, so the pipeline computes them.
     coro::CoroStream<api::SpectrumRow> watch_spectrum(const api::WatchSpectrumRequest&) override {
-        auto rows = m_live.spectrum.resubscribe();
-        coro::WatchSender<PipelineDemand> demand = m_live.demand.clone();
-        demand.send_if_modified([](PipelineDemand& d) {
-            ++d.spectrum_viewers;
-            return true;
-        });
-        // However the call ends, its frame is destroyed, so the count comes down.
-        coro::Defer uncount([&demand] {
-            demand.send_if_modified([](PipelineDemand& d) {
-                --d.spectrum_viewers;
-                return true;
-            });
-        });
+        auto rows = m_live.outputs.spectrum.activate();
         for (;;) {
             // As in watch_frames(), a slow client holds this at its co_yield until the ring overtakes it.
             auto row = co_await rows.recv();
@@ -178,33 +176,27 @@ public:
         co_return after;
     }
 
-    // Reported by the pipeline's capture task for the point; a cancel closes the reports' channel, which ends the
-    // capture.
+    // The call is the capture: it activates the point's receiver for one of its own, so any number run at once,
+    // and a cancel, which drops the capture's stream, ends it.
     coro::CoroStream<api::RecordCaptureProgress> record_capture(const api::RecordCaptureRequest& request) override {
         std::string dir = capture_dir();
         if (request.point() != api::INPUT && request.point() != api::ENVELOPE)
             throw CallError(Error::INVALID_ARGUMENT, "no such capture point");
         const double s = request.duration_s();
-        if (!(s > 0 && s <= CaptureCall::kMaxDurationS)) {  // NaN too
+        if (!(s > 0 && s <= CapturePoint::kMaxDurationS)) {  // NaN too
             throw CallError(Error::INVALID_ARGUMENT, "duration_s " + std::to_string(s) +
                                                          " isn't over 0 and at most " +
-                                                         std::to_string(CaptureCall::kMaxDurationS));
+                                                         std::to_string(CapturePoint::kMaxDurationS));
         }
         const std::string& name = request.name();
         if (name.empty() || name.front() == '.' || name.find_first_of(std::string_view("/\0", 2)) != name.npos)
             throw CallError(Error::INVALID_ARGUMENT, "name must be a file name, not starting with '.'");
-        auto [reports_tx, reports] = coro::mpsc_channel<CaptureCall::Report>(CaptureCall::kProgressQueue);
-        coro::MpscSender<CaptureCall> captures = m_live.captures.clone();
-        if (!co_await captures.send(CaptureCall{request, std::move(dir), std::move(reports_tx)}))
-            throw CallError(Error::INTERNAL, "the pipeline has stopped taking captures");
-        for (;;) {
-            auto report = co_await reports.recv();
-            if (!report) throw CallError(Error::INTERNAL, "the capture task ended without its last report");
-            if (!*report) throw report->error();
-            const bool last = (*report)->has_capture();
-            co_yield std::move(**report);
-            if (last) co_return;
-        }
+        const PipelineOutputs& out = m_live.outputs;
+        coro::CoroStream<api::RecordCaptureProgress> capture =
+            request.point() == api::INPUT
+                ? run_capture(out.input_point, out.input.activate(), request, std::move(dir))
+                : run_capture(out.envelope_point, out.envelope.activate(), request, std::move(dir));
+        while (auto report = co_await coro::next(capture)) co_yield std::move(*report);
     }
 
     coro::Coro<api::ListCapturesResponse> list_captures(const api::ListCapturesRequest&) override {
@@ -239,7 +231,7 @@ private:
         return dir;
     }
 
-    ApiReceivers m_live;
+    Live m_live;
     api::ReceiverInfo m_info;
 };
 
@@ -287,7 +279,7 @@ private:
 
 // One client's connection, serving the services the server has. The handlers are locals of this frame, so they
 // outlive serve().
-coro::Coro<void> serve_client(coro::WsStream ws, std::optional<ApiReceivers> live, api::ReceiverInfo info,
+coro::Coro<void> serve_client(coro::WsStream ws, std::optional<Live> live, api::ReceiverInfo info,
                               std::optional<AircraftHistory> history) {
     std::optional<ReceiverHandlers> receiver;
     std::optional<HistoryHandlers> history_handlers;
@@ -297,11 +289,16 @@ coro::Coro<void> serve_client(coro::WsStream ws, std::optional<ApiReceivers> liv
     co_await wsrpc::serve(std::move(ws), std::move(services));
 }
 
-coro::Coro<void> run(uint16_t port, std::optional<ApiReceivers> live, api::ReceiverInfo info,
+coro::Coro<void> run(uint16_t port, std::optional<Live> live, api::ReceiverInfo info,
                      std::optional<AircraftHistory> history) {
     coro::WsListener listener = co_await coro::WsListener::bind("0.0.0.0", port);
     std::string serves;
     if (live) {
+        const PipelineOutputs& out = live->outputs;
+        LOGF(INFO, "spectrum: computed while a client watches it, from as many blocks as it keeps up with");
+        LOGF(INFO, "capture: on a capture call while a capture directory is set, any number at once, up to %g s "
+             "of the input (as the source delivers it, at %g Hz) or of the envelope (rf32_le at %g Hz)",
+             CapturePoint::kMaxDurationS, out.input_point.rate_hz, out.envelope_point.rate_hz);
         const std::string dir = live->settings.rx.get().capture_dir();
         serves = "Receiver from " + info.source() + ", " +
                  (dir.empty() ? "captures off until a client sets a directory" : "captures into " + dir);
@@ -319,7 +316,7 @@ coro::Coro<void> run(uint16_t port, std::optional<ApiReceivers> live, api::Recei
             auto result = co_await coro::select(listener.accept(),
                                                 coro::when(!clients.empty(), [&] { return coro::next(clients); }));
             if (result.index() == 0) {
-                std::optional<ApiReceivers> client_live;
+                std::optional<Live> client_live;
                 if (live) client_live = live->clone();
                 std::optional<AircraftHistory> client_history;
                 if (history) client_history = history->clone();
@@ -341,45 +338,26 @@ coro::Coro<void> run(uint16_t port, std::optional<ApiReceivers> live, api::Recei
 
 }  // namespace
 
-ApiReceivers ApiReceivers::clone() const {
-    return {frames.resubscribe(), spectrum.resubscribe(), aircraft.clone(), input_status.clone(),
-            demand.clone(),       settings.clone(),       captures.clone()};
+PipelineOutputs PipelineOutputs::clone() const {
+    return {frames, aircraft.clone(), spectrum, input, envelope, input_point, envelope_point};
 }
 
-std::pair<ApiSenders, ApiReceivers> api_channels(api::Settings settings) {
-    auto [frames_tx, frames_rx] = coro::broadcast_channel<LiveFrames>(kLiveQueueItems);
-    auto [spectrum_tx, spectrum_rx] = coro::broadcast_channel<LiveSpectrumRow>(kLiveQueueItems);
-    auto [aircraft_tx, aircraft_rx] = coro::watch_channel(LiveAircraft{});
-    auto [status_tx, status_rx] = coro::watch_channel(std::optional<api::InputStatus>{});
-    auto [demand_tx, demand_rx] = coro::watch_channel(PipelineDemand{});
-    auto [settings_tx, settings_rx] = coro::watch_channel(std::move(settings));
-    auto [captures_tx, captures_rx] = coro::mpsc_channel<CaptureCall>(kCaptureQueue);
-    ApiSenders senders{.frames = std::move(frames_tx),
-                       .spectrum = std::move(spectrum_tx),
-                       .aircraft = std::move(aircraft_tx),
-                       .input_status = std::move(status_tx),
-                       .demand = std::move(demand_rx),
-                       .settings = settings_rx.clone(),
-                       .captures = std::move(captures_rx)};
-    ApiReceivers receivers{.frames = std::move(frames_rx),
-                           .spectrum = std::move(spectrum_rx),
-                           .aircraft = std::move(aircraft_rx),
-                           .input_status = std::move(status_rx),
-                           .demand = std::move(demand_tx),
-                           .settings = {std::move(settings_tx), std::move(settings_rx)},
-                           .captures = std::move(captures_tx)};
-    return {std::move(senders), std::move(receivers)};
-}
-
-void api_server_spawn(uint16_t port, std::chrono::nanoseconds default_interval, std::optional<ApiReceivers> live,
+void api_server_spawn(uint16_t port, std::chrono::nanoseconds default_interval, std::optional<ReceiverFeeds> live,
                       std::string source, std::optional<AircraftHistory> history) {
     api::ReceiverInfo info;
     info.set_source(std::move(source));
     info.set_default_interval_s(std::chrono::duration<double>(default_interval).count());
-    info.set_max_capture_s(CaptureCall::kMaxDurationS);
+    info.set_max_capture_s(CapturePoint::kMaxDurationS);
+    std::optional<Live> served;
+    if (live) {
+        auto [settings_tx, settings_rx] = coro::watch_channel(std::move(live->settings));
+        served = Live{.outputs = std::move(live->outputs),
+                      .input_status = std::move(live->input_status),
+                      .settings = {std::move(settings_tx), std::move(settings_rx)}};
+    }
     // Detached: run() accepts clients until the runtime's destructor cancels and drains it.
     coro::build_task()
         .name("ws_accept")
-        .spawn(run(port, std::move(live), std::move(info), std::move(history)))
+        .spawn(run(port, std::move(served), std::move(info), std::move(history)))
         .detach();
 }
