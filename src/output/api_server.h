@@ -55,6 +55,7 @@ struct PipelineOutputs {
 struct ReceiverFeeds {
     PipelineOutputs outputs;
     coro::WatchReceiver<std::optional<api::InputStatus>> input_status;  /**< unset until the input reports one */
+    coro::WatchReceiver<api::ReceiverPosition> receiver_position;  /**< NO_GPS for an input without a GPS */
     api::Settings settings;  /**< to start with, such as --capture-dir, from resolve_capture_dir() */
 };
 

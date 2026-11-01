@@ -155,7 +155,7 @@ build/Release/adsb --ws-port 8765 --history-db history.sqlite rtlsdr --gain 40
 # Simulated traffic over VITA-49/UDP: the receiver in one terminal...
 build/Release/adsb --ws-port 8765 vita49 --port 4991 --rate 10e6
 # ...the sender in another
-build/Release/vita49_send --rate 10e6 --dest-port 4991 sim --scenario scenarios/boston.json
+build/Release/vita49_send --dest-port 4991 sim --rate 10e6 --scenario scenarios/boston.json
 
 # No input: serve a recorded history database to the UI
 build/Release/adsb --ws-port 8765 --history-db history.sqlite serve
@@ -210,7 +210,7 @@ adsb/
     apps/
       filter_options.h  resampling-filter command-line options
       adsb/             the receiver: main.cpp (CLI), pipeline.{h,cpp} (demod loop, per-frame handling)
-      vita49_send/      VRT/UDP sender: main.cpp (CLI), rtlsdr_source / sim_source (the two sources),
+      vita49_send/      VRT/UDP sender: main.cpp (CLI), packetize / pace (adsb's sources), sim_source,
                         packet_sender (send loop), pace_stats (overrun reporting)
       adsb_sim_eval/    simulator -> demodulator detection statistics
   tests/      ctest tests, vrt_to_sigmf.py; tests/data holds captures (not in git)
@@ -529,7 +529,8 @@ flowchart TD
    - A polyphase FIR bank (`Np` phases × `taps`; the default is 64 × 32)
      resamples the complex input to `ADSB_SAMPLES_PER_SYMBOL` (12) samples
      per µs. Each output is the magnitude `|z|`.
-   - Output `m` sits at input position `m·ry/rx + 1/2 + 1/(2Np)`.
+   - Output `m` sits at input position `m·ry/rx + 1/2`, and the filter
+     phase nearest it is used.
      - The position is computed in closed form in 36-bit fixed point.
      - Its integer part gives the center sample, and its fractional part
        gives the filter phase.
@@ -1179,7 +1180,8 @@ to live data. The frame log and spectrum always show live data.
 
 `vita49_send` streams IQ as VRT IF Data packets over UDP, the way a VITA-49
 SDR front end would. It also sends periodic IF Context packets, which
-advertise the sample rate, RF frequency and bandwidth.
+advertise the sample rate, RF frequency, bandwidth and payload format. Its
+source is any of `adsb`'s, or the simulator.
 
 The wire format is described in
 [doc/design/vita49-format.md](doc/design/vita49-format.md). In
@@ -1187,65 +1189,75 @@ short:
 
 - no Class ID and no Trailer;
 - UTC + picosecond timestamps;
-- big-endian int16 IQ.
+- big-endian IQ, int16 by default or 32-bit float.
 
 Usage:
 
 ```sh
-vita49_send [--rate Hz] [--freq Hz] [--dest-host H] --dest-port P [--stream-id N]
-            [--samples-per-packet N] [--context-interval s] {rtlsdr|sim} [source options]
+vita49_send [--dest-host H] --dest-port P [--stream-id N] [--context-interval s]
+            [--stream-rate Hz] [--stream-format i16be|f32be] [--samples-per-packet N]
+            {file|vita49|rtlsdr|sidekiq|uhd|sim} [source options]
 ```
 
-The defaults are:
+`sidekiq` and `uhd` are there in builds with that radio's support, as for
+`adsb`. The defaults are:
 
 | Option | Default |
 |---|---|
-| `--rate` | 2.4e6 |
-| `--freq` | 1090e6 |
 | `--dest-host` | 127.0.0.1 |
 | `--stream-id` | 1 |
-| `--samples-per-packet` | 360 |
 | `--context-interval` | 1 s |
+| `--stream-rate` | the source's rate, not filtered |
+| `--stream-format` | `i16be` |
+| `--samples-per-packet` | 360 for `i16be`, 180 for `f32be` |
 
 It also takes `adsb`'s log options (`--log-level`, `--log-file`,
 `--log-file-level`, `--verbosity`).
 
-- **Packet size.** The default of 360 samples per packet keeps each datagram
-  (1460 B) within one Ethernet MTU.
+- **Packet size.** The default packet size keeps each datagram (1460 B)
+  within one Ethernet MTU.
 - **Timestamps.** Timestamps are anchored to the wall clock once, at the
   first packet. After that they advance by sample count, so they have no
   jitter.
+- **Payload format.** The context packets carry the Data Payload Format
+  field. `--no-payload-format` leaves it out, for a receiver that doesn't
+  take it, and goes only with `i16be`.
 
 ```mermaid
 flowchart LR
     subgraph source["source: one per subcommand"]
         direction TB
-        RTL["<b>rtlsdr</b><br/>blocking thread<br/>librtlsdr callback,<br/>encodes VRT packets"]
+        SRC["<b>file, vita49, rtlsdr,<br/>sidekiq, uhd</b><br/>adsb's source task"]
         GEN["<b>sim</b><br/>sim_generate task<br/>renders into packet payloads"]
     end
-    PAR["coro::parallel() parts<br/>--render-threads"]
+    PK["packetize task<br/>resamples into packet payloads"]
+    PAR["coro::parallel() parts"]
+    PAR2["coro::parallel() parts<br/>--render-threads"]
     subgraph udp_send["udp_send task"]
         direction TB
-        PACE["paced_sim_stream()<br/>holds each batch until due"] --> SEND["send_loop()<br/>one send per batch"]
+        PACE["pace() for a file,<br/>paced_sim_stream() for the sim<br/>hold each batch until due"]
+        SEND["send_loop()<br/>one send per batch"]
+        PACE --> SEND
     end
     MON["pace_monitor task<br/>drop warnings, once a second"]
     NET(["UDP to adsb vita49"])
 
-    GEN <-- "fork / join" --> PAR
+    SRC -- "IqBuffer, stitch()" --> PK
+    PK <-- "fork / join" --> PAR
+    PK -- "PacketBatch" --> PACE
+    GEN <-- "fork / join" --> PAR2
     GEN -- "mpsc, --queue-ms ahead" --> PACE
-    RTL -- "mpsc, 1024 packets, drops when full" --> SEND
     SEND --> NET
     SEND -. "PaceStats, watch" .-> MON
-    RTL & GEN & PACE -.-> MON
+    PK & GEN & PACE -.-> MON
 ```
 
-Each box is a task. The `rtlsdr` callback runs on coro's blocking pool
-(`spawn_blocking`). `paced_sim_stream()` runs in the send task's polls, and
-is there only with `sim`.
+Each box is a task. A live source's batches go straight to `send_loop()`:
+its device is the clock. `pace()` and `paced_sim_stream()` run in the send
+task's polls.
 
-- **Packets.** Both sources interleave the IF Context packets with the data.
-  The sim's batches are GSO batches of up to 44 packets. The `rtlsdr` source
-  sends one packet per batch.
+- **Packets.** Every source's data goes out in GSO batches of up to 44
+  packets, with the IF Context packets between them.
 - **Drops.** Every place that drops samples records it on the pace
   statistics (a watch channel), and so does the send loop for what it sent.
   The pace monitor turns the changes into one warning a second.
@@ -1253,30 +1265,42 @@ is there only with `sim`.
 The code in [src/apps/vita49_send](src/apps/vita49_send) is split
 by concern:
 
-- `rtlsdr_source` and `sim_source` are the two sources, each with its own
-  subcommand options.
-- `packet_sender` sends whichever source's stream it is given, and
-  `pace_stats` reports what a source dropped on overrun.
-- `main.cpp` holds the shared options and builds the chosen source's stream.
+- `packetize` resamples `adsb`'s sources into packets, and `pace` holds a
+  file's back to real time. `sim_source` is the simulator's own path.
+- `packet_sender` sends whichever stream it is given, and `pace_stats`
+  reports what a stage dropped.
+- `main.cpp` holds the shared options and builds the chosen source's chain.
 
 The packets and their timestamps come from
 [src/vrt/encode.h](src/vrt/encode.h), and they go out in the GSO batches of
 [src/net/datagram_batch.h](src/net/datagram_batch.h).
+[doc/design/source_sink.md](doc/design/source_sink.md) has the design.
 
-### `rtlsdr` source
+### `adsb`'s sources
 
-The `rtlsdr` source takes `--device`, `--gain`, `--buf-num` and `--buf-len`,
-as for `adsb rtlsdr`.
+`file`, `vita49`, `rtlsdr`, `sidekiq` and `uhd` take the same options as for
+`adsb` (see [Sources](#sources)), their `--rate` and `--freq` included. The
+context packets advertise the source's frequency.
 
-- The librtlsdr callback encodes each buffer into packets.
-- It hands the packets to a send task through a 1024-slot channel, which
-  absorbs a whole callback's burst.
-- The callback never blocks. If the channel is full, it drops packets and
-  warns.
-- The VRT packet counter still advances for a dropped packet, so a receiver
-  sees the gap.
-- If the dongle is unplugged, it reconnects as `adsb rtlsdr` does. The
-  timestamps skip the outage. A receiving `adsb vita49` stops after
+- **Resampling.** `packetize()` writes each output sample straight into its
+  packet's payload, in the wire format, through an I/Q resampling kernel
+  ([iq_resampler.h](src/dsp/iq_resampler.h)). Without `--stream-rate` the
+  kernel only converts the format.
+- **Filter.** With `--stream-rate` the kernel is a polyphase low-pass filter,
+  the anti-alias filter for the lower rate. `--stream-taps`,
+  `--stream-phases`, `--stream-cutoff`, `--stream-window` and
+  `--stream-kaiser-beta` design it. By default it has about
+  20 × r_in / r_out taps and a Kaiser window, with its cutoff at 0.4 of the
+  stream rate. Both rates must be whole numbers of Hz.
+- **Scale.** Full scale maps to full scale. An `i16be` output that saturates
+  is counted and logged.
+- **Gaps.** Samples missing from the source's stream end the packet being
+  filled short. The timestamps and packet counter move past them, so a
+  receiver sees the gap, and they are counted with the drops.
+- **Pacing.** A file has no clock, so `pace()` releases each batch when the
+  wall clock reaches its last sample. A live source is paced by its device.
+- **Reconnects.** A live source that reconnects, such as an unplugged
+  RTL-SDR, leaves a gap. A receiving `adsb vita49` stops after
   `--idle-timeout` seconds without packets (2 by default), so raise that, or
   set it to 0, for the receiver to ride out a reconnect.
 
@@ -1287,6 +1311,8 @@ The `sim` source renders simulated ADS-B traffic in-process
 
 | Option | Meaning |
 |---|---|
+| `--rate` | Sample rate in Hz, a whole number of at least 2e6, default 2.4e6 |
+| `--freq` | RF frequency the context packets advertise, default 1090e6; the signal is baseband |
 | `--scenario` | Scenario file, e.g. `scenarios/boston.json` (required) |
 | `--snr-db` | SNR, default 30 |
 | `--duration` | Seconds to run; 0 (the default) runs until Ctrl+C |

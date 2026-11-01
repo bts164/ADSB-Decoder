@@ -1182,6 +1182,204 @@ class InputStatus extends $pb.GeneratedMessage {
   void clearSummary() => $_clearField(8);
 }
 
+class WatchReceiverPositionRequest extends $pb.GeneratedMessage {
+  factory WatchReceiverPositionRequest() => create();
+
+  WatchReceiverPositionRequest._();
+
+  factory WatchReceiverPositionRequest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory WatchReceiverPositionRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'WatchReceiverPositionRequest',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
+      createEmptyInstance: create)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  WatchReceiverPositionRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  WatchReceiverPositionRequest copyWith(
+          void Function(WatchReceiverPositionRequest) updates) =>
+      super.copyWith(
+              (message) => updates(message as WatchReceiverPositionRequest))
+          as WatchReceiverPositionRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static WatchReceiverPositionRequest create() =>
+      WatchReceiverPositionRequest._();
+  @$core.override
+  WatchReceiverPositionRequest createEmptyInstance() => create();
+  static $pb.PbList<WatchReceiverPositionRequest> createRepeated() =>
+      $pb.PbList<WatchReceiverPositionRequest>();
+  @$core.pragma('dart2js:noInline')
+  static WatchReceiverPositionRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<WatchReceiverPositionRequest>(create);
+  static WatchReceiverPositionRequest? _defaultInstance;
+}
+
+class ReceiverPosition extends $pb.GeneratedMessage {
+  factory ReceiverPosition({
+    $core.double? t,
+    GpsState? state,
+    $core.double? lat,
+    $core.double? lon,
+    $core.double? altM,
+    $core.double? errorM,
+    $core.int? satellitesUsed,
+    $core.int? satellitesSeen,
+    $core.String? summary,
+  }) {
+    final result = create();
+    if (t != null) result.t = t;
+    if (state != null) result.state = state;
+    if (lat != null) result.lat = lat;
+    if (lon != null) result.lon = lon;
+    if (altM != null) result.altM = altM;
+    if (errorM != null) result.errorM = errorM;
+    if (satellitesUsed != null) result.satellitesUsed = satellitesUsed;
+    if (satellitesSeen != null) result.satellitesSeen = satellitesSeen;
+    if (summary != null) result.summary = summary;
+    return result;
+  }
+
+  ReceiverPosition._();
+
+  factory ReceiverPosition.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ReceiverPosition.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ReceiverPosition',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
+      createEmptyInstance: create)
+    ..aD(1, _omitFieldNames ? '' : 't')
+    ..aE<GpsState>(2, _omitFieldNames ? '' : 'state',
+        enumValues: GpsState.values)
+    ..aD(3, _omitFieldNames ? '' : 'lat')
+    ..aD(4, _omitFieldNames ? '' : 'lon')
+    ..aD(5, _omitFieldNames ? '' : 'altM')
+    ..aD(6, _omitFieldNames ? '' : 'errorM')
+    ..aI(7, _omitFieldNames ? '' : 'satellitesUsed',
+        fieldType: $pb.PbFieldType.OU3)
+    ..aI(8, _omitFieldNames ? '' : 'satellitesSeen',
+        fieldType: $pb.PbFieldType.OU3)
+    ..aOS(9, _omitFieldNames ? '' : 'summary')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ReceiverPosition clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ReceiverPosition copyWith(void Function(ReceiverPosition) updates) =>
+      super.copyWith((message) => updates(message as ReceiverPosition))
+          as ReceiverPosition;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ReceiverPosition create() => ReceiverPosition._();
+  @$core.override
+  ReceiverPosition createEmptyInstance() => create();
+  static $pb.PbList<ReceiverPosition> createRepeated() =>
+      $pb.PbList<ReceiverPosition>();
+  @$core.pragma('dart2js:noInline')
+  static ReceiverPosition getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ReceiverPosition>(create);
+  static ReceiverPosition? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.double get t => $_getN(0);
+  @$pb.TagNumber(1)
+  set t($core.double value) => $_setDouble(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasT() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearT() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  GpsState get state => $_getN(1);
+  @$pb.TagNumber(2)
+  set state(GpsState value) => $_setField(2, value);
+  @$pb.TagNumber(2)
+  $core.bool hasState() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearState() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.double get lat => $_getN(2);
+  @$pb.TagNumber(3)
+  set lat($core.double value) => $_setDouble(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasLat() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearLat() => $_clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.double get lon => $_getN(3);
+  @$pb.TagNumber(4)
+  set lon($core.double value) => $_setDouble(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasLon() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearLon() => $_clearField(4);
+
+  @$pb.TagNumber(5)
+  $core.double get altM => $_getN(4);
+  @$pb.TagNumber(5)
+  set altM($core.double value) => $_setDouble(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasAltM() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearAltM() => $_clearField(5);
+
+  @$pb.TagNumber(6)
+  $core.double get errorM => $_getN(5);
+  @$pb.TagNumber(6)
+  set errorM($core.double value) => $_setDouble(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasErrorM() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearErrorM() => $_clearField(6);
+
+  @$pb.TagNumber(7)
+  $core.int get satellitesUsed => $_getIZ(6);
+  @$pb.TagNumber(7)
+  set satellitesUsed($core.int value) => $_setUnsignedInt32(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasSatellitesUsed() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearSatellitesUsed() => $_clearField(7);
+
+  @$pb.TagNumber(8)
+  $core.int get satellitesSeen => $_getIZ(7);
+  @$pb.TagNumber(8)
+  set satellitesSeen($core.int value) => $_setUnsignedInt32(7, value);
+  @$pb.TagNumber(8)
+  $core.bool hasSatellitesSeen() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearSatellitesSeen() => $_clearField(8);
+
+  @$pb.TagNumber(9)
+  $core.String get summary => $_getSZ(8);
+  @$pb.TagNumber(9)
+  set summary($core.String value) => $_setString(8, value);
+  @$pb.TagNumber(9)
+  $core.bool hasSummary() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearSummary() => $_clearField(9);
+}
+
 class WatchSpectrumRequest extends $pb.GeneratedMessage {
   factory WatchSpectrumRequest() => create();
 
@@ -2089,12 +2287,14 @@ class Snapshot extends $pb.GeneratedMessage {
     $core.double? tMin,
     $core.double? tMax,
     $core.Iterable<Snapshot_Entry>? aircraft,
+    ReceiverPosition? receiver,
   }) {
     final result = create();
     if (t != null) result.t = t;
     if (tMin != null) result.tMin = tMin;
     if (tMax != null) result.tMax = tMax;
     if (aircraft != null) result.aircraft.addAll(aircraft);
+    if (receiver != null) result.receiver = receiver;
     return result;
   }
 
@@ -2116,6 +2316,8 @@ class Snapshot extends $pb.GeneratedMessage {
     ..aD(3, _omitFieldNames ? '' : 'tMax')
     ..pPM<Snapshot_Entry>(4, _omitFieldNames ? '' : 'aircraft',
         subBuilder: Snapshot_Entry.create)
+    ..aOM<ReceiverPosition>(5, _omitFieldNames ? '' : 'receiver',
+        subBuilder: ReceiverPosition.create)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -2166,6 +2368,17 @@ class Snapshot extends $pb.GeneratedMessage {
 
   @$pb.TagNumber(4)
   $pb.PbList<Snapshot_Entry> get aircraft => $_getList(3);
+
+  @$pb.TagNumber(5)
+  ReceiverPosition get receiver => $_getN(4);
+  @$pb.TagNumber(5)
+  set receiver(ReceiverPosition value) => $_setField(5, value);
+  @$pb.TagNumber(5)
+  $core.bool hasReceiver() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearReceiver() => $_clearField(5);
+  @$pb.TagNumber(5)
+  ReceiverPosition ensureReceiver() => $_ensure(4);
 }
 
 class TrackPoint extends $pb.GeneratedMessage {
@@ -2831,6 +3044,128 @@ class Heatmap extends $pb.GeneratedMessage {
   $pb.PbList<$core.int> get cellCount => $_getList(2);
 }
 
+class GetReceiverPositionsRequest extends $pb.GeneratedMessage {
+  factory GetReceiverPositionsRequest({
+    $core.double? from,
+    $core.double? to,
+  }) {
+    final result = create();
+    if (from != null) result.from = from;
+    if (to != null) result.to = to;
+    return result;
+  }
+
+  GetReceiverPositionsRequest._();
+
+  factory GetReceiverPositionsRequest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory GetReceiverPositionsRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'GetReceiverPositionsRequest',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
+      createEmptyInstance: create)
+    ..aD(1, _omitFieldNames ? '' : 'from')
+    ..aD(2, _omitFieldNames ? '' : 'to')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  GetReceiverPositionsRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  GetReceiverPositionsRequest copyWith(
+          void Function(GetReceiverPositionsRequest) updates) =>
+      super.copyWith(
+              (message) => updates(message as GetReceiverPositionsRequest))
+          as GetReceiverPositionsRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static GetReceiverPositionsRequest create() =>
+      GetReceiverPositionsRequest._();
+  @$core.override
+  GetReceiverPositionsRequest createEmptyInstance() => create();
+  static $pb.PbList<GetReceiverPositionsRequest> createRepeated() =>
+      $pb.PbList<GetReceiverPositionsRequest>();
+  @$core.pragma('dart2js:noInline')
+  static GetReceiverPositionsRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<GetReceiverPositionsRequest>(create);
+  static GetReceiverPositionsRequest? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.double get from => $_getN(0);
+  @$pb.TagNumber(1)
+  set from($core.double value) => $_setDouble(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasFrom() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearFrom() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.double get to => $_getN(1);
+  @$pb.TagNumber(2)
+  set to($core.double value) => $_setDouble(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasTo() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearTo() => $_clearField(2);
+}
+
+class ReceiverPositions extends $pb.GeneratedMessage {
+  factory ReceiverPositions({
+    $core.Iterable<ReceiverPosition>? positions,
+  }) {
+    final result = create();
+    if (positions != null) result.positions.addAll(positions);
+    return result;
+  }
+
+  ReceiverPositions._();
+
+  factory ReceiverPositions.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory ReceiverPositions.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ReceiverPositions',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
+      createEmptyInstance: create)
+    ..pPM<ReceiverPosition>(1, _omitFieldNames ? '' : 'positions',
+        subBuilder: ReceiverPosition.create)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ReceiverPositions clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ReceiverPositions copyWith(void Function(ReceiverPositions) updates) =>
+      super.copyWith((message) => updates(message as ReceiverPositions))
+          as ReceiverPositions;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ReceiverPositions create() => ReceiverPositions._();
+  @$core.override
+  ReceiverPositions createEmptyInstance() => create();
+  static $pb.PbList<ReceiverPositions> createRepeated() =>
+      $pb.PbList<ReceiverPositions>();
+  @$core.pragma('dart2js:noInline')
+  static ReceiverPositions getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ReceiverPositions>(create);
+  static ReceiverPositions? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $pb.PbList<ReceiverPosition> get positions => $_getList(0);
+}
+
 /// The live pipeline. Served with a live input, not by `serve`.
 class ReceiverApi {
   final $pb.RpcClient _client;
@@ -2859,6 +3194,12 @@ class ReceiverApi {
           $pb.ClientContext? ctx, WatchInputStatusRequest request) =>
       _client.invoke<InputStatus>(
           ctx, 'Receiver', 'WatchInputStatus', request, InputStatus());
+
+  /// The receiver's position and its GPS's state, now and at each change.
+  $async.Future<ReceiverPosition> watchReceiverPosition(
+          $pb.ClientContext? ctx, WatchReceiverPositionRequest request) =>
+      _client.invoke<ReceiverPosition>(ctx, 'Receiver', 'WatchReceiverPosition',
+          request, ReceiverPosition());
 
   /// The spectrum's rows as they're computed. The server computes them only while one of these calls is open.
   $async.Future<SpectrumRow> watchSpectrum(
@@ -2921,6 +3262,12 @@ class HistoryApi {
   $async.Future<Heatmap> getHeatmap(
           $pb.ClientContext? ctx, GetHeatmapRequest request) =>
       _client.invoke<Heatmap>(ctx, 'History', 'GetHeatmap', request, Heatmap());
+
+  /// The receiver's positions recorded in a time range.
+  $async.Future<ReceiverPositions> getReceiverPositions(
+          $pb.ClientContext? ctx, GetReceiverPositionsRequest request) =>
+      _client.invoke<ReceiverPositions>(
+          ctx, 'History', 'GetReceiverPositions', request, ReceiverPositions());
 }
 
 const $core.bool _omitFieldNames =

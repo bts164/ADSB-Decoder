@@ -24,6 +24,25 @@ constexpr uint32_t kCifChangeIndicator = 1u << 31;
 constexpr uint32_t kCifBandwidth = 1u << 29;
 constexpr uint32_t kCifRfReferenceFrequency = 1u << 27;
 constexpr uint32_t kCifSampleRate = 1u << 21;
+constexpr uint32_t kCifDataPayloadFormat = 1u << 15;
+
+// The data payloads this profile sends: complex Cartesian I/Q, each component a 16-bit signed integer or a
+// 32-bit IEEE float, big-endian.
+enum class PayloadFormat { i16, f32 };
+
+// 32-bit words per I/Q pair.
+constexpr size_t payload_words_per_sample(PayloadFormat format) { return format == PayloadFormat::i16 ? 1 : 2; }
+
+// The Data Payload Format field's first word for `format`; its second word is 0 (no repeats, a vector size of 1).
+// Bits 30-29 are 01 for complex Cartesian, bits 28-24 the item format (0 signed fixed point, 0x0E IEEE single),
+// bits 11-6 the packing field size - 1 and bits 5-0 the item size - 1. Bit 31 is 0, processing-efficient
+// packing, which is the same for items that fill their 32-bit words.
+constexpr uint32_t payload_format_word(PayloadFormat format) {
+    return format == PayloadFormat::i16 ? (1u << 29) | (15u << 6) | 15u : (1u << 29) | (0x0Eu << 24) | (31u << 6) | 31u;
+}
+// The bits of that word payload_format_word() sets: the rest (packing, tags, the fixed-point radix point) don't
+// change how the items are read.
+constexpr uint32_t kPayloadFormatItemMask = (3u << 29) | (0x1Fu << 24) | 0xFFFu;
 
 constexpr uint64_t kPsPerSec = 1'000'000'000'000;
 

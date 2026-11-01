@@ -206,6 +206,8 @@ class AircraftSnapshot {
   final double? endS;
   final Map<String, AircraftRecord> aircraft;
   final Map<String, List<TrailPoint>> trails;
+  /// The receiver at timeS; null where nothing was recording it.
+  final ReceiverPosition? receiver;
 
   AircraftSnapshot({
     required this.timeS,
@@ -213,6 +215,7 @@ class AircraftSnapshot {
     required this.endS,
     required this.aircraft,
     required this.trails,
+    required this.receiver,
   });
 
   factory AircraftSnapshot.fromProto(api.Snapshot s) {
@@ -231,6 +234,7 @@ class AircraftSnapshot {
       endS: s.hasTMax() ? s.tMax : null,
       aircraft: aircraft,
       trails: trails,
+      receiver: s.hasReceiver() ? ReceiverPosition.fromProto(s.receiver) : null,
     );
   }
 }
@@ -306,5 +310,42 @@ class InputStatus {
     if (s.windowS <= 0) return 0;
     final d = (s.streamS - s.lostS - s.droppedS) / s.windowS;
     return d.clamp(0.0, 1.0).toDouble();
+  }
+}
+
+/// The receiver's position and its GPS's state (api.ReceiverPosition): live from the position watch, at each
+/// change, or from a history snapshot.
+class ReceiverPosition {
+  ReceiverPosition.fromProto(api.ReceiverPosition p)
+      : state = p.state,
+        timeS = p.t,
+        position = p.hasLat() && p.hasLon() ? LatLng(p.lat, p.lon) : null,
+        altM = p.hasAltM() ? p.altM : null,
+        errorM = p.hasErrorM() ? p.errorM : null,
+        satellitesUsed = p.hasSatellitesUsed() ? p.satellitesUsed : null,
+        satellitesSeen = p.hasSatellitesSeen() ? p.satellitesSeen : null,
+        summary = p.summary;
+
+  final api.GpsState state;
+  /// Unix s, when this state was reached or reported.
+  final double timeS;
+  /// With a fix.
+  final LatLng? position;
+  final double? altM;
+  /// gpsd's horizontal error estimate.
+  final double? errorM;
+  final int? satellitesUsed;
+  final int? satellitesSeen;
+  /// Empty from the history, which doesn't keep it.
+  final String summary;
+
+  bool get hasFix => (state == api.GpsState.FIX_2D || state == api.GpsState.FIX_3D) && position != null;
+
+  /// Range (m) and bearing (degrees true, 0-360) from the receiver to `to`; null without a fix.
+  ({double rangeM, double bearingDeg})? rangeBearingTo(LatLng to) {
+    final from = position;
+    if (!hasFix || from == null) return null;
+    const distance = Distance(roundResult: false);
+    return (rangeM: distance.distance(from, to), bearingDeg: (distance.bearing(from, to) + 360) % 360);
   }
 }

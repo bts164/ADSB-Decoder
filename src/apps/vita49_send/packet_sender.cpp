@@ -19,11 +19,12 @@ void log_pace_summary(const PaceStats& stats, double elapsed_s, double rate_hz) 
     const uint64_t overrun = stats.overrun();
     LOGF(LEVEL(overrun > 0 ? absl::LogSeverity::kWarning : absl::LogSeverity::kInfo),
          "sent %u samples in %.2f s: %.1f Msps (%.1f%% of the %.1f Msps requested); %u samples (%.2f%%) "
-         "dropped on overrun (%u render too slow, %u send queue full, %u sent too late); %.2f s spent in socket "
-         "sends",
+         "dropped on overrun (%u render too slow, %u send queue full, %u sent too late, %u missing from the "
+         "source); %u samples clipped; %.2f s spent in socket sends",
          stats.sent, elapsed_s, sent_rate / 1e6, sent_rate / rate_hz * 100, rate_hz / 1e6, overrun,
          100.0 * overrun / std::max<uint64_t>(stats.sent + overrun, 1), stats.overrun_render,
-         stats.overrun_queue_full, stats.overrun_late_send, duration<double>(stats.send_wait).count());
+         stats.overrun_queue_full, stats.overrun_late_send, stats.overrun_gap, stats.clipped,
+         duration<double>(stats.send_wait).count());
 }
 
 }  // namespace

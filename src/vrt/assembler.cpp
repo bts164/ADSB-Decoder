@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <stdexcept>
 #include <string>
 
@@ -21,6 +22,7 @@ int cif0_words(int bit) {
 
 struct ContextFields {
     std::optional<double> sample_rate_hz, rf_freq_hz;
+    std::optional<uint32_t> payload_format;  // the Data Payload Format field's first word
 };
 
 // nullopt if the CIF0 words run past the end of the packet.
@@ -39,6 +41,7 @@ std::optional<ContextFields> parse_context(std::span<const uint8_t> d) {
             if (flag == kCifRfReferenceFrequency) out.rf_freq_hz = hz;
             if (flag == kCifSampleRate) out.sample_rate_hz = hz;
         }
+        if (flag == kCifDataPayloadFormat) out.payload_format = load_be32(&d[offset]);
         offset += bytes;
     }
     return out;
@@ -97,6 +100,16 @@ Assembler::Kind Assembler::push(std::span<const uint8_t> d) {
             }
         }
         if (ctx->rf_freq_hz) m_rf_freq_hz = ctx->rf_freq_hz;
+        // Without the field the payload is taken as int16, which is what a sender that leaves it out
+        // (vita49_send --no-payload-format) sends.
+        if (ctx->payload_format &&
+            (*ctx->payload_format & kPayloadFormatItemMask) != payload_format_word(PayloadFormat::i16)) {
+            char word[16];
+            std::snprintf(word, sizeof word, "0x%08x", *ctx->payload_format);
+            throw std::runtime_error(std::string("the stream's payload is not 16-bit complex I/Q (Data Payload "
+                                                 "Format ") + word + "); only that is received (vita49_send "
+                                     "--stream-format i16be)");
+        }
         return Kind::Context;
     }
 

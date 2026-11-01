@@ -1,6 +1,7 @@
 #include "output/aircraft_history.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <deque>
@@ -12,6 +13,8 @@
 #include <vector>
 
 #include <coro/stream.h>
+#include <coro/sync/select.h>
+#include <coro/sync/sleep.h>
 #include <coro/task/spawn_blocking.h>
 #include <sqlite3.h>
 #include <xtensor/xbuilder.hpp>
@@ -33,7 +36,13 @@ constexpr int kHistoryHeatmapMaxCells = 512;
 // Most track points a snapshot carries per aircraft (the newest ones).
 constexpr size_t kHistoryMaxTrackPoints = 1000;
 // The schema's version, kept in the file's PRAGMA user_version. Files from before the protobuf API have 0.
-constexpr int kSchemaVersion = 2;
+constexpr int kSchemaVersion = 3;
+// The version before receiver_positions, upgraded in place: the table is new and nothing else changed.
+constexpr int kUpgradableVersion = 2;
+// record_receiver_positions() writes a row after a move of more than this, in m...
+constexpr double kPositionMoveM = 25;
+// ...and after this long without one.
+constexpr auto kPositionEvery = std::chrono::seconds(60);
 
 // The statement is finalized on every exit path.
 struct Statement {
@@ -162,8 +171,14 @@ public:
     std::optional<api::AircraftHistory> aircraft(const api::GetAircraftHistoryRequest& req);
     std::optional<api::Activity> activity(const api::GetActivityRequest& req);
     std::optional<api::Heatmap> heatmap(const api::GetHeatmapRequest& req);
+    void insert_position(const api::ReceiverPosition& row);
+    std::optional<api::ReceiverPositions> positions(const api::GetReceiverPositionsRequest& req);
 
 private:
+    // Fills a ReceiverPosition from the columns t, state, lat, lon, alt_m, error_m, satellites_used,
+    // satellites_seen.
+    static api::ReceiverPosition position_row(sqlite3_stmt* stmt);
+
     explicit Db(sqlite3* db) : m_db(db) {}
 
     sqlite3* m_db;
@@ -184,7 +199,7 @@ std::optional<AircraftHistory::Db> AircraftHistory::Db::open(const std::string& 
     const std::optional<int64_t> tables =
         query_int(conn, "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'aircraft_updates';");
     if (!version || !tables) return std::nullopt;
-    if (*version != kSchemaVersion && (*version != 0 || *tables != 0)) {
+    if (*version != kSchemaVersion && *version != kUpgradableVersion && (*version != 0 || *tables != 0)) {
         LOGF(ERROR, "history database %s is from %s adsb (schema version %d; this one reads %d): record to a new "
              "file", db_path, *version > kSchemaVersion ? "a newer" : "an older", *version, kSchemaVersion);
         return std::nullopt;
@@ -223,6 +238,17 @@ std::optional<AircraftHistory::Db> AircraftHistory::Db::open(const std::string& 
         // (t, icao) rather than just t, so AircraftHistory::activity() reads only the index.
         "CREATE INDEX IF NOT EXISTS idx_aircraft_updates_t_icao ON aircraft_updates(t, icao);"
         "CREATE INDEX IF NOT EXISTS idx_aircraft_updates_icao_t ON aircraft_updates(icao, t);"
+        // t is the system clock's, as aircraft_updates.t is, and state an api::GpsState.
+        "CREATE TABLE IF NOT EXISTS receiver_positions ("
+        "  t REAL NOT NULL PRIMARY KEY,"
+        "  state INTEGER NOT NULL,"
+        "  lat REAL,"
+        "  lon REAL,"
+        "  alt_m REAL,"
+        "  error_m REAL,"
+        "  satellites_used INTEGER,"
+        "  satellites_seen INTEGER"
+        ");"
         "PRAGMA user_version = " +
         std::to_string(kSchemaVersion) + ";";
     char* err = nullptr;
@@ -231,6 +257,9 @@ std::optional<AircraftHistory::Db> AircraftHistory::Db::open(const std::string& 
         sqlite3_free(err);
         return std::nullopt;
     }
+    if (*version == kUpgradableVersion)
+        LOGF(INFO, "history database %s: upgraded from schema version %d to %d, adding the receiver's positions",
+             db_path, *version, kSchemaVersion);
 
     if (sqlite3_prepare_v2(conn,
                            "INSERT INTO aircraft_updates (t, icao, lat, lon, altitude_ft, ground_speed_kt, "
@@ -325,6 +354,14 @@ std::optional<api::Snapshot> AircraftHistory::Db::snapshot(const api::GetSnapsho
     for (int i = 0; i < msg.aircraft_size(); i++) {
         for (api::TrackPoint& p : track[i]) *msg.mutable_aircraft(i)->add_track() = std::move(p);
     }
+
+    Statement receiver;
+    if (!prepare(m_db, receiver, "SELECT t, state, lat, lon, alt_m, error_m, satellites_used, satellites_seen "
+                           "FROM receiver_positions WHERE t <= ?1 AND t > ?2 ORDER BY t DESC LIMIT 1;"))
+        return std::nullopt;
+    sqlite3_bind_double(receiver.stmt, 1, t);
+    sqlite3_bind_double(receiver.stmt, 2, t - kPositionHoldsS);
+    if (sqlite3_step(receiver.stmt) == SQLITE_ROW) *msg.mutable_receiver() = position_row(receiver.stmt);
     return msg;
 }
 
@@ -444,6 +481,52 @@ std::optional<api::Heatmap> AircraftHistory::Db::heatmap(const api::GetHeatmapRe
     return msg;
 }
 
+void AircraftHistory::Db::insert_position(const api::ReceiverPosition& row) {
+    Statement insert;
+    if (!prepare(m_db, insert, "INSERT OR REPLACE INTO receiver_positions (t, state, lat, lon, alt_m, error_m, "
+                         "satellites_used, satellites_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?);"))
+        return;
+    sqlite3_bind_double(insert.stmt, 1, row.t());
+    sqlite3_bind_int(insert.stmt, 2, row.state());
+    bind_double(insert.stmt, 3, row.has_lat(), row.lat());
+    bind_double(insert.stmt, 4, row.has_lon(), row.lon());
+    bind_double(insert.stmt, 5, row.has_alt_m(), row.alt_m());
+    bind_double(insert.stmt, 6, row.has_error_m(), row.error_m());
+    bind_int(insert.stmt, 7, row.has_satellites_used(), row.satellites_used());
+    bind_int(insert.stmt, 8, row.has_satellites_seen(), row.satellites_seen());
+    if (sqlite3_step(insert.stmt) != SQLITE_DONE)
+        LOGF(ERROR, "history position insert failed: %s", sqlite3_errmsg(m_db));
+}
+
+std::optional<api::ReceiverPositions> AircraftHistory::Db::positions(const api::GetReceiverPositionsRequest& req) {
+    TRACE_ZONE("history_positions");
+    Statement rows;
+    // From the row in effect at `from`, the latest at or before it, so the range starts with a known state.
+    if (!prepare(m_db, rows, "SELECT t, state, lat, lon, alt_m, error_m, satellites_used, satellites_seen "
+                       "FROM receiver_positions WHERE t <= ?2 AND t >= coalesce("
+                       "(SELECT max(t) FROM receiver_positions WHERE t <= ?1), ?1) ORDER BY t;"))
+        return std::nullopt;
+    sqlite3_bind_double(rows.stmt, 1, req.has_from() ? req.from() : std::numeric_limits<double>::lowest());
+    sqlite3_bind_double(rows.stmt, 2, req.has_to() ? req.to() : std::numeric_limits<double>::max());
+    api::ReceiverPositions msg;
+    while (sqlite3_step(rows.stmt) == SQLITE_ROW) *msg.add_positions() = position_row(rows.stmt);
+    return msg;
+}
+
+api::ReceiverPosition AircraftHistory::Db::position_row(sqlite3_stmt* stmt) {
+    api::ReceiverPosition p;
+    p.set_t(sqlite3_column_double(stmt, 0));
+    const int state = sqlite3_column_int(stmt, 1);
+    p.set_state(api::GpsState_IsValid(state) ? static_cast<api::GpsState>(state) : api::GPS_STATE_UNSPECIFIED);
+    if (!is_null(stmt, 2)) p.set_lat(sqlite3_column_double(stmt, 2));
+    if (!is_null(stmt, 3)) p.set_lon(sqlite3_column_double(stmt, 3));
+    if (!is_null(stmt, 4)) p.set_alt_m(sqlite3_column_double(stmt, 4));
+    if (!is_null(stmt, 5)) p.set_error_m(sqlite3_column_double(stmt, 5));
+    if (!is_null(stmt, 6)) p.set_satellites_used(static_cast<uint32_t>(sqlite3_column_int64(stmt, 6)));
+    if (!is_null(stmt, 7)) p.set_satellites_seen(static_cast<uint32_t>(sqlite3_column_int64(stmt, 7)));
+    return p;
+}
+
 std::optional<AircraftHistory> AircraftHistory::open(const std::string& db_path) {
     std::optional<Db> db = Db::open(db_path);
     if (!db) return std::nullopt;
@@ -456,6 +539,10 @@ std::optional<AircraftHistory> AircraftHistory::open(const std::string& db_path)
 coro::Coro<void> AircraftHistory::insert(std::vector<api::Aircraft> rows) {
     // Fails only once the history task has stopped, at runtime shutdown.
     (void)co_await m_tx.send(Insert{std::move(rows)});
+}
+
+coro::Coro<void> AircraftHistory::insert_position(api::ReceiverPosition row) {
+    (void)co_await m_tx.send(InsertPosition{std::move(row)});
 }
 
 template <typename Query, typename Result, typename Req>
@@ -483,6 +570,10 @@ coro::Coro<std::optional<api::Heatmap>> AircraftHistory::heatmap(api::GetHeatmap
     return ask<Heatmap, api::Heatmap>(std::move(req));
 }
 
+coro::Coro<std::optional<api::ReceiverPositions>> AircraftHistory::positions(api::GetReceiverPositionsRequest req) {
+    return ask<Positions, api::ReceiverPositions>(std::move(req));
+}
+
 void AircraftHistory::run(coro::MpscReceiver<Request>& rx, Db& db) {
     auto handle = [&db](Request& req) {
         // A query that throws drops its reply sender, so its caller gets nullopt. One whose caller has gone,
@@ -502,6 +593,10 @@ void AircraftHistory::run(coro::MpscReceiver<Request>& rx, Db& db) {
                            [&](Heatmap& r) {
                                if (!r.reply.is_closed()) (void)r.reply.send(db.heatmap(r.req));
                            },
+                           [&](InsertPosition& r) { db.insert_position(r.row); },
+                           [&](Positions& r) {
+                               if (!r.reply.is_closed()) (void)r.reply.send(db.positions(r.req));
+                           },
                        },
                        req);
         } catch (const std::exception& e) {
@@ -513,8 +608,31 @@ void AircraftHistory::run(coro::MpscReceiver<Request>& rx, Db& db) {
     } catch (const coro::TaskCancelled&) {
         // The runtime is shutting down. try_recv() isn't a cancellation point, so the rows already sent can
         // still be written; the queries are dropped, and their callers get nullopt.
-        while (auto req = rx.try_recv())
+        while (auto req = rx.try_recv()) {
             if (auto* insert = std::get_if<Insert>(&*req)) db.insert(insert->rows);
+            if (auto* insert = std::get_if<InsertPosition>(&*req)) db.insert_position(insert->row);
+        }
         throw;
+    }
+}
+
+coro::Coro<void> record_receiver_positions(coro::WatchReceiver<api::ReceiverPosition> position,
+                                           AircraftHistory history) {
+    using std::chrono::steady_clock;
+    std::optional<api::ReceiverPosition> written;
+    steady_clock::time_point written_at;
+    for (;;) {
+        api::ReceiverPosition now = *position.borrow_and_update();
+        if (!written || now.state() != written->state() || distance_m(*written, now) > kPositionMoveM ||
+            steady_clock::now() - written_at >= kPositionEvery) {
+            now.set_t(std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count());
+            co_await history.insert_position(now);
+            written = std::move(now);
+            written_at = steady_clock::now();
+        }
+        const auto due = written_at + kPositionEvery - steady_clock::now();
+        auto woke = co_await coro::select(position.changed(), coro::sleep_for(due));
+        // With the watch's sender gone, the minute's row is all that's left to write.
+        if (woke.index() == 0 && !std::get<0>(woke).value) co_await coro::sleep_for(due);
     }
 }

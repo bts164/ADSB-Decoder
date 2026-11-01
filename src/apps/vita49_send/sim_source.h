@@ -24,9 +24,10 @@ struct SimStreamParams {
     double duration_s;  // <= 0: until the stream is dropped
     double rf_freq_hz;  // advertised in the context packet; the simulated signal is baseband
     double context_interval_s;
+    bool payload_format;  // send the context's Data Payload Format field
     double queue_s;  // how far ahead of real time the generator may render
 
-    // The sim subcommand's options: scenario, duration, signal model, rendering and queue.
+    // The sim subcommand's options: rate, frequency, scenario, duration, signal model, rendering and queue.
     static void add_options(argparse::ArgumentParser& cmd);
     // Loads the scenario too. `program` is the top-level parser, for the options every source shares; `cmd` is
     // the sim subcommand's. Throws std::invalid_argument for a bad option or scenario.

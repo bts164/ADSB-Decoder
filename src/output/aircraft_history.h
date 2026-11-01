@@ -10,13 +10,15 @@
 #include <coro/coro.h>
 #include <coro/sync/mpsc.h>
 #include <coro/sync/oneshot.h>
+#include <coro/sync/watch.h>
 
 #include "api/convert.h"
 
 /**
  * @file
  * Aircraft history in a SQLite file: every published aircraft update, written live, and read back as the
- * state of the sky at any past time (AircraftHistory::snapshot()) for the UI's time scrubber. Each query
+ * state of the sky at any past time (AircraftHistory::snapshot()) for the UI's time scrubber. Beside them, the
+ * receiver's position over time (record_receiver_positions()). Each query
  * takes and returns the UI API's messages (proto/adsb/api/v1/api.proto).
  *
  * One task on a blocking-pool thread owns the database and runs every write and query in turn, as requests
@@ -26,7 +28,8 @@
  *
  * A query waits behind whatever is ahead of it, a long heatmap included, and so do the writes.
  *
- * The file records its schema's version, and a file of another version is refused rather than misread.
+ * The file records its schema's version. A version 2 file, from before the receiver's positions, gains their
+ * table; a file of any other version is refused rather than misread.
  */
 
 /**
@@ -53,10 +56,14 @@ public:
      */
     coro::Coro<void> insert(std::vector<api::Aircraft> rows);
 
+    /** Appends one row of the receiver's position, at `row.t`, replacing one at the same time. */
+    coro::Coro<void> insert_position(api::ReceiverPosition row);
+
     /**
      * The sky at `req.t` (default: the latest update): each aircraft updated in the kHistorySnapshotWindowS
      * before `t`, with its latest state at `t` and its positions in the window, oldest first. `t_min`/`t_max`
-     * span the whole database, and are unset when it's empty.
+     * span the whole database, and are unset when it's empty. `receiver` is the receiver's position at `t`: the
+     * latest row at or before it, if less than kPositionHoldsS old, and otherwise unset.
      */
     [[nodiscard]] coro::Coro<std::optional<api::Snapshot>> snapshot(api::GetSnapshotRequest req);
 
@@ -93,6 +100,15 @@ public:
      */
     [[nodiscard]] coro::Coro<std::optional<api::Heatmap>> heatmap(api::GetHeatmapRequest req);
 
+    /**
+     * The receiver's positions from `req.from` to `req.to` (default: the whole database), oldest first, with the
+     * row in effect at `from` first, if any. Each row's `summary` is empty: the table doesn't keep it.
+     */
+    [[nodiscard]] coro::Coro<std::optional<api::ReceiverPositions>> positions(api::GetReceiverPositionsRequest req);
+
+    /** How long a position row holds, with no row after it: the recorder writes one a minute. */
+    static constexpr double kPositionHoldsS = 90;
+
 private:
     // Requests a handle can send. A query carries the sender for its reply.
     template <typename T>
@@ -116,7 +132,14 @@ private:
         api::GetHeatmapRequest req;
         Reply<api::Heatmap> reply;
     };
-    using Request = std::variant<Insert, Snapshot, Aircraft, Activity, Heatmap>;
+    struct InsertPosition {
+        api::ReceiverPosition row;
+    };
+    struct Positions {
+        api::GetReceiverPositionsRequest req;
+        Reply<api::ReceiverPositions> reply;
+    };
+    using Request = std::variant<Insert, Snapshot, Aircraft, Activity, Heatmap, InsertPosition, Positions>;
 
     // Requests that can wait for the history task before a send waits too. One per block from the demod loop,
     // and a few per WebSocket client (wsrpc::Limits::client_calls).
@@ -133,3 +156,11 @@ private:
 
     coro::MpscSender<Request> m_tx;
 };
+
+/**
+ * Records the receiver's position from `position` into `history` until cancelled: a row at once, then one on a
+ * change of GPS state, on a move of more than 25 m, and otherwise once a minute, so a time with no row in the
+ * 90 s before it is one nothing was recording. Each row is stamped with the system clock when written.
+ */
+[[nodiscard]] coro::Coro<void> record_receiver_positions(coro::WatchReceiver<api::ReceiverPosition> position,
+                                                         AircraftHistory history);

@@ -26,3 +26,6 @@ api::Frame to_proto(const DecodedFrameView& v, std::string summary);
 
 /** One spectrum row. */
 api::SpectrumRow to_proto(const SpectrumFrame& s);
+
+/** The great-circle distance between two receiver positions, in m; 0 unless both have a fix. */
+double distance_m(const api::ReceiverPosition& a, const api::ReceiverPosition& b);

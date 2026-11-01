@@ -65,14 +65,23 @@ int64_t pos_step(double sample_rate_hz) { return ispc::resample_pos_fixed((1.0 /
 // Taps before the center sample `base` in the resampler's window [base - window_lead, base - window_lead + taps).
 // With odd taps the window is centered on base; with even taps, on base + 1/2, which pos_offset compensates for.
 int window_lead(const FilterBank& filter) { return (filter.taps - 1) / 2; }
-// Output 0's position: 1/(2*Np) centers each phase's sub-sample interval, plus 1/2 for odd taps so base is the
-// nearest sample (polyphase.jl's `Np÷2` start) -- even taps get that half sample from their window instead.
-// Either way output m falls at the same input time, about m * ry/rx.
+// Output 0's position: 1/2 for odd taps so base is the nearest sample (polyphase.jl's `Np÷2` start) -- even taps
+// get that half sample from their window instead. The phase is then the one nearest m * ry/rx: phase p's taps,
+// cut from a prototype of even length taps * Np, already sit half a phase (1/(2*Np)) past p/Np, which centres
+// each phase's sub-sample interval.
+//
+// REVIEW: this used to be (taps odd ? 0.5 : 0.0) + 0.5 / Np. That 1/(2*Np) centred each phase's interval a
+// second time, on top of the prototype's own half phase, so output m sat in (m * ry/rx, m * ry/rx + 1/Np]:
+// half a phase late on average, a whole phase at worst. At the default 64 phases that's 1/128 sample on
+// average; with few phases it's large (one phase, as IqResampler::identity() uses, is a whole sample).
+// IqResampler places its outputs as this now does. Check the outputs and frame positions before keeping it.
 int64_t pos_offset(const FilterBank& filter) {
-    return ispc::resample_pos_fixed((filter.taps % 2 == 1 ? 0.5 : 0.0) + 0.5 / filter.num_phases);
+    return ispc::resample_pos_fixed(filter.taps % 2 == 1 ? 0.5 : 0.0);
 }
-// The offset that makes resample_center_index() the input sample nearest each output, for any tap count
-// (pos_offset for odd taps).
+// The offset that makes resample_center_index() the input sample nearest each output, for any tap count.
+//
+// REVIEW: left unchanged by the pos_offset() fix above. Its 1/(2*Np) moves the nearest-sample boundary by half a
+// phase, which only changes the reported sample for an output within half a phase of a half-sample boundary.
 int64_t index_offset(const FilterBank& filter) { return ispc::resample_pos_fixed(0.5 + 0.5 / filter.num_phases); }
 
 // The resampler kernel for blocks in format F (kernels.ispc: RESAMPLE_FORMAT), which computes one part's share.

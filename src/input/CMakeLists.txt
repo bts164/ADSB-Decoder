@@ -1,6 +1,8 @@
 # IQ sources for `adsb file` / `adsb vita49` / `adsb rtlsdr` / `adsb sidekiq` / `adsb uhd`.
-add_library(adsb_input STATIC file_stream.cpp rtlsdr_device.cpp rtlsdr_stream.cpp vita49_stream.cpp sigmf_meta.cpp)
-target_link_libraries(adsb_input PUBLIC adsb_dsp adsb_vrt coro::coro librtlsdr::librtlsdr Threads::Threads
+# gpsd.cpp: the receiver's position, which `adsb sidekiq` reads.
+add_library(adsb_input STATIC file_stream.cpp rtlsdr_device.cpp rtlsdr_stream.cpp vita49_stream.cpp sigmf_meta.cpp
+                              gpsd.cpp)
+target_link_libraries(adsb_input PUBLIC adsb_api adsb_dsp adsb_vrt coro::coro librtlsdr::librtlsdr Threads::Threads
                                  PRIVATE argparse::argparse)
 if(ADSB_WITH_SIDEKIQ)
     target_sources(adsb_input PRIVATE sidekiq_stream.cpp)

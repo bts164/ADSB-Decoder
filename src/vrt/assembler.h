@@ -86,7 +86,8 @@ public:
     /**
      * Classifies and consumes one datagram. Data packets are held until drain().
      * @throws std::runtime_error if a context packet's sample rate disagrees (> 0.1%) with the rate
-     *         already established, since the timestamps would then place samples at the wrong positions
+     *         already established, since the timestamps would then place samples at the wrong positions, or
+     *         if its Data Payload Format is anything but 16-bit complex I/Q, which is all drain() reads
      */
     Kind push(std::span<const uint8_t> data);
 

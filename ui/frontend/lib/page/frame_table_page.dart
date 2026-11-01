@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart';
@@ -15,6 +16,8 @@ import '../api/adsb/api/v1/api.wsrpc.dart';
 import '../lazy_table.dart';
 import '../models.dart';
 import '../painters.dart';
+import '../reception.dart';
+import '../reception_painters.dart';
 import '../settings.dart';
 import '../settings_panel.dart';
 import '../wsrpc/channel.dart';
@@ -26,13 +29,25 @@ part 'frames.dart';
 part 'heatmap.dart';
 part 'history.dart';
 part 'map.dart';
+part 'reception.dart';
 part 'spectrum.dart';
+part 'spectrum_view.dart';
 part 'stats.dart';
 
 /// A Listenable notified by hand: the page notifies one of these when a piece of its state changes, and only
 /// the widgets showing that piece (ListenableBuilders on it) rebuild, not the whole page.
 class _Changed extends ChangeNotifier {
   void notify() => notifyListeners();
+}
+
+/// The dock's sections, top to bottom, with the share of its height each starts with.
+enum _DockSection {
+  frames(3),
+  spectrum(2),
+  reception(3);
+
+  const _DockSection(this.defaultWeight);
+  final double defaultWeight;
 }
 
 class FrameTablePage extends StatefulWidget {
@@ -112,6 +127,9 @@ class _FrameTablePageState extends State<FrameTablePage> {
   // (see _inputStatusMaxAge).
   final _inputStatus = ValueNotifier<InputStatus?>(null);
   static const _inputStatusMaxAge = Duration(seconds: 6);
+  // The receiver's position from the position watch, sent at each change; with only History, from the first
+  // snapshot. Null before either.
+  final _receiverPosition = ValueNotifier<ReceiverPosition?>(null);
   DateTime? _statsWindowStart;
 
   final Map<String, AircraftRecord> _aircraft = {};
@@ -231,12 +249,21 @@ class _FrameTablePageState extends State<FrameTablePage> {
   // full-width table; dragged via the divider in _buildAircraftSplit.
   double _mapFraction = 0.5;
   static const double _minPaneHeight = 120;
-  // Dock to the right of the map and table, for the frame log and the
-  // spectrum waterfall, each shown on demand from the top bar (stacked when
-  // both are). Its width is dragged from its left edge.
+  // Dock to the right of the map and table, for the frame log, the
+  // spectrum waterfall and the reception plots, each shown on demand from the
+  // top bar (stacked when more than one is). Its width is dragged from its
+  // left edge, and the dividers between the sections share its height out.
   bool _showFrames = false;
   bool _showSpectrum = false;
+  bool _showReception = false;
+  _ReceptionPlot _receptionPlot = _ReceptionPlot.coverage;
+  // For the side view's radio horizon; not saved.
+  double _antennaAglM = 10;
+  // Logged while connected whether the signal plot is shown or not, so it has data when it's opened.
+  final _signalLog = SignalLog();
   double _dockWidth = 560;
+  // Each section's share of the dock's height, against those of the others shown.
+  final _dockWeights = {for (final s in _DockSection.values) s: s.defaultWeight};
   static const double _minDockWidth = 400;
   static const double _minMapWidth = 320;
 
@@ -257,6 +284,12 @@ class _FrameTablePageState extends State<FrameTablePage> {
   // A recoloring of the history waiting its turn: changes while one waits join it, so a drag of the range
   // recolors as fast as recoloring goes and no faster.
   bool _spectrumRecolorQueued = false;
+  // The PSD's max, min and average holds, kept from every row since their reset.
+  final _spectrumHolds = _SpectrumHolds();
+  // The colormap, holds and persistence, shown over the plots on demand.
+  bool _spectrumControlsShown = false;
+  // The part of the band the PSD and waterfall show, and the hover, markers and band on them.
+  final _spectrumView = _SpectrumView();
 
   // Display units and time format. The page's own defaults if it wasn't given any.
   late final DisplaySettings _units = widget.settings ?? DisplaySettings();
@@ -297,9 +330,12 @@ class _FrameTablePageState extends State<FrameTablePage> {
       row.image.dispose();
     }
     _spectrumHistory.dispose();
+    _spectrumHolds.dispose();
+    _spectrumView.dispose();
     _spectrumRange.dispose();
     _framesChanged.dispose();
     _inputStatus.dispose();
+    _receiverPosition.dispose();
     _capture.dispose();
     _settings.dispose();
     _aircraftChanged.dispose();
@@ -319,6 +355,7 @@ class _FrameTablePageState extends State<FrameTablePage> {
     _pendingAircraft.clear();
     _sortedAircraftCache = null;
     _aircraftTrails.clear();
+    _signalLog.clear();
     _backfilled = false;
     _historyStartS = null;
     _historyEndS = null;
@@ -353,6 +390,7 @@ class _FrameTablePageState extends State<FrameTablePage> {
     _statsByDf.clear();
     _statsFramesPerSec = 0;
     _inputStatus.value = null;
+    _receiverPosition.value = null;
     _statsWindowStart = DateTime.now();
     _clearSpectrum();
     _framesChanged.notify();
@@ -390,6 +428,8 @@ class _FrameTablePageState extends State<FrameTablePage> {
         _watch(channel, receiver.watchAircraft(api.WatchAircraftRequest()), _onAircraft);
         _watch(channel, receiver.watchInputStatus(api.WatchInputStatusRequest()),
             (s) => _inputStatus.value = InputStatus.fromProto(s));
+        _watch(channel, receiver.watchReceiverPosition(api.WatchReceiverPositionRequest()),
+            (p) => _onReceiverPosition(ReceiverPosition.fromProto(p)));
         if (_showSpectrum) _startSpectrum();
       }
       // Watched first so nothing is missed in between. The live data waits in the buffers until the flush timer
@@ -485,6 +525,12 @@ class _FrameTablePageState extends State<FrameTablePage> {
     }
 
     if (_pendingAircraft.isNotEmpty) {
+      final receiver = _receiverPosition.value;
+      if (receiver != null && receiver.hasFix) {
+        for (final ac in _pendingAircraft.values) {
+          _signalLog.add(ac, _aircraft[ac.icao], receiver);
+        }
+      }
       _aircraft.addAll(_pendingAircraft);
       LatLng? firstNewPosition;
       if (!_mapAutoCentered) {
@@ -533,6 +579,7 @@ class _FrameTablePageState extends State<FrameTablePage> {
 
   // What the map and aircraft table show: the scrubbed-to snapshot, or live.
   Map<String, AircraftRecord> get _shownAircraft => _snapshot?.aircraft ?? _aircraft;
+  ReceiverPosition? get _shownReceiver => _snapshot != null ? _snapshot!.receiver : _receiverPosition.value;
   Map<String, List<TrailPoint>> get _shownTrails => _snapshot?.trails ?? _aircraftTrails;
   double get _shownTimeS => _snapshot?.timeS ?? _latestTimeS;
 
@@ -562,6 +609,24 @@ class _FrameTablePageState extends State<FrameTablePage> {
     return DateTime.now().difference(t).inMilliseconds / 1000;
   }
 
+  void _onReceiverPosition(ReceiverPosition p) {
+    _receiverPosition.value = p;
+    final position = p.position;
+    // The receiver, once known, is where the map starts, ahead of the first aircraft.
+    if (!_mapAutoCentered && p.hasFix && position != null) {
+      _mapAutoCentered = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        try {
+          _mapController.move(position, 8);
+        } catch (_) {
+          // Map isn't mounted yet -- it'll just show the default view.
+        }
+      });
+    }
+    _sortedAircraftCache = null;
+    _aircraftChanged.notify();
+  }
+
   // Frames/aircraft can arrive at rates far higher than the UI can (or
   // should) redraw at, so they are just buffered here -- _flushUpdates, on a
   // timer, is what actually triggers a rebuild.
@@ -579,6 +644,8 @@ class _FrameTablePageState extends State<FrameTablePage> {
     setState(() => _showSpectrum = show);
     show ? _startSpectrum() : _stopSpectrum();
   }
+
+  void _setShowReception(bool show) => setState(() => _showReception = show);
 
   void _startSpectrum() {
     final receiver = _receiver;
@@ -602,6 +669,7 @@ class _FrameTablePageState extends State<FrameTablePage> {
 
   void _onSpectrumRow(api.SpectrumRow row) {
     if (row.binsDb.isEmpty) return;
+    _spectrumHolds.add(row.binsDb, row.freqHz, row.rateHz);
     final median = _WaterfallRow.medianDb(row.binsDb);
     final floor = _spectrumFloorDb;
     final floorDb = _spectrumFloorDb = floor == null ? median : floor + 0.1 * (median - floor);
@@ -619,6 +687,7 @@ class _FrameTablePageState extends State<FrameTablePage> {
         }
         rows.removeRange(0, rows.length - _maxSpectrumRows);
       }
+      _spectrumView.follow(colored.freqHz, colored.rateHz, colored.binsDb.length);
       _spectrumHistory.value = rows;
     });
   }
@@ -654,6 +723,7 @@ class _FrameTablePageState extends State<FrameTablePage> {
       row.image.dispose();
     }
     _spectrumHistory.value = [];
+    _spectrumHolds.reset();
   }
 
   /// Applies a snapshot. The first, on connect, backfills the live aircraft
@@ -671,6 +741,8 @@ class _FrameTablePageState extends State<FrameTablePage> {
       final now = DateTime.now();
       _aircraft.addAll(s.aircraft);
       _aircraftTrails.addAll(s.trails);
+      // Without Receiver, the history's latest position is the best there is.
+      if (_receiver == null && s.receiver != null) _onReceiverPosition(s.receiver!);
       for (final a in s.aircraft.values) {
         _aircraftLastSeenWallClock[a.icao] =
             now.subtract(Duration(milliseconds: ((s.timeS - a.lastSeenUnixS) * 1000).round()));
@@ -808,11 +880,32 @@ class _FrameTablePageState extends State<FrameTablePage> {
                 onSelected: _setShowSpectrum,
               ),
             ],
+            const SizedBox(width: 6),
+            // Live or scrubbed, the plots need a receiver position to draw from.
+            ListenableBuilder(
+              listenable: Listenable.merge([_receiverPosition, _aircraftChanged]),
+              builder: (context, _) => _dockToggle(
+                icon: Icons.radar,
+                label: 'Reception',
+                selected: _showReception,
+                onSelected: _setShowReception,
+                disabledReason: _shownReceiver?.hasFix ?? false ? null : 'Reception needs the receiver position',
+              ),
+            ),
             if (_connected) _buildCaptureControl(),
             const SizedBox(width: 12),
             ValueListenableBuilder(
               valueListenable: _inputStatus,
               builder: (context, status, _) => status == null ? const SizedBox.shrink() : _buildInputStatus(status),
+            ),
+            const SizedBox(width: 12),
+            // Again each tick, for the tooltip's age.
+            ListenableBuilder(
+              listenable: Listenable.merge([_receiverPosition, _clockTick]),
+              builder: (context, _) {
+                final p = _receiverPosition.value;
+                return p == null ? const SizedBox.shrink() : _buildGpsStatus(p);
+              },
             ),
             Expanded(
               child: ListenableBuilder(
@@ -883,6 +976,7 @@ class _FrameTablePageState extends State<FrameTablePage> {
     required String label,
     required bool selected,
     required ValueChanged<bool> onSelected,
+    String? disabledReason,
   }) {
     return FilterChip(
       avatar: Icon(icon, size: 16),
@@ -890,16 +984,35 @@ class _FrameTablePageState extends State<FrameTablePage> {
       selected: selected,
       showCheckmark: false,
       visualDensity: VisualDensity.compact,
-      tooltip: selected ? 'Hide $label' : 'Show $label',
-      onSelected: onSelected,
+      tooltip: disabledReason ?? (selected ? 'Hide $label' : 'Show $label'),
+      onSelected: disabledReason == null ? onSelected : null,
     );
   }
 
-  /// The dock beside the map and table: whichever of the frame log and
-  /// spectrum are shown, stacked, behind a drag handle that sets its width.
+  /// The dock beside the map and table: whichever of the frame log,
+  /// spectrum and reception plots are shown, stacked, behind a drag handle
+  /// that sets its width.
   Widget _buildDock(double totalWidth) {
     final maxWidth = math.max(_minDockWidth, totalWidth - _minMapWidth);
     final width = _dockWidth.clamp(_minDockWidth, maxWidth);
+    final sections = {
+      if (_showFrames)
+        _DockSection.frames: _buildDockSection(
+          title: ListenableBuilder(
+            listenable: _framesChanged,
+            builder: (context, _) => Text('Frames (${_frames.length})'),
+          ),
+          onClose: () => setState(() => _showFrames = false),
+          child: ListenableBuilder(listenable: _framesChanged, builder: (context, _) => _buildFramesPane()),
+        ),
+      if (_showSpectrum)
+        _DockSection.spectrum: _buildDockSection(
+          title: _buildSpectrumTitle(),
+          onClose: () => _setShowSpectrum(false),
+          child: _buildSpectrumPane(),
+        ),
+      if (_showReception) _DockSection.reception: _buildReceptionSection(),
+    };
     return SizedBox(
       key: const ValueKey('dock'),
       width: width,
@@ -919,36 +1032,49 @@ class _FrameTablePageState extends State<FrameTablePage> {
               child: const SizedBox(width: 8, child: Center(child: VerticalDivider(width: 1))),
             ),
           ),
-          Expanded(
-            child: Column(
-              children: [
-                if (_showFrames)
-                  Expanded(
-                    flex: 3,
-                    child: _buildDockSection(
-                      title: ListenableBuilder(
-                        listenable: _framesChanged,
-                        builder: (context, _) => Text('Frames (${_frames.length})'),
-                      ),
-                      onClose: () => setState(() => _showFrames = false),
-                      child: ListenableBuilder(listenable: _framesChanged, builder: (context, _) => _buildFramesPane()),
-                    ),
-                  ),
-                if (_showFrames && _showSpectrum) const Divider(height: 1),
-                if (_showSpectrum)
-                  Expanded(
-                    flex: 2,
-                    child: _buildDockSection(
-                      title: const Text('Spectrum'),
-                      onClose: () => _setShowSpectrum(false),
-                      child: _buildSpectrumPane(),
-                    ),
-                  ),
-              ],
-            ),
-          ),
+          Expanded(child: _buildDockSplit(sections)),
         ],
       ),
+    );
+  }
+
+  /// `sections` stacked, each its weight's share of the height, with a divider between each two that moves
+  /// height from one to the other.
+  Widget _buildDockSplit(Map<_DockSection, Widget> sections) {
+    const dividerHeight = 8.0;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final shown = sections.keys.toList();
+        final totalWeight = shown.fold<double>(0, (t, s) => t + _dockWeights[s]!);
+        final perWeight = (constraints.maxHeight - dividerHeight * (shown.length - 1)) / totalWeight;
+        Widget divider(_DockSection above, _DockSection below) => MouseRegion(
+              cursor: SystemMouseCursors.resizeRow,
+              child: GestureDetector(
+                behavior: HitTestBehavior.translucent,
+                onVerticalDragUpdate: (details) {
+                  // From the state, not captured heights, as in _buildAircraftSplit.
+                  final pair = _dockWeights[above]! + _dockWeights[below]!;
+                  final pairPx = pair * perWeight;
+                  if (pairPx < 2 * _minPaneHeight) return;
+                  final abovePx = (_dockWeights[above]! * perWeight + details.delta.dy)
+                      .clamp(_minPaneHeight, pairPx - _minPaneHeight);
+                  _dockWeights[above] = abovePx / perWeight;
+                  _dockWeights[below] = pair - abovePx / perWeight;
+                  _aircraftChanged.notify();
+                },
+                child: const SizedBox(height: dividerHeight, child: Center(child: Divider(height: 1))),
+              ),
+            );
+        return Column(
+          children: [
+            for (final (i, section) in shown.indexed) ...[
+              if (i > 0) divider(shown[i - 1], section),
+              // Expanded takes a whole flex; a thousandth of a weight is finer than a pixel.
+              Expanded(flex: math.max(1, (_dockWeights[section]! * 1000).round()), child: sections[section]!),
+            ],
+          ],
+        );
+      },
     );
   }
 

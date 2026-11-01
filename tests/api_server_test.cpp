@@ -1,17 +1,19 @@
 // Tests for the UI API's server, as a client sees it: each test starts the server on a port of its own,
 // connects over a WebSocket, and makes calls to its services, publishing what the server answers from on
 // channels it creates as the pipeline does, or putting it in the history database. The capture tests write
-// real files. tests/wsrpc_test.cpp covers the framing itself. Last, the history database's refusal of a file
-// from another version of adsb.
+// real files. tests/wsrpc_test.cpp covers the framing itself. Last, the history database's upgrade of a file
+// from the version before, and its refusal of one from any other version of adsb.
 
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <expected>
 #include <filesystem>
 #include <fstream>
 #include <initializer_list>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <span>
@@ -73,7 +75,20 @@ struct Feeds {
     coro::BroadcastSender<IqBlock> input;
     coro::BroadcastSender<EnvelopeShare> envelope;
     coro::WatchSender<std::optional<api::InputStatus>> input_status;
+    coro::WatchSender<api::ReceiverPosition> receiver_position;
 };
+
+// The receiver's position in `state`, with a fix at (`lat`, `lon`) unless lat is NaN.
+api::ReceiverPosition position(double t, api::GpsState state, double lat = NAN, double lon = NAN) {
+    api::ReceiverPosition p;
+    p.set_t(t);
+    p.set_state(state);
+    if (!std::isnan(lat)) {
+        p.set_lat(lat);
+        p.set_lon(lon);
+    }
+    return p;
+}
 
 // The outputs' channels, as deep as the pipeline's: the test's ends, and the server's.
 std::pair<Feeds, ReceiverFeeds> make_feeds(api::Settings settings) {
@@ -83,6 +98,7 @@ std::pair<Feeds, ReceiverFeeds> make_feeds(api::Settings settings) {
     auto [input, input_rx] = coro::broadcast_channel<IqBlock>(8);
     auto [envelope, envelope_rx] = coro::broadcast_channel<EnvelopeShare>(8);
     auto [status, status_rx] = coro::watch_channel(std::optional<api::InputStatus>{});
+    auto [receiver_position, receiver_position_rx] = coro::watch_channel(position(0, api::NO_GPS));
     ReceiverFeeds served{
         .outputs =
             {
@@ -95,10 +111,11 @@ std::pair<Feeds, ReceiverFeeds> make_feeds(api::Settings settings) {
                 .envelope_point = {"envelope", "capture envelope missing", kEnvelopeRateHz, {}},
             },
         .input_status = std::move(status_rx),
+        .receiver_position = std::move(receiver_position_rx),
         .settings = std::move(settings),
     };
     return {Feeds{std::move(frames), std::move(aircraft), std::move(spectrum), std::move(input),
-                  std::move(envelope), std::move(status)},
+                  std::move(envelope), std::move(status), std::move(receiver_position)},
             std::move(served)};
 }
 
@@ -247,6 +264,7 @@ struct Served {
     bool live = true;                                    // Receiver, with the channels' other ends in the test's
     std::string capture_dir = std::string(kCaptureDir);  // the settings' to start with
     std::optional<std::vector<api::Aircraft>> history;   // History, from an in-memory database holding these
+    std::vector<api::ReceiverPosition> positions;        // and these rows of the receiver's position
 };
 
 // Starts a server on `port`, serving what `served` says, and runs `test` as its client once it has said hello
@@ -263,6 +281,8 @@ void run(uint16_t port, Test test, Served served = {}) {
             CHECK(db);
             // Queued ahead of every query, which the server sends on clones of its own.
             if (db) co_await db->insert(std::move(*served.history));
+            for (api::ReceiverPosition& p : served.positions)
+                if (db) co_await db->insert_position(std::move(p));
         }
         std::optional<ReceiverFeeds> live;
         if (served.live) live = std::move(outputs);
@@ -433,6 +453,18 @@ void test_input_status() {
     });
 }
 
+// The receiver's position at once, then each change.
+void test_receiver_position() {
+    run(18714, [](coro::WsStream& ws, Feeds& feeds) -> coro::Coro<void> {
+        co_await send(ws, receiver(1, "WatchReceiverPosition", api::WatchReceiverPositionRequest{}));
+        auto reply = reply_of<api::ReceiverPosition>(co_await receive(ws), 1);
+        CHECK(reply && reply->state() == api::NO_GPS);
+        (void)feeds.receiver_position.send(position(1000, api::FIX_3D, 50, 10));
+        reply = reply_of<api::ReceiverPosition>(co_await receive(ws), 1);
+        CHECK(reply && reply->state() == api::FIX_3D && reply->lat() == 50 && reply->lon() == 10);
+    });
+}
+
 // Each spectrum watch sends every row published while it's in progress, through a receiver of its own that it
 // drops when it ends, by a cancel or by its connection closing. Nothing reads the rows before or after.
 void test_spectrum() {
@@ -520,7 +552,8 @@ void test_capture() {
             }
             CHECK(feeds.input.all_receivers_dropped() && feeds.envelope.all_receivers_dropped());
 
-            // 10 samples of the input, in three blocks, the last running past the end.
+            // 10 samples of the input, in three blocks, the last running past the end, with the receiver's fix.
+            (void)feeds.receiver_position.send(position(1000, api::FIX_3D, 50, 10));
             co_await send(ws, record_capture(10, api::INPUT, 10 / kInputRateHz, "a"));
             CHECK(co_await read_within(feeds.input, true));
             for (uint64_t start : {0, 4, 8}) (void)feeds.input.send(block(4, start));
@@ -528,6 +561,11 @@ void test_capture() {
             CHECK(last && last->samples() == 10 && last->missing() == 0 && last->start_index() == 0);
             CHECK(last && last->capture().name() == "a" && last->capture().data_bytes() == 80);
             CHECK(last && last->capture().meta().datatype() == "cf32_le");
+            {
+                std::ifstream meta(dir / "a.sigmf-meta");
+                const std::string text{std::istreambuf_iterator<char>(meta), {}};
+                CHECK(text.find("core:geolocation") != std::string::npos);
+            }
             CHECK(last && last->capture().meta().rate_hz() == kInputRateHz);
             CHECK(last && last->capture().meta().freq_hz() == kFreqHz);
             CHECK(std::filesystem::file_size(dir / "a.sigmf-data") == 80);
@@ -658,7 +696,7 @@ void test_heatmap_area() {
 }
 
 // Each history call, against a database holding two updates of one aircraft with a position, and one of
-// another without.
+// another without, and the receiver's position: a fix, then gpsd lost, then nothing recorded.
 void test_history() {
     std::vector<api::Aircraft> rows = {
         recorded(0xabc, 1000, 1000, 50.0, 10.0),
@@ -717,8 +755,29 @@ void test_history() {
             auto map = co_await unary<api::Heatmap>(ws, history(5, "GetHeatmap", area));
             CHECK(map && map->max() == 1 && map->cell_index_size() >= 1);
             CHECK(map && map->cell_index_size() == map->cell_count_size());
+
+            // At 1003 the fix from 990 holds; at 1010, gpsd was lost; at 1200, nothing was recording.
+            snap = co_await unary<api::Snapshot>(ws, history(6, "GetSnapshot", earlier));
+            CHECK(snap && snap->has_receiver() && snap->receiver().state() == api::FIX_3D);
+            CHECK(snap && snap->receiver().lat() == 50 && snap->receiver().lon() == 10);
+            snap = co_await unary<api::Snapshot>(ws, history(7, "GetSnapshot", api::GetSnapshotRequest{}));
+            CHECK(snap && snap->has_receiver() && snap->receiver().state() == api::GPSD_UNREACHABLE);
+            api::GetSnapshotRequest later;
+            later.set_t(1200);
+            snap = co_await unary<api::Snapshot>(ws, history(8, "GetSnapshot", later));
+            CHECK(snap && !snap->has_receiver());
+
+            // From the row in effect at 1003.
+            api::GetReceiverPositionsRequest range;
+            range.set_from(1003);
+            auto positions = co_await unary<api::ReceiverPositions>(ws, history(9, "GetReceiverPositions", range));
+            CHECK(positions && positions->positions_size() == 2);
+            CHECK(positions && positions->positions_size() == 2 && positions->positions(0).t() == 990 &&
+                  positions->positions(1).state() == api::GPSD_UNREACHABLE);
         },
-        {.live = false, .history = std::move(rows)});
+        {.live = false,
+         .history = std::move(rows),
+         .positions = {position(990, api::FIX_3D, 50, 10), position(1008, api::GPSD_UNREACHABLE)}});
 }
 
 // A client that disconnects with calls in progress doesn't disturb the next.
@@ -741,8 +800,9 @@ void test_disconnect() {
     });
 }
 
-// The UI API's history database opens a new file or one it wrote, and refuses one from another version of
-// adsb: one from before the version was recorded, with the table and version 0, or one with a newer version.
+// The UI API's history database opens a new file or one it wrote, upgrades one from the version before, and
+// refuses one from any other version of adsb: one from before the version was recorded, with the table and
+// version 0, or one with a newer version.
 void test_old_database() {
     const std::filesystem::path dir = std::filesystem::temp_directory_path();
     // Writes `sql` to a new database file named `name`, and returns its path.
@@ -760,16 +820,37 @@ void test_old_database() {
     const std::string v1 = make("api_server_test_v1.sqlite",
                                 "CREATE TABLE aircraft_updates (t REAL NOT NULL, icao TEXT NOT NULL, lat REAL, "
                                 "lon REAL, state TEXT NOT NULL);");
-    const std::string v3 = make("api_server_test_v3.sqlite", "PRAGMA user_version = 3;");
+    const std::string v2 = make("api_server_test_v2.sqlite",
+                                "CREATE TABLE aircraft_updates (t REAL NOT NULL, icao INTEGER NOT NULL, lat REAL, "
+                                "lon REAL, altitude_ft INTEGER, ground_speed_kt REAL, vertical_rate_fpm INTEGER, "
+                                "signal_db REAL, selected_altitude_ft INTEGER, state BLOB NOT NULL);"
+                                "PRAGMA user_version = 2;");
+    const std::string v4 = make("api_server_test_v4.sqlite", "PRAGMA user_version = 4;");
 
-    coro::Runtime(2).block_on([](std::string fresh, std::string v1, std::string v3) -> coro::Coro<void> {
+    coro::Runtime(2).block_on([](std::string fresh, std::string v1, std::string v2,
+                                 std::string v4) -> coro::Coro<void> {
         CHECK(AircraftHistory::open(fresh));
         CHECK(AircraftHistory::open(fresh));  // again, now that it's been written
         CHECK(!AircraftHistory::open(v1));
-        CHECK(!AircraftHistory::open(v3));
+        CHECK(AircraftHistory::open(v2));
+        CHECK(!AircraftHistory::open(v4));
         co_return;
-    }(fresh, v1, v3));
-    for (const std::string& path : {fresh, v1, v3}) {
+    }(fresh, v1, v2, v4));
+    // The upgrade added the positions' table, and recorded the new version.
+    sqlite3* db = nullptr;
+    CHECK(sqlite3_open(v2.c_str(), &db) == SQLITE_OK);
+    CHECK(sqlite3_exec(db, "SELECT count(*) FROM receiver_positions;", nullptr, nullptr, nullptr) == SQLITE_OK);
+    int version = 0;
+    sqlite3_exec(
+        db, "PRAGMA user_version;",
+        [](void* v, int, char** values, char**) {
+            *static_cast<int*>(v) = std::atoi(values[0]);
+            return 0;
+        },
+        &version, nullptr);
+    CHECK(version == 3);
+    sqlite3_close(db);
+    for (const std::string& path : {fresh, v1, v2, v4}) {
         // WAL mode leaves these beside the new file.
         for (const char* suffix : {"", "-wal", "-shm"}) std::filesystem::remove(path + suffix);
     }
@@ -785,6 +866,7 @@ int main() {
     test_frames();
     test_aircraft();
     test_input_status();
+    test_receiver_position();
     test_spectrum();
     test_capture();
     test_capture_input_ends();

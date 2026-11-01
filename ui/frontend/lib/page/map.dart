@@ -5,7 +5,7 @@ extension _AircraftMap on _FrameTablePageState {
   /// The map over the aircraft table, the dock beside them when anything's
   /// in it (sliding in and out), and the scrubber bar under both.
   Widget _buildAircraftPane() {
-    final docked = _showFrames || _showSpectrum;
+    final docked = _showFrames || _showSpectrum || _showReception;
     return Column(
       children: [
         Expanded(
@@ -70,6 +70,8 @@ extension _AircraftMap on _FrameTablePageState {
 
   Widget _buildAircraftMap() {
     final positioned = _visibleAircraft.where((a) => a.lat != null && a.lon != null).toList();
+    final receiver = _shownReceiver;
+    final receiverAt = receiver != null && receiver.hasFix ? receiver.position : null;
     return Stack(
       children: [
         FlutterMap(
@@ -94,6 +96,17 @@ extension _AircraftMap on _FrameTablePageState {
             ),
             MarkerLayer(
               markers: [
+                // First, so the aircraft draw over it.
+                if (receiverAt != null)
+                  Marker(
+                    point: receiverAt,
+                    width: 28,
+                    height: 28,
+                    child: Tooltip(
+                      message: 'Receiver${receiver!.summary.isEmpty ? '' : '\n${receiver!.summary}'}',
+                      child: const Icon(Icons.cell_tower, size: 24, color: Colors.deepPurple),
+                    ),
+                  ),
                 for (final a in positioned)
                   Marker(
                     point: LatLng(a.lat!, a.lon!),
@@ -107,6 +120,8 @@ extension _AircraftMap on _FrameTablePageState {
         ),
         Positioned(left: 12, bottom: 12, child: _buildAltitudeLegend()),
         Positioned(right: 12, top: 12, child: _buildHeatmapMenu()),
+        if (receiverAt == null && _connected)
+          Positioned(top: 12, left: 0, right: 0, child: Center(child: _buildReceiverUnknown(receiver))),
         if (_selectedIcao != null && _shownAircraft.containsKey(_selectedIcao))
           Positioned(
             left: 12,
@@ -306,6 +321,26 @@ extension _AircraftMap on _FrameTablePageState {
                 : Transform.rotate(angle: (a.trackDeg ?? 0) * math.pi / 180, child: icon),
           ),
         ),
+      ),
+    );
+  }
+
+  /// Over the map where the receiver's position isn't shown: "no GPS" for an input without one, else unknown,
+  /// with why where that's known.
+  Widget _buildReceiverUnknown(ReceiverPosition? receiver) {
+    final theme = Theme.of(context);
+    final noGps = receiver?.state == api.GpsState.NO_GPS;
+    return Tooltip(
+      message: receiver == null
+          ? (_snapshot != null ? 'Nothing was recording the receiver then' : 'No report of the receiver yet')
+          : receiver.summary,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        decoration: BoxDecoration(
+          color: theme.colorScheme.surface.withValues(alpha: 0.85),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Text(noGps ? 'no GPS' : 'receiver position unknown', style: theme.textTheme.labelSmall),
       ),
     );
   }

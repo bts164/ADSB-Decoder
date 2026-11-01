@@ -108,6 +108,12 @@ extension _AircraftTable on _FrameTablePageState {
     ];
   }
 
+  // From the receiver shown, live or scrubbed to; null without its fix or the aircraft's position.
+  ({double rangeM, double bearingDeg})? _rangeBearing(AircraftRecord a) {
+    if (a.lat == null || a.lon == null) return null;
+    return _shownReceiver?.rangeBearingTo(LatLng(a.lat!, a.lon!));
+  }
+
   List<TableColumn<AircraftRecord>> _buildAircraftColumns() => [
     TableColumn('icao', 70, compare: (a, b) => a.icao.compareTo(b.icao), cell: (a) => Text(a.icao)),
     TableColumn('callsign', 85,
@@ -150,6 +156,15 @@ extension _AircraftTable on _FrameTablePageState {
         numeric: true,
         compare: (a, b) => compareNullable(a.lon, b.lon),
         cell: (a) => Text(a.lon?.toStringAsFixed(4) ?? '')),
+    // Blank without the receiver's fix.
+    TableColumn('range', 150,
+        numeric: true,
+        compare: (a, b) => compareNullable(_rangeBearing(a)?.rangeM, _rangeBearing(b)?.rangeM),
+        cell: (a) {
+          final rb = _rangeBearing(a);
+          if (rb == null) return const Text('');
+          return _visualCell(_trackVisual(a, rb.bearingDeg), _units.formatDistanceM(rb.rangeM), 64);
+        }),
     TableColumn('gs (${_units.speed.label})', 105,
         numeric: true,
         compare: (a, b) => compareNullable(a.groundSpeedKt, b.groundSpeedKt),

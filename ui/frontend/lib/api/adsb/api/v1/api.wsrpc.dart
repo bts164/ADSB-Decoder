@@ -31,6 +31,10 @@ class ReceiverClient {
   $async.Stream<InputStatus> watchInputStatus(WatchInputStatusRequest request) =>
       _channel.serverStreaming('/adsb.api.v1.Receiver/WatchInputStatus', request, InputStatus.fromBuffer);
 
+  /// The receiver's position and its GPS's state, now and at each change.
+  $async.Stream<ReceiverPosition> watchReceiverPosition(WatchReceiverPositionRequest request) =>
+      _channel.serverStreaming('/adsb.api.v1.Receiver/WatchReceiverPosition', request, ReceiverPosition.fromBuffer);
+
   /// The spectrum's rows as they're computed. The server computes them only while one of these calls is open.
   $async.Stream<SpectrumRow> watchSpectrum(WatchSpectrumRequest request) =>
       _channel.serverStreaming('/adsb.api.v1.Receiver/WatchSpectrum', request, SpectrumRow.fromBuffer);
@@ -77,4 +81,8 @@ class HistoryClient {
   /// How many flights crossed each cell of an area.
   $wsrpc.UnaryCall<Heatmap> getHeatmap(GetHeatmapRequest request) =>
       _channel.unary('/adsb.api.v1.History/GetHeatmap', request, Heatmap.fromBuffer);
+
+  /// The receiver's positions recorded in a time range.
+  $wsrpc.UnaryCall<ReceiverPositions> getReceiverPositions(GetReceiverPositionsRequest request) =>
+      _channel.unary('/adsb.api.v1.History/GetReceiverPositions', request, ReceiverPositions.fromBuffer);
 }

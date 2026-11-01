@@ -7,6 +7,7 @@
 #include <coro/coro_stream.h>
 
 #include "dsp/iq_block.h"
+#include "input/gpsd.h"
 
 namespace argparse {
 class ArgumentParser;
@@ -34,6 +35,8 @@ struct SidekiqStreamParams {
      * library paths, and finds libsidekiq where its own dependencies are found.
      */
     static constexpr const char* kDefaultLib = "libsidekiq.so";
+    /** --gpsd's default: where every X40's gpsd listens, reachable from both of its computers. */
+    static constexpr const char* kDefaultGpsd = "192.168.55.100:2947";
 
     std::string lib_path;            ///< libsidekiq to load: a path, or a file name dlopen() searches for
     int card;
@@ -45,9 +48,10 @@ struct SidekiqStreamParams {
     std::optional<int> gain_index;   ///< manual gain index; unset for the radio's AGC
     /// preselect filter, by its passband in MHz such as "810-1170"; unset for libsidekiq's choice
     std::optional<std::string> preselect_filter;
+    std::optional<GpsdAddress> gpsd;  ///< where to read the receiver's position from; unset for no GPS
 
     static void add_options(argparse::ArgumentParser& cmd);
-    /** @throws std::runtime_error if --handle or --gain isn't one of the values they take */
+    /** @throws std::runtime_error if --handle, --gain or --gpsd isn't one of the values they take */
     static SidekiqStreamParams from_options(const argparse::ArgumentParser& program,
                                            const argparse::ArgumentParser& cmd);
 };

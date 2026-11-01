@@ -50,6 +50,19 @@ struct I16Be {
 };
 
 /**
+ * Big-endian IEEE float, as a VITA-49 data packet can carry it. An output format only: IqResampler writes it,
+ * but it is not one of iq::Formats, so no block holds it, and it needs only `Sample` and `full_scale`.
+ * `Sample` holds a float's bytes in wire order.
+ */
+struct F32Be {
+    using Sample = uint32_t;
+    static constexpr float full_scale = 1.0f;
+};
+
+/** A format IqResampler can write. */
+using OutputFormat = std::variant<I16Be, F32Be>;
+
+/**
  * A block's sample buffer in format F: a (samples, 2) array, one row per sample with I in column 0 and Q in
  * column 1. Tagged by the format and not just by `F::Sample`, so two formats that store the same type (a
  * native and a big-endian int16, say) stay distinct.

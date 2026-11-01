@@ -103,6 +103,24 @@ Bytes context_packet(double rate_hz, double freq_hz, uint32_t sid = 7) {
     return b;
 }
 
+// The same, with a Data Payload Format field (CIF0 bit 15) whose first word is `format_word`, after the
+// sample rate.
+Bytes context_packet_with_format(double rate_hz, double freq_hz, uint32_t format_word) {
+    Bytes b = header(4, 14, 7, kSec, 0);
+    put32(b, (1u << 31) | (1u << 29) | (1u << 27) | (1u << 21) | (1u << 15));
+    put_q44_20(b, rate_hz);
+    put_q44_20(b, freq_hz);
+    put_q44_20(b, rate_hz);
+    put32(b, format_word);
+    put32(b, 0);
+    return b;
+}
+
+// Data Payload Format words: complex Cartesian (bits 30-29 = 01), item format in bits 28-24, packing field
+// size - 1 in bits 11-6, item size - 1 in bits 5-0.
+constexpr uint32_t kFormatI16 = (1u << 29) | (15u << 6) | 15u;
+constexpr uint32_t kFormatF32 = (1u << 29) | (0x0Eu << 24) | (31u << 6) | 31u;
+
 using vrt::Assembler;
 Assembler::Kind push(Assembler& a, const Bytes& b) {
     return a.push(std::span<const uint8_t>(b.data(), b.size()));
@@ -209,6 +227,19 @@ void test_rate_mismatch_throws() {
     CHECK(throws(b, context_packet(2'048'000, 1.09e9)));
 }
 
+void test_payload_format() {
+    Assembler a({});
+    CHECK(push(a, context_packet_with_format(kRate, 1.09e9, kFormatI16)) == Assembler::Kind::Context);
+    CHECK(a.sample_rate_hz() == kRate);
+    CHECK(push(a, data_packet(0)) == Assembler::Kind::Data);
+    // Link-efficient packing (bit 31) reads the same for 16-bit items in 16-bit fields.
+    CHECK(push(a, context_packet_with_format(kRate, 1.09e9, kFormatI16 | (1u << 31))) == Assembler::Kind::Context);
+    Assembler b({});
+    CHECK(throws(b, context_packet_with_format(kRate, 1.09e9, kFormatF32)));
+    Assembler c({});
+    CHECK(throws(c, context_packet_with_format(kRate, 1.09e9, (2u << 29) | (15u << 6) | 15u)));  // real, not complex
+}
+
 void test_stream_id_filtering() {
     Assembler a({.sample_rate_hz = kRate});
     CHECK(push(a, data_packet(0, 7)) == Assembler::Kind::Data);  // latches stream 7
@@ -248,6 +279,7 @@ int main() {
     test_duplicate_and_late();
     test_sender_restart();
     test_rate_mismatch_throws();
+    test_payload_format();
     test_stream_id_filtering();
     test_invalid_packets();
     if (g_failures) {

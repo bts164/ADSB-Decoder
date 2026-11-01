@@ -18,6 +18,8 @@ service Receiver {
   rpc WatchAircraft(WatchAircraftRequest) returns (stream AircraftChanges);
   // The input's status, once there is one, then at each change.
   rpc WatchInputStatus(WatchInputStatusRequest) returns (stream InputStatus);
+  // The receiver's position and its GPS's state, now and at each change.
+  rpc WatchReceiverPosition(WatchReceiverPositionRequest) returns (stream ReceiverPosition);
   // The spectrum's rows as they're computed. The server computes them only while one of these calls is open.
   rpc WatchSpectrum(WatchSpectrumRequest) returns (stream SpectrumRow);
 
@@ -44,6 +46,8 @@ service History {
   rpc GetActivity(GetActivityRequest) returns (Activity);
   // How many flights crossed each cell of an area.
   rpc GetHeatmap(GetHeatmapRequest) returns (Heatmap);
+  // The receiver's positions recorded in a time range.
+  rpc GetReceiverPositions(GetReceiverPositionsRequest) returns (ReceiverPositions);
 }
 
 // ---- Receiver: info and live data ----
@@ -151,6 +155,29 @@ message InputStatus {
   string summary = 8;
 }
 
+message WatchReceiverPositionRequest {}
+
+enum GpsState {
+  GPS_STATE_UNSPECIFIED = 0;
+  NO_GPS = 1;            // the input has no GPS: every source but sidekiq, or sidekiq with --gpsd none
+  GPSD_UNREACHABLE = 2;  // sidekiq: gpsd isn't answering at --gpsd
+  NO_FIX = 3;            // gpsd answers, but has no fix, or no GPS device; summary says which
+  FIX_2D = 4;
+  FIX_3D = 5;
+}
+
+message ReceiverPosition {
+  double t = 1;                         // Unix s, system clock, when this state was reached or reported
+  GpsState state = 2;
+  optional double lat = 3;              // with a fix
+  optional double lon = 4;
+  optional double alt_m = 5;            // with a 3D fix: above the WGS84 ellipsoid where gpsd reports it, else MSL
+  optional double error_m = 6;          // gpsd's horizontal error estimate (eph)
+  optional uint32 satellites_used = 7;  // when gpsd reports its sky
+  optional uint32 satellites_seen = 8;
+  string summary = 9;                   // one line for the log and the UI's tooltip
+}
+
 message WatchSpectrumRequest {}
 
 message SpectrumRow {
@@ -241,6 +268,7 @@ message Snapshot {
     repeated TrackPoint track = 2;  // oldest first
   }
   repeated Entry aircraft = 4;
+  ReceiverPosition receiver = 5;  // the receiver at t; unset where nothing was recording it
 }
 
 message TrackPoint {
@@ -293,4 +321,13 @@ message Heatmap {
   // The nonzero cells: row-major index (row 0 at the north) and flight count, one pair per position.
   repeated uint32 cell_index = 2;
   repeated uint32 cell_count = 3;
+}
+
+message GetReceiverPositionsRequest {
+  optional double from = 1;  // Unix s; unset for the database's start
+  optional double to = 2;    // Unix s; unset for its end
+}
+
+message ReceiverPositions {
+  repeated ReceiverPosition positions = 1;  // oldest first; each holds until the next, or for 90 s at most
 }

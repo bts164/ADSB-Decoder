@@ -86,6 +86,7 @@ struct Capture {
     uint64_t written = 0;
     std::string datatype;
     nlohmann::json segments = nlohmann::json::array();  // SigMF captures, one per run without a gap
+    nlohmann::json geolocation;                         // SigMF core:geolocation; null without a fix
 };
 
 // Bytes per sample of a SigMF core:datatype, such as cf32_le (8) or ru8 (1); 0 for one it can't parse.
@@ -134,6 +135,15 @@ std::string description(const CapturePoint& point) { return std::string("adsb ca
 // The stream time a capture has covered that isn't in its file.
 uint64_t missing(const Capture& c) { return c.start ? c.next - *c.start - c.written : 0; }
 
+// The receiver's fix as a GeoJSON point, [lon, lat] or with a 3D fix [lon, lat, alt]; null without a fix.
+nlohmann::json geolocation(const api::ReceiverPosition& receiver) {
+    const bool fix = receiver.state() == api::FIX_2D || receiver.state() == api::FIX_3D;
+    if (!fix || !receiver.has_lat() || !receiver.has_lon()) return nullptr;
+    nlohmann::json coordinates = {receiver.lon(), receiver.lat()};
+    if (receiver.state() == api::FIX_3D && receiver.has_alt_m()) coordinates.push_back(receiver.alt_m());
+    return {{"type", "Point"}, {"coordinates", std::move(coordinates)}};
+}
+
 coro::Coro<void> write_meta(const Capture& c, const CapturePoint& point) {
     nlohmann::json global = {
         {"core:datatype", c.datatype},
@@ -142,6 +152,7 @@ coro::Coro<void> write_meta(const Capture& c, const CapturePoint& point) {
         {"core:recorder", "adsb"},
         {"core:description", description(point)},
     };
+    if (!c.geolocation.is_null()) global["core:geolocation"] = c.geolocation;
     const nlohmann::json meta = {{"global", std::move(global)}, {"captures", c.segments},
                                  {"annotations", nlohmann::json::array()}};
     coro::File file = co_await coro::File::open(c.meta_path, coro::FileMode::Write | coro::FileMode::Create |
@@ -151,7 +162,7 @@ coro::Coro<void> write_meta(const Capture& c, const CapturePoint& point) {
 
 // Opens the capture a call asks for.
 coro::Coro<Capture> start(const CapturePoint& point, const api::RecordCaptureRequest& request,
-                          const std::string& dir) {
+                          const std::string& dir, const api::ReceiverPosition& receiver) {
     const std::string base = (std::filesystem::path(dir) / request.name()).string();
     const std::string data_path = base + ".sigmf-data";
     const std::string meta_path = base + ".sigmf-meta";
@@ -183,7 +194,8 @@ coro::Coro<Capture> start(const CapturePoint& point, const api::RecordCaptureReq
                       .data = std::move(*data),
                       .samples = samples,
                       .start = std::nullopt,
-                      .datatype = {}};
+                      .datatype = {},
+                      .geolocation = geolocation(receiver)};
 }
 
 // Writes what of `item` falls in the capture. True once the capture is done: its duration covered, or the
@@ -306,8 +318,9 @@ coro::Coro<Result> write_capture(Capture c, CapturePoint point, coro::BroadcastR
 // Both points' run_capture().
 template <class Item>
 coro::CoroStream<api::RecordCaptureProgress> capture_stream(CapturePoint point, coro::BroadcastReceiver<Item> in,
-                                                            api::RecordCaptureRequest request, std::string dir) {
-    Capture c = co_await start(point, request, dir);
+                                                            api::RecordCaptureRequest request, std::string dir,
+                                                            api::ReceiverPosition receiver) {
+    Capture c = co_await start(point, request, dir, receiver);
     auto [progress_tx, progress] = coro::watch_channel(api::RecordCaptureProgress{});
     // Held in this frame, so dropping the stream cancels it.
     coro::JoinHandle<Result> writer = coro::build_task().name("capture_writer").spawn(
@@ -328,14 +341,16 @@ coro::CoroStream<api::RecordCaptureProgress> capture_stream(CapturePoint point, 
 }  // namespace
 
 coro::CoroStream<api::RecordCaptureProgress> run_capture(CapturePoint point, coro::BroadcastReceiver<IqBlock> in,
-                                                         api::RecordCaptureRequest request, std::string dir) {
-    return capture_stream(point, std::move(in), std::move(request), std::move(dir));
+                                                         api::RecordCaptureRequest request, std::string dir,
+                                                         api::ReceiverPosition receiver) {
+    return capture_stream(point, std::move(in), std::move(request), std::move(dir), std::move(receiver));
 }
 
 coro::CoroStream<api::RecordCaptureProgress> run_capture(CapturePoint point,
                                                          coro::BroadcastReceiver<EnvelopeShare> in,
-                                                         api::RecordCaptureRequest request, std::string dir) {
-    return capture_stream(point, std::move(in), std::move(request), std::move(dir));
+                                                         api::RecordCaptureRequest request, std::string dir,
+                                                         api::ReceiverPosition receiver) {
+    return capture_stream(point, std::move(in), std::move(request), std::move(dir), std::move(receiver));
 }
 
 std::expected<std::string, std::string> resolve_capture_dir(const std::string& dir) {

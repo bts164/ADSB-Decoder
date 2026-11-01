@@ -2,58 +2,145 @@ part of 'frame_table_page.dart';
 
 /// The spectrum waterfall in the dock.
 extension _Spectrum on _FrameTablePageState {
-  /// Scrolling waterfall of the raw pre-resample IQ spectrum -- lets you see
-  /// at a glance whether the tuner is centered on 1090 MHz (the signal
-  /// should sit on the dashed center line) and how noisy the band is outside
-  /// the ADS-B channel itself. Rebuilds only on new spectrum data (via
-  /// ValueListenableBuilder), independent of the once-a-second frame/
+  /// The raw pre-resample IQ spectrum, as a PSD over a scrolling waterfall
+  /// -- lets you see at a glance whether the tuner is centered on 1090 MHz
+  /// (the signal should sit on the dashed center line) and how noisy the band
+  /// is outside the ADS-B channel itself. Rebuilds only on new spectrum data
+  /// (via ValueListenableBuilder), independent of the once-a-second frame/
   /// aircraft flush.
   Widget _buildSpectrumPane() {
-    return Padding(
-      padding: const EdgeInsets.all(12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _buildSpectrumControls(),
-          const SizedBox(height: 4),
-          Expanded(
-            child: ValueListenableBuilder<List<_WaterfallRow>>(
-              valueListenable: _spectrumHistory,
-              builder: (context, rows, _) {
-                if (rows.isEmpty) {
-                  return const Center(child: Text('No spectrum data yet'));
-                }
-                final latest = rows.last;
-                final halfSpanMhz = latest.rateHz / 2 / 1e6;
-                final centerMhz = latest.freqHz / 1e6;
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Expanded(
-                      child: ClipRect(
-                        child: CustomPaint(
-                          size: Size.infinite,
-                          painter: _WaterfallPainter(rows),
+    final theme = Theme.of(context);
+    return Stack(
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(12),
+          child: ValueListenableBuilder<List<_WaterfallRow>>(
+            valueListenable: _spectrumHistory,
+            builder: (context, rows, _) {
+              if (rows.isEmpty) {
+                return const Center(child: Text('No spectrum data yet'));
+              }
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Expanded(
+                    flex: 2,
+                    child: ClipRect(
+                      child: _spectrumInteractive(
+                        _SpectrumPlot.psd,
+                        ListenableBuilder(
+                          listenable: _spectrumHolds,
+                          builder: (context, _) => CustomPaint(
+                            size: Size.infinite,
+                            painter: _PsdPainter(
+                              rows: rows,
+                              view: _spectrumView,
+                              holds: _spectrumHolds,
+                              range: _spectrumRange.value,
+                              persistRows: _units.spectrumPersistRows,
+                              colormap: _units.spectrumPsdColored ? _units.spectrumColormap : null,
+                              traceColor: theme.colorScheme.onSurface,
+                              gridColor: theme.colorScheme.outlineVariant,
+                              labelStyle: theme.textTheme.labelSmall!
+                                  .copyWith(color: theme.colorScheme.onSurfaceVariant),
+                            ),
+                          ),
                         ),
                       ),
                     ),
-                    const SizedBox(height: 4),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  ),
+                  const SizedBox(height: 4),
+                  _buildSpectrumReadout(rows),
+                  Expanded(
+                    flex: 3,
+                    child: ClipRect(
+                      child: _spectrumInteractive(
+                        _SpectrumPlot.waterfall,
+                        CustomPaint(
+                          size: Size.infinite,
+                          painter: _WaterfallPainter(rows, _spectrumView),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              );
+            },
+          ),
+        ),
+        if (_spectrumControlsShown)
+          Positioned(
+            top: 4,
+            right: 4,
+            left: 4,
+            child: Align(
+              alignment: Alignment.topRight,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 480),
+                child: Material(
+                  elevation: 6,
+                  borderRadius: BorderRadius.circular(8),
+                  color: theme.colorScheme.surfaceContainerHigh,
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 4, 4, 8),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        Text('${(centerMhz - halfSpanMhz).toStringAsFixed(3)} MHz'),
-                        Text('${centerMhz.toStringAsFixed(3)} MHz (center)'),
-                        Text('${(centerMhz + halfSpanMhz).toStringAsFixed(3)} MHz'),
+                        Row(
+                          children: [
+                            Text('Display', style: theme.textTheme.titleSmall),
+                            const Spacer(),
+                            IconButton(
+                              icon: const Icon(Icons.close, size: 18),
+                              tooltip: 'Hide the display settings',
+                              visualDensity: VisualDensity.compact,
+                              onPressed: () => _showSpectrumControls(false),
+                            ),
+                          ],
+                        ),
+                        _buildSpectrumControls(),
+                        _buildHoldControls(),
+                        _buildPsdControls(),
                       ],
                     ),
-                  ],
-                );
-              },
+                  ),
+                ),
+              ),
             ),
           ),
-        ],
-      ),
+      ],
     );
+  }
+
+  /// The section's title, with the button that shows the display settings over the plots, out of their way
+  /// otherwise.
+  Widget _buildSpectrumTitle() {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const Text('Spectrum'),
+        const SizedBox(width: 12),
+        // Labelled and filled, so it reads as a control rather than part of the title.
+        Tooltip(
+          message: _spectrumControlsShown ? 'Hide the display settings' : 'Colors, holds and persistence',
+          child: FilledButton.tonalIcon(
+            icon: Icon(_spectrumControlsShown ? Icons.expand_less : Icons.tune, size: 18),
+            label: const Text('Display'),
+            style: FilledButton.styleFrom(
+              visualDensity: VisualDensity.compact,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            onPressed: () => _showSpectrumControls(!_spectrumControlsShown),
+          ),
+        ),
+      ],
+    );
+  }
+
+  void _showSpectrumControls(bool shown) {
+    _spectrumControlsShown = shown;
+    _aircraftChanged.notify();
   }
 
   /// The colormap, the color range in dB above the noise floor, and a color bar of the two. The range follows
@@ -128,6 +215,271 @@ extension _Spectrum on _FrameTablePageState {
       ),
     );
   }
+
+  /// The PSD's persistence, and whether its traces take the colormap's colors.
+  Widget _buildPsdControls() {
+    const choices = DisplaySettings.spectrumPersistChoices;
+    final index = choices.indexOf(_units.spectrumPersistRows);
+    String rows(int n) => n == 0 ? 'off' : '$n rows';
+    return Row(
+      children: [
+        const Tooltip(
+          message: 'How many rows behind the newest trace stay shown, fading with age; a row is up to 50 ms',
+          child: Text('Persistence'),
+        ),
+        Expanded(
+          child: Slider(
+            value: (index < 0 ? choices.indexOf(DisplaySettings.defaultSpectrumPersistRows) : index).toDouble(),
+            max: (choices.length - 1).toDouble(),
+            divisions: choices.length - 1,
+            label: rows(_units.spectrumPersistRows),
+            onChanged: (v) => _units.spectrumPersistRows = choices[v.round()],
+          ),
+        ),
+        SizedBox(width: 56, child: Text(rows(_units.spectrumPersistRows))),
+        FilterChip(
+          avatar: const Icon(Icons.palette_outlined, size: 16),
+          label: const Text('Color by level'),
+          selected: _units.spectrumPsdColored,
+          showCheckmark: false,
+          visualDensity: VisualDensity.compact,
+          tooltip: 'Color the traces by level with the colormap, as the waterfall is',
+          onSelected: (v) => _units.spectrumPsdColored = v,
+        ),
+      ],
+    );
+  }
+
+  /// A toggle for each of the PSD's hold traces, and a reset for all of them.
+  Widget _buildHoldControls() {
+    return ListenableBuilder(
+      listenable: _spectrumHolds,
+      builder: (context, _) => Row(
+        children: [
+          const Text('Hold'),
+          const SizedBox(width: 8),
+          for (final hold in _SpectrumHold.values) ...[
+            FilterChip(
+              avatar: Icon(Icons.show_chart, size: 16, color: hold.color),
+              label: Text(hold.label),
+              selected: _spectrumHolds.shown.contains(hold),
+              showCheckmark: false,
+              visualDensity: VisualDensity.compact,
+              tooltip: hold.description,
+              onSelected: (_) => _spectrumHolds.toggle(hold),
+            ),
+            const SizedBox(width: 6),
+          ],
+          IconButton(
+            icon: const Icon(Icons.restart_alt),
+            tooltip: 'Restart the holds',
+            visualDensity: VisualDensity.compact,
+            onPressed: _spectrumHolds.count == 0 ? null : _spectrumHolds.reset,
+          ),
+          const Spacer(),
+          if (_spectrumHolds.count > 0) Text('${_spectrumHolds.count} rows'),
+        ],
+      ),
+    );
+  }
+}
+
+/// The PSD's hold traces.
+enum _SpectrumHold {
+  max('Max', 'Each bin\'s highest level since the holds restarted', Colors.orange),
+  min('Min', 'Each bin\'s lowest level since the holds restarted', Colors.lightBlue),
+  avg('Avg', 'Each bin\'s average power since the holds restarted', Colors.lightGreen);
+
+  const _SpectrumHold(this.label, this.description, this.color);
+  final String label;
+  final String description;
+  final Color color;
+}
+
+/// Each bin's highest, lowest and average level over the rows since the last reset or retune, and which of
+/// them the PSD shows. Kept whether shown or not, so a hold turned on shows everything since the reset.
+class _SpectrumHolds extends ChangeNotifier {
+  final Set<_SpectrumHold> shown = {};
+  int count = 0;
+  Float32List? _maxDb;
+  Float32List? _minDb;
+  // Linear power, so the average is of power, as a spectrum analyser's is, rather than of dB.
+  Float64List? _powerSum;
+  double _freqHz = 0;
+  double _rateHz = 0;
+
+  void add(List<double> binsDb, double freqHz, double rateHz) {
+    final maxDb = _maxDb, minDb = _minDb, powerSum = _powerSum;
+    // A retune or a new FFT size starts the holds over: old bins would be other frequencies.
+    if (maxDb == null || minDb == null || powerSum == null || maxDb.length != binsDb.length ||
+        freqHz != _freqHz || rateHz != _rateHz) {
+      _maxDb = Float32List.fromList(binsDb);
+      _minDb = Float32List.fromList(binsDb);
+      _powerSum = Float64List.fromList([for (final db in binsDb) math.pow(10, db / 10).toDouble()]);
+      _freqHz = freqHz;
+      _rateHz = rateHz;
+      count = 1;
+      return;
+    }
+    for (var i = 0; i < binsDb.length; i++) {
+      final db = binsDb[i];
+      if (db > maxDb[i]) maxDb[i] = db;
+      if (db < minDb[i]) minDb[i] = db;
+      powerSum[i] += math.pow(10, db / 10);
+    }
+    count++;
+  }
+
+  /// The hold's level in each bin, in dB; null before any row.
+  List<double>? levels(_SpectrumHold hold) {
+    final powerSum = _powerSum;
+    return switch (hold) {
+      _SpectrumHold.max => _maxDb,
+      _SpectrumHold.min => _minDb,
+      _SpectrumHold.avg =>
+        powerSum == null ? null : [for (final p in powerSum) 10 * math.log(p / count) / math.ln10],
+    };
+  }
+
+  void toggle(_SpectrumHold hold) {
+    if (!shown.remove(hold)) shown.add(hold);
+    notifyListeners();
+  }
+
+  void reset() {
+    _maxDb = null;
+    _minDb = null;
+    _powerSum = null;
+    count = 0;
+    notifyListeners();
+  }
+}
+
+/// The latest row as a trace over the rows just before it, fading with age, so a short burst lingers, and the
+/// shown holds over both. The levels run over the color range above the newest row's noise floor, so a
+/// trace's height matches its color in the waterfall below, bin for bin.
+class _PsdPainter extends CustomPainter {
+  _PsdPainter({
+    required this.rows,
+    required this.view,
+    required this.holds,
+    required this.range,
+    required this.persistRows,
+    required this.colormap,
+    required this.traceColor,
+    required this.gridColor,
+    required this.labelStyle,
+  }) : super(repaint: view.zoomChanged);
+
+  /// Oldest first.
+  final List<_WaterfallRow> rows;
+  final _SpectrumView view;
+  final _SpectrumHolds holds;
+  final RangeValues range;
+  /// Rows drawn behind the newest.
+  final int persistRows;
+  /// Colors each trace by level when given; otherwise they're all `traceColor`.
+  final SpectrumColormap? colormap;
+  final Color traceColor;
+  final Color gridColor;
+  final TextStyle labelStyle;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (rows.isEmpty || size.width <= 0 || size.height <= 0) return;
+    final floorDb = rows.last.floorDb;
+    final low = floorDb + range.start;
+    final span = math.max(range.end - range.start, 1.0);
+    double y(double db) => size.height - (db - low) / span * size.height;
+
+    final grid = Paint()..color = gridColor;
+    final step = niceStep(span, 4);
+    for (var above = (range.start / step).ceil() * step; above <= range.start + span + 1e-9; above += step) {
+      final at = y(floorDb + above);
+      canvas.drawLine(Offset(0, at), Offset(size.width, at), grid);
+      final label = TextPainter(
+        text: TextSpan(text: '${above > 0 ? '+' : ''}${above.round()} dB', style: labelStyle),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      label.paint(canvas, Offset(2, math.max(0, at - label.height)));
+      label.dispose();
+    }
+
+    final columns = size.width.ceil();
+    final recent = rows.length > persistRows + 1 ? rows.sublist(rows.length - persistRows - 1) : rows;
+    for (var i = 0; i < recent.length; i++) {
+      final newest = i == recent.length - 1;
+      final paint = _tracePaint(size, newest ? 1.5 : 1, newest ? 1 : 0.05 + 0.3 * (i + 1) / recent.length);
+      canvas.drawPath(_trace(recent[i].binsDb, columns, size, y), paint);
+    }
+    for (final hold in _SpectrumHold.values) {
+      final levels = holds.shown.contains(hold) ? holds.levels(hold) : null;
+      if (levels == null || levels.length != rows.last.binsDb.length) continue;
+      final paint = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.5
+        ..color = hold.color;
+      canvas.drawPath(_trace(levels, columns, size, y, lowest: hold == _SpectrumHold.min), paint);
+    }
+  }
+
+  // The plot's y runs over the color range, so a vertical gradient of the colormap gives each point of a trace
+  // the color its level has in the waterfall.
+  Paint _tracePaint(Size size, double width, double alpha) {
+    final paint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = width;
+    final stops = colormap?.stops;
+    if (stops == null) return paint..color = traceColor.withValues(alpha: alpha);
+    return paint
+      ..shader = LinearGradient(
+        begin: Alignment.bottomCenter,
+        end: Alignment.topCenter,
+        colors: [for (final c in stops) c.withValues(alpha: c.a * alpha)],
+      ).createShader(Offset.zero & size);
+  }
+
+  // At most one level per pixel column: the highest of the bins it covers, or with `lowest` the lowest, so a
+  // burst narrower than a column still shows.
+  static List<double> _columns(List<double> bins, int columns, {bool lowest = false}) {
+    if (bins.length <= columns) return bins;
+    final out = List<double>.filled(columns, 0);
+    for (var c = 0; c < columns; c++) {
+      final start = c * bins.length ~/ columns, end = (c + 1) * bins.length ~/ columns;
+      var v = bins[start];
+      for (var i = start + 1; i < end; i++) {
+        v = lowest ? math.min(v, bins[i]) : math.max(v, bins[i]);
+      }
+      out[c] = v;
+    }
+    return out;
+  }
+
+  // The bins in view, each at the centre of its share of the width, as the waterfall stretches each bin across
+  // its share. Zoomed in to fewer bins than columns, the bin past each edge is drawn too, so the trace runs off
+  // the plot rather than stopping short of its edges.
+  ui.Path _trace(List<double> bins, int columns, Size size, double Function(double db) y, {bool lowest = false}) {
+    final n = bins.length;
+    final first = (view.lo * n).floor(), end = math.min(n, (view.hi * n).ceil());
+    final path = ui.Path();
+    void point(int i, double x, double db) => i == 0 ? path.moveTo(x, y(db)) : path.lineTo(x, y(db));
+    if (end - first > columns) {
+      final levels = _columns(bins.sublist(first, end), columns, lowest: lowest);
+      for (var i = 0; i < levels.length; i++) {
+        point(i, (i + 0.5) / levels.length * size.width, levels[i]);
+      }
+    } else {
+      final from = math.max(0, first - 1);
+      for (var i = from; i < math.min(n, end + 1); i++) {
+        point(i - from, view.xOf((i + 0.5) / n, size.width), bins[i]);
+      }
+    }
+    return path;
+  }
+
+  // Rebuilt for each new row, and the holds change in place.
+  @override
+  bool shouldRepaint(covariant _PsdPainter oldDelegate) => true;
 }
 
 /// One waterfall row: a peak-hold spectrum of the raw pre-resample IQ
@@ -200,16 +552,19 @@ class _WaterfallRow {
 /// frequency so an off-tuned signal is visually obvious.
 class _WaterfallPainter extends CustomPainter {
   final List<_WaterfallRow> rows;
+  final _SpectrumView view;
 
-  _WaterfallPainter(this.rows);
+  _WaterfallPainter(this.rows, this.view) : super(repaint: view.zoomChanged);
 
   @override
   void paint(Canvas canvas, Size size) {
     if (rows.isEmpty || size.height <= 0 || size.width <= 0) return;
 
-    // Mipmapped, since there are usually more bins than pixels across.
+    // Mipmapped while there are more bins in view than pixels across; zoomed in past that, each bin a sharp
+    // block, as the PSD draws it, rather than blurred into its neighbours.
+    final binsInView = rows.last.image.width * (view.hi - view.lo);
     final rowPaint = Paint()
-      ..filterQuality = FilterQuality.medium
+      ..filterQuality = binsInView > size.width ? FilterQuality.medium : FilterQuality.none
       ..isAntiAlias = false;
     final rowHeight = size.height / _maxSpectrumRowsHint;
     for (int i = 0; i < rows.length; i++) {
@@ -219,14 +574,15 @@ class _WaterfallPainter extends CustomPainter {
       // scrolling downward as time passes.
       final y = (rows.length - 1 - i) * rowHeight;
       if (y > size.height) continue;
-      canvas.drawImageRect(image, Rect.fromLTWH(0, 0, image.width.toDouble(), 1),
+      canvas.drawImageRect(image, Rect.fromLTRB(view.lo * image.width, 0, view.hi * image.width, 1),
           Rect.fromLTWH(0, y, size.width, rowHeight), rowPaint);
     }
 
     final centerPaint = Paint()
       ..color = Colors.white.withValues(alpha: 0.6)
       ..strokeWidth = 1;
-    final centerX = size.width / 2;
+    final centerX = view.xOf(0.5, size.width);
+    if (centerX < 0 || centerX > size.width) return;
     const dash = 6.0;
     for (double y = 0; y < size.height; y += dash * 2) {
       canvas.drawLine(Offset(centerX, y), Offset(centerX, math.min(y + dash, size.height)), centerPaint);

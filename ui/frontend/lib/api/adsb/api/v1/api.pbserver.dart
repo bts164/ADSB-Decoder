@@ -29,6 +29,8 @@ abstract class ReceiverServiceBase extends $pb.GeneratedService {
       $pb.ServerContext ctx, $0.WatchAircraftRequest request);
   $async.Future<$0.InputStatus> watchInputStatus(
       $pb.ServerContext ctx, $0.WatchInputStatusRequest request);
+  $async.Future<$0.ReceiverPosition> watchReceiverPosition(
+      $pb.ServerContext ctx, $0.WatchReceiverPositionRequest request);
   $async.Future<$0.SpectrumRow> watchSpectrum(
       $pb.ServerContext ctx, $0.WatchSpectrumRequest request);
   $async.Future<$0.Settings> watchSettings(
@@ -50,6 +52,8 @@ abstract class ReceiverServiceBase extends $pb.GeneratedService {
         return $0.WatchAircraftRequest();
       case 'WatchInputStatus':
         return $0.WatchInputStatusRequest();
+      case 'WatchReceiverPosition':
+        return $0.WatchReceiverPositionRequest();
       case 'WatchSpectrum':
         return $0.WatchSpectrumRequest();
       case 'WatchSettings':
@@ -76,6 +80,9 @@ abstract class ReceiverServiceBase extends $pb.GeneratedService {
         return watchAircraft(ctx, request as $0.WatchAircraftRequest);
       case 'WatchInputStatus':
         return watchInputStatus(ctx, request as $0.WatchInputStatusRequest);
+      case 'WatchReceiverPosition':
+        return watchReceiverPosition(
+            ctx, request as $0.WatchReceiverPositionRequest);
       case 'WatchSpectrum':
         return watchSpectrum(ctx, request as $0.WatchSpectrumRequest);
       case 'WatchSettings':
@@ -105,6 +112,8 @@ abstract class HistoryServiceBase extends $pb.GeneratedService {
       $pb.ServerContext ctx, $0.GetActivityRequest request);
   $async.Future<$0.Heatmap> getHeatmap(
       $pb.ServerContext ctx, $0.GetHeatmapRequest request);
+  $async.Future<$0.ReceiverPositions> getReceiverPositions(
+      $pb.ServerContext ctx, $0.GetReceiverPositionsRequest request);
 
   $pb.GeneratedMessage createRequest($core.String methodName) {
     switch (methodName) {
@@ -116,6 +125,8 @@ abstract class HistoryServiceBase extends $pb.GeneratedService {
         return $0.GetActivityRequest();
       case 'GetHeatmap':
         return $0.GetHeatmapRequest();
+      case 'GetReceiverPositions':
+        return $0.GetReceiverPositionsRequest();
       default:
         throw $core.ArgumentError('Unknown method: $methodName');
     }
@@ -132,6 +143,9 @@ abstract class HistoryServiceBase extends $pb.GeneratedService {
         return getActivity(ctx, request as $0.GetActivityRequest);
       case 'GetHeatmap':
         return getHeatmap(ctx, request as $0.GetHeatmapRequest);
+      case 'GetReceiverPositions':
+        return getReceiverPositions(
+            ctx, request as $0.GetReceiverPositionsRequest);
       default:
         throw $core.ArgumentError('Unknown method: $methodName');
     }

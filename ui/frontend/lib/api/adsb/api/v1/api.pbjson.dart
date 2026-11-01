@@ -14,6 +14,24 @@ import 'dart:convert' as $convert;
 import 'dart:core' as $core;
 import 'dart:typed_data' as $typed_data;
 
+@$core.Deprecated('Use gpsStateDescriptor instead')
+const GpsState$json = {
+  '1': 'GpsState',
+  '2': [
+    {'1': 'GPS_STATE_UNSPECIFIED', '2': 0},
+    {'1': 'NO_GPS', '2': 1},
+    {'1': 'GPSD_UNREACHABLE', '2': 2},
+    {'1': 'NO_FIX', '2': 3},
+    {'1': 'FIX_2D', '2': 4},
+    {'1': 'FIX_3D', '2': 5},
+  ],
+};
+
+/// Descriptor for `GpsState`. Decode as a `google.protobuf.EnumDescriptorProto`.
+final $typed_data.Uint8List gpsStateDescriptor = $convert.base64Decode(
+    'CghHcHNTdGF0ZRIZChVHUFNfU1RBVEVfVU5TUEVDSUZJRUQQABIKCgZOT19HUFMQARIUChBHUF'
+    'NEX1VOUkVBQ0hBQkxFEAISCgoGTk9fRklYEAMSCgoGRklYXzJEEAQSCgoGRklYXzNEEAU=');
+
 @$core.Deprecated('Use capturePointDescriptor instead')
 const CapturePoint$json = {
   '1': 'CapturePoint',
@@ -513,6 +531,80 @@ final $typed_data.Uint8List inputStatusDescriptor = $convert.base64Decode(
     'gAUgtrZXJuZWxEcm9wc4gBARIOCgJvaxgHIAEoCFICb2sSGAoHc3VtbWFyeRgIIAEoCVIHc3Vt'
     'bWFyeUIPCg1fa2VybmVsX2Ryb3Bz');
 
+@$core.Deprecated('Use watchReceiverPositionRequestDescriptor instead')
+const WatchReceiverPositionRequest$json = {
+  '1': 'WatchReceiverPositionRequest',
+};
+
+/// Descriptor for `WatchReceiverPositionRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List watchReceiverPositionRequestDescriptor =
+    $convert.base64Decode('ChxXYXRjaFJlY2VpdmVyUG9zaXRpb25SZXF1ZXN0');
+
+@$core.Deprecated('Use receiverPositionDescriptor instead')
+const ReceiverPosition$json = {
+  '1': 'ReceiverPosition',
+  '2': [
+    {'1': 't', '3': 1, '4': 1, '5': 1, '10': 't'},
+    {
+      '1': 'state',
+      '3': 2,
+      '4': 1,
+      '5': 14,
+      '6': '.adsb.api.v1.GpsState',
+      '10': 'state'
+    },
+    {'1': 'lat', '3': 3, '4': 1, '5': 1, '9': 0, '10': 'lat', '17': true},
+    {'1': 'lon', '3': 4, '4': 1, '5': 1, '9': 1, '10': 'lon', '17': true},
+    {'1': 'alt_m', '3': 5, '4': 1, '5': 1, '9': 2, '10': 'altM', '17': true},
+    {
+      '1': 'error_m',
+      '3': 6,
+      '4': 1,
+      '5': 1,
+      '9': 3,
+      '10': 'errorM',
+      '17': true
+    },
+    {
+      '1': 'satellites_used',
+      '3': 7,
+      '4': 1,
+      '5': 13,
+      '9': 4,
+      '10': 'satellitesUsed',
+      '17': true
+    },
+    {
+      '1': 'satellites_seen',
+      '3': 8,
+      '4': 1,
+      '5': 13,
+      '9': 5,
+      '10': 'satellitesSeen',
+      '17': true
+    },
+    {'1': 'summary', '3': 9, '4': 1, '5': 9, '10': 'summary'},
+  ],
+  '8': [
+    {'1': '_lat'},
+    {'1': '_lon'},
+    {'1': '_alt_m'},
+    {'1': '_error_m'},
+    {'1': '_satellites_used'},
+    {'1': '_satellites_seen'},
+  ],
+};
+
+/// Descriptor for `ReceiverPosition`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List receiverPositionDescriptor = $convert.base64Decode(
+    'ChBSZWNlaXZlclBvc2l0aW9uEgwKAXQYASABKAFSAXQSKwoFc3RhdGUYAiABKA4yFS5hZHNiLm'
+    'FwaS52MS5HcHNTdGF0ZVIFc3RhdGUSFQoDbGF0GAMgASgBSABSA2xhdIgBARIVCgNsb24YBCAB'
+    'KAFIAVIDbG9uiAEBEhgKBWFsdF9tGAUgASgBSAJSBGFsdE2IAQESHAoHZXJyb3JfbRgGIAEoAU'
+    'gDUgZlcnJvck2IAQESLAoPc2F0ZWxsaXRlc191c2VkGAcgASgNSARSDnNhdGVsbGl0ZXNVc2Vk'
+    'iAEBEiwKD3NhdGVsbGl0ZXNfc2VlbhgIIAEoDUgFUg5zYXRlbGxpdGVzU2VlbogBARIYCgdzdW'
+    '1tYXJ5GAkgASgJUgdzdW1tYXJ5QgYKBF9sYXRCBgoEX2xvbkIICgZfYWx0X21CCgoIX2Vycm9y'
+    'X21CEgoQX3NhdGVsbGl0ZXNfdXNlZEISChBfc2F0ZWxsaXRlc19zZWVu');
+
 @$core.Deprecated('Use watchSpectrumRequestDescriptor instead')
 const WatchSpectrumRequest$json = {
   '1': 'WatchSpectrumRequest',
@@ -748,6 +840,14 @@ const Snapshot$json = {
       '6': '.adsb.api.v1.Snapshot.Entry',
       '10': 'aircraft'
     },
+    {
+      '1': 'receiver',
+      '3': 5,
+      '4': 1,
+      '5': 11,
+      '6': '.adsb.api.v1.ReceiverPosition',
+      '10': 'receiver'
+    },
   ],
   '3': [Snapshot_Entry$json],
   '8': [
@@ -783,9 +883,10 @@ const Snapshot_Entry$json = {
 final $typed_data.Uint8List snapshotDescriptor = $convert.base64Decode(
     'CghTbmFwc2hvdBIMCgF0GAEgASgBUgF0EhgKBXRfbWluGAIgASgBSABSBHRNaW6IAQESGAoFdF'
     '9tYXgYAyABKAFIAVIEdE1heIgBARI3CghhaXJjcmFmdBgEIAMoCzIbLmFkc2IuYXBpLnYxLlNu'
-    'YXBzaG90LkVudHJ5UghhaXJjcmFmdBpjCgVFbnRyeRIrCgVzdGF0ZRgBIAEoCzIVLmFkc2IuYX'
-    'BpLnYxLkFpcmNyYWZ0UgVzdGF0ZRItCgV0cmFjaxgCIAMoCzIXLmFkc2IuYXBpLnYxLlRyYWNr'
-    'UG9pbnRSBXRyYWNrQggKBl90X21pbkIICgZfdF9tYXg=');
+    'YXBzaG90LkVudHJ5UghhaXJjcmFmdBI5CghyZWNlaXZlchgFIAEoCzIdLmFkc2IuYXBpLnYxLl'
+    'JlY2VpdmVyUG9zaXRpb25SCHJlY2VpdmVyGmMKBUVudHJ5EisKBXN0YXRlGAEgASgLMhUuYWRz'
+    'Yi5hcGkudjEuQWlyY3JhZnRSBXN0YXRlEi0KBXRyYWNrGAIgAygLMhcuYWRzYi5hcGkudjEuVH'
+    'JhY2tQb2ludFIFdHJhY2tCCAoGX3RfbWluQggKBl90X21heA==');
 
 @$core.Deprecated('Use trackPointDescriptor instead')
 const TrackPoint$json = {
@@ -993,6 +1094,45 @@ final $typed_data.Uint8List heatmapDescriptor = $convert.base64Decode(
     'CgdIZWF0bWFwEhAKA21heBgBIAEoDVIDbWF4Eh0KCmNlbGxfaW5kZXgYAiADKA1SCWNlbGxJbm'
     'RleBIdCgpjZWxsX2NvdW50GAMgAygNUgljZWxsQ291bnQ=');
 
+@$core.Deprecated('Use getReceiverPositionsRequestDescriptor instead')
+const GetReceiverPositionsRequest$json = {
+  '1': 'GetReceiverPositionsRequest',
+  '2': [
+    {'1': 'from', '3': 1, '4': 1, '5': 1, '9': 0, '10': 'from', '17': true},
+    {'1': 'to', '3': 2, '4': 1, '5': 1, '9': 1, '10': 'to', '17': true},
+  ],
+  '8': [
+    {'1': '_from'},
+    {'1': '_to'},
+  ],
+};
+
+/// Descriptor for `GetReceiverPositionsRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List getReceiverPositionsRequestDescriptor =
+    $convert.base64Decode(
+        'ChtHZXRSZWNlaXZlclBvc2l0aW9uc1JlcXVlc3QSFwoEZnJvbRgBIAEoAUgAUgRmcm9tiAEBEh'
+        'MKAnRvGAIgASgBSAFSAnRviAEBQgcKBV9mcm9tQgUKA190bw==');
+
+@$core.Deprecated('Use receiverPositionsDescriptor instead')
+const ReceiverPositions$json = {
+  '1': 'ReceiverPositions',
+  '2': [
+    {
+      '1': 'positions',
+      '3': 1,
+      '4': 3,
+      '5': 11,
+      '6': '.adsb.api.v1.ReceiverPosition',
+      '10': 'positions'
+    },
+  ],
+};
+
+/// Descriptor for `ReceiverPositions`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List receiverPositionsDescriptor = $convert.base64Decode(
+    'ChFSZWNlaXZlclBvc2l0aW9ucxI7Cglwb3NpdGlvbnMYASADKAsyHS5hZHNiLmFwaS52MS5SZW'
+    'NlaXZlclBvc2l0aW9uUglwb3NpdGlvbnM=');
+
 const $core.Map<$core.String, $core.dynamic> ReceiverServiceBase$json = {
   '1': 'Receiver',
   '2': [
@@ -1017,6 +1157,12 @@ const $core.Map<$core.String, $core.dynamic> ReceiverServiceBase$json = {
       '1': 'WatchInputStatus',
       '2': '.adsb.api.v1.WatchInputStatusRequest',
       '3': '.adsb.api.v1.InputStatus',
+      '6': true
+    },
+    {
+      '1': 'WatchReceiverPosition',
+      '2': '.adsb.api.v1.WatchReceiverPositionRequest',
+      '3': '.adsb.api.v1.ReceiverPosition',
       '6': true
     },
     {
@@ -1064,6 +1210,9 @@ const $core.Map<$core.String, $core.Map<$core.String, $core.dynamic>>
   '.adsb.api.v1.AutopilotModes': AutopilotModes$json,
   '.adsb.api.v1.WatchInputStatusRequest': WatchInputStatusRequest$json,
   '.adsb.api.v1.InputStatus': InputStatus$json,
+  '.adsb.api.v1.WatchReceiverPositionRequest':
+      WatchReceiverPositionRequest$json,
+  '.adsb.api.v1.ReceiverPosition': ReceiverPosition$json,
   '.adsb.api.v1.WatchSpectrumRequest': WatchSpectrumRequest$json,
   '.adsb.api.v1.SpectrumRow': SpectrumRow$json,
   '.adsb.api.v1.WatchSettingsRequest': WatchSettingsRequest$json,
@@ -1085,14 +1234,16 @@ final $typed_data.Uint8List receiverServiceDescriptor = $convert.base64Decode(
     'ABElIKDVdhdGNoQWlyY3JhZnQSIS5hZHNiLmFwaS52MS5XYXRjaEFpcmNyYWZ0UmVxdWVzdBoc'
     'LmFkc2IuYXBpLnYxLkFpcmNyYWZ0Q2hhbmdlczABElQKEFdhdGNoSW5wdXRTdGF0dXMSJC5hZH'
     'NiLmFwaS52MS5XYXRjaElucHV0U3RhdHVzUmVxdWVzdBoYLmFkc2IuYXBpLnYxLklucHV0U3Rh'
-    'dHVzMAESTgoNV2F0Y2hTcGVjdHJ1bRIhLmFkc2IuYXBpLnYxLldhdGNoU3BlY3RydW1SZXF1ZX'
-    'N0GhguYWRzYi5hcGkudjEuU3BlY3RydW1Sb3cwARJLCg1XYXRjaFNldHRpbmdzEiEuYWRzYi5h'
-    'cGkudjEuV2F0Y2hTZXR0aW5nc1JlcXVlc3QaFS5hZHNiLmFwaS52MS5TZXR0aW5nczABEksKDl'
-    'VwZGF0ZVNldHRpbmdzEiIuYWRzYi5hcGkudjEuVXBkYXRlU2V0dGluZ3NSZXF1ZXN0GhUuYWRz'
-    'Yi5hcGkudjEuU2V0dGluZ3MSWAoNUmVjb3JkQ2FwdHVyZRIhLmFkc2IuYXBpLnYxLlJlY29yZE'
-    'NhcHR1cmVSZXF1ZXN0GiIuYWRzYi5hcGkudjEuUmVjb3JkQ2FwdHVyZVByb2dyZXNzMAESUwoM'
-    'TGlzdENhcHR1cmVzEiAuYWRzYi5hcGkudjEuTGlzdENhcHR1cmVzUmVxdWVzdBohLmFkc2IuYX'
-    'BpLnYxLkxpc3RDYXB0dXJlc1Jlc3BvbnNl');
+    'dHVzMAESYwoVV2F0Y2hSZWNlaXZlclBvc2l0aW9uEikuYWRzYi5hcGkudjEuV2F0Y2hSZWNlaX'
+    'ZlclBvc2l0aW9uUmVxdWVzdBodLmFkc2IuYXBpLnYxLlJlY2VpdmVyUG9zaXRpb24wARJOCg1X'
+    'YXRjaFNwZWN0cnVtEiEuYWRzYi5hcGkudjEuV2F0Y2hTcGVjdHJ1bVJlcXVlc3QaGC5hZHNiLm'
+    'FwaS52MS5TcGVjdHJ1bVJvdzABEksKDVdhdGNoU2V0dGluZ3MSIS5hZHNiLmFwaS52MS5XYXRj'
+    'aFNldHRpbmdzUmVxdWVzdBoVLmFkc2IuYXBpLnYxLlNldHRpbmdzMAESSwoOVXBkYXRlU2V0dG'
+    'luZ3MSIi5hZHNiLmFwaS52MS5VcGRhdGVTZXR0aW5nc1JlcXVlc3QaFS5hZHNiLmFwaS52MS5T'
+    'ZXR0aW5ncxJYCg1SZWNvcmRDYXB0dXJlEiEuYWRzYi5hcGkudjEuUmVjb3JkQ2FwdHVyZVJlcX'
+    'Vlc3QaIi5hZHNiLmFwaS52MS5SZWNvcmRDYXB0dXJlUHJvZ3Jlc3MwARJTCgxMaXN0Q2FwdHVy'
+    'ZXMSIC5hZHNiLmFwaS52MS5MaXN0Q2FwdHVyZXNSZXF1ZXN0GiEuYWRzYi5hcGkudjEuTGlzdE'
+    'NhcHR1cmVzUmVzcG9uc2U=');
 
 const $core.Map<$core.String, $core.dynamic> HistoryServiceBase$json = {
   '1': 'History',
@@ -1117,6 +1268,11 @@ const $core.Map<$core.String, $core.dynamic> HistoryServiceBase$json = {
       '2': '.adsb.api.v1.GetHeatmapRequest',
       '3': '.adsb.api.v1.Heatmap'
     },
+    {
+      '1': 'GetReceiverPositions',
+      '2': '.adsb.api.v1.GetReceiverPositionsRequest',
+      '3': '.adsb.api.v1.ReceiverPositions'
+    },
   ],
 };
 
@@ -1129,6 +1285,7 @@ const $core.Map<$core.String, $core.Map<$core.String, $core.dynamic>>
   '.adsb.api.v1.Aircraft': Aircraft$json,
   '.adsb.api.v1.AutopilotModes': AutopilotModes$json,
   '.adsb.api.v1.TrackPoint': TrackPoint$json,
+  '.adsb.api.v1.ReceiverPosition': ReceiverPosition$json,
   '.adsb.api.v1.GetAircraftHistoryRequest': GetAircraftHistoryRequest$json,
   '.adsb.api.v1.AircraftHistory': AircraftHistory$json,
   '.adsb.api.v1.AircraftHistory.Point': AircraftHistory_Point$json,
@@ -1136,6 +1293,8 @@ const $core.Map<$core.String, $core.Map<$core.String, $core.dynamic>>
   '.adsb.api.v1.Activity': Activity$json,
   '.adsb.api.v1.GetHeatmapRequest': GetHeatmapRequest$json,
   '.adsb.api.v1.Heatmap': Heatmap$json,
+  '.adsb.api.v1.GetReceiverPositionsRequest': GetReceiverPositionsRequest$json,
+  '.adsb.api.v1.ReceiverPositions': ReceiverPositions$json,
 };
 
 /// Descriptor for `History`. Decode as a `google.protobuf.ServiceDescriptorProto`.
@@ -1145,4 +1304,6 @@ final $typed_data.Uint8List historyServiceDescriptor = $convert.base64Decode(
     'cGkudjEuR2V0QWlyY3JhZnRIaXN0b3J5UmVxdWVzdBocLmFkc2IuYXBpLnYxLkFpcmNyYWZ0SG'
     'lzdG9yeRJFCgtHZXRBY3Rpdml0eRIfLmFkc2IuYXBpLnYxLkdldEFjdGl2aXR5UmVxdWVzdBoV'
     'LmFkc2IuYXBpLnYxLkFjdGl2aXR5EkIKCkdldEhlYXRtYXASHi5hZHNiLmFwaS52MS5HZXRIZW'
-    'F0bWFwUmVxdWVzdBoULmFkc2IuYXBpLnYxLkhlYXRtYXA=');
+    'F0bWFwUmVxdWVzdBoULmFkc2IuYXBpLnYxLkhlYXRtYXASYAoUR2V0UmVjZWl2ZXJQb3NpdGlv'
+    'bnMSKC5hZHNiLmFwaS52MS5HZXRSZWNlaXZlclBvc2l0aW9uc1JlcXVlc3QaHi5hZHNiLmFwaS'
+    '52MS5SZWNlaXZlclBvc2l0aW9ucw==');

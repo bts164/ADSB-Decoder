@@ -1,5 +1,8 @@
 #include "api/convert.h"
 
+#include <algorithm>
+#include <cmath>
+#include <numbers>
 #include <string_view>
 
 namespace {
@@ -85,4 +88,15 @@ api::SpectrumRow to_proto(const SpectrumFrame& s) {
     row.set_rate_hz(s.rate_hz);
     row.mutable_bins_db()->Assign(s.mag_db.begin(), s.mag_db.end());
     return row;
+}
+
+double distance_m(const api::ReceiverPosition& a, const api::ReceiverPosition& b) {
+    if (!a.has_lat() || !a.has_lon() || !b.has_lat() || !b.has_lon()) return 0;
+    // The mean Earth radius: the haversine is good to about 0.5% at these distances.
+    constexpr double kEarthRadiusM = 6371e3;
+    constexpr double kRad = std::numbers::pi / 180;
+    const double dlat = (b.lat() - a.lat()) * kRad, dlon = (b.lon() - a.lon()) * kRad;
+    const double h = std::pow(std::sin(dlat / 2), 2) +
+                     std::cos(a.lat() * kRad) * std::cos(b.lat() * kRad) * std::pow(std::sin(dlon / 2), 2);
+    return 2 * kEarthRadiusM * std::asin(std::sqrt(std::min(1.0, h)));
 }

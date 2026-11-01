@@ -11,9 +11,9 @@
 
 #include "common/trace.h"
 
-// Running totals of a run, in samples, on a watch channel. main() creates it; the source and send_loop() each
-// publish their own fields through their own WatchSender. A source that never drops needs no WatchSender.
-// The three overrun counts say which stage of the source dropped the samples:
+// Running totals of a run, in samples, on a watch channel. main() creates it; each stage publishes its own
+// fields through its own WatchSender. A stage that never drops needs no WatchSender.
+// The overrun counts say which stage dropped the samples:
 struct PaceStats {
     // A stage that falls this far behind real time drops the late samples, like a capture device's FIFO
     // overrun.
@@ -27,11 +27,16 @@ struct PaceStats {
     uint64_t overrun_queue_full = 0;
     // A paced source was asked for a batch more than kOverrunS after it was due.
     uint64_t overrun_late_send = 0;
+    // Stream-rate samples missing from a source's stream: it dropped them itself (as a device does when its
+    // channel is full), or lost them before it (a vita49 source's network losses).
+    uint64_t overrun_gap = 0;
+    // Samples sent saturated, as I16Be from a source near full scale. Sent all the same, so not an overrun.
+    uint64_t clipped = 0;
     // Time send_loop() spent awaiting socket sends. When the sender is the stage behind, this tells a socket
     // that isn't taking data (most of the window) from a send task that isn't getting to run (little of it).
     std::chrono::steady_clock::duration send_wait{};
 
-    uint64_t overrun() const { return overrun_render + overrun_queue_full + overrun_late_send; }
+    uint64_t overrun() const { return overrun_render + overrun_queue_full + overrun_late_send + overrun_gap; }
 };
 
 // Adds `samples` to one of the overrun counts, e.g. count_dropped(pace_tx, &PaceStats::overrun_render, n). Every

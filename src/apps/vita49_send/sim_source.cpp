@@ -12,11 +12,11 @@
 #include <utility>
 #include <vector>
 
-
 #include <absl/strings/str_format.h>
 
 #include "apps/vita49_send/pace_stats.h"
 #include "apps/vita49_send/packet_batch.h"
+#include "apps/vita49_send/packetize.h"
 #include "common/log.h"
 #include "common/trace.h"
 #include "net/datagram_batch.h"
@@ -62,7 +62,7 @@ size_t queue_capacity(const SimStreamParams& params, size_t batch_packets) {
     const auto items = static_cast<size_t>(std::max(1.0, std::ceil(params.queue_s * rate / batch_samples)));
     LOGF(INFO, "render queue: %u batches of %u packets (%.1f ms, %.1f MB)", items, batch_packets,
          items * batch_samples / rate * 1e3,
-         items * batch_packets * vrt::data_packet_bytes(params.samples_per_packet) / 1e6);
+         items * batch_packets * vrt::data_packet_bytes(params.samples_per_packet, vrt::PayloadFormat::i16) / 1e6);
     return items;
 }
 
@@ -115,7 +115,7 @@ struct SimGenerator {
             SimItem& item = items.back();
             net::DatagramBatch& datagrams = item.batch.datagrams;
             vrt::write_data_header(datagrams.bytes.data() + datagrams.used, stream_id, packet_count, clock.next(spp),
-                                   spp);
+                                   spp, vrt::PayloadFormat::i16);
             datagrams.used += pkt_bytes;
             item.batch.samples += spp;
             pos += spp;
@@ -158,7 +158,7 @@ SimGenerator make_sim_generator(std::unique_ptr<adsb_sim::Simulator> sim, const 
                                 size_t batch_packets, coro::MpscSender<SimItem> tx,
                                 coro::WatchSender<PaceStats> pace_tx) {
     const double rate = params.sim.sample_rate_hz;
-    const size_t pkt_bytes = vrt::data_packet_bytes(params.samples_per_packet);
+    const size_t pkt_bytes = vrt::data_packet_bytes(params.samples_per_packet, vrt::PayloadFormat::i16);
     const size_t render_packets = batch_packets * render_batches(*sim, params, batch_packets);
     return SimGenerator{
         .sim = std::move(sim),
@@ -174,8 +174,11 @@ SimGenerator make_sim_generator(std::unique_ptr<adsb_sim::Simulator> sim, const 
         .t0 = steady_clock::now(),
         .pool = net::BatchPool::create(batch_packets * pkt_bytes),
         .clock = vrt::PacketClock{params.sim.sample_rate_hz},
-        .context = vrt::ContextSender(params.stream_id, vrt::StreamConfig{rate, params.rf_freq_hz, rate},
-                                      params.context_interval_s),
+        .context = vrt::ContextSender(
+            params.stream_id,
+            vrt::StreamConfig{rate, params.rf_freq_hz, rate,
+                              params.payload_format ? std::optional(vrt::PayloadFormat::i16) : std::nullopt},
+            params.context_interval_s),
     };
 }
 
@@ -253,6 +256,11 @@ coro::CoroStream<PacketBatch> paced_sim_stream(std::unique_ptr<adsb_sim::Simulat
 
 void SimStreamParams::add_options(argparse::ArgumentParser& cmd) {
     cmd.add_description("Stream simulated ADS-B traffic generated in-process.");
+    cmd.add_argument("--rate").scan<'g', double>().default_value(2.4e6).help(
+        "sample rate in Hz, a whole number, at least 2 MHz");
+    cmd.add_argument("--freq").scan<'g', double>().default_value(1090000000.0).help(
+        "RF reference frequency in Hz advertised in the context packets (default: 1090 MHz); the simulated "
+        "signal is baseband");
     cmd.add_argument("--scenario").required().help(
         "JSON file describing the simulated aircraft (see scenarios/boston.json)");
     cmd.add_argument("--duration").scan<'g', double>().default_value(0.0).help(
@@ -284,7 +292,10 @@ void SimStreamParams::add_options(argparse::ArgumentParser& cmd) {
 SimStreamParams SimStreamParams::from_options(const argparse::ArgumentParser& program,
                                               const argparse::ArgumentParser& cmd) {
     SimStreamParams params{};
-    params.sim.sample_rate_hz = static_cast<uint32_t>(program.get<double>("--rate"));
+    const double rate_hz = cmd.get<double>("--rate");
+    if (!(rate_hz > 0) || rate_hz > UINT32_MAX || rate_hz != std::round(rate_hz))
+        throw std::invalid_argument("--rate must be a positive whole number of Hz");
+    params.sim.sample_rate_hz = static_cast<uint32_t>(rate_hz);
     params.sim.seed = cmd.get<uint64_t>("--seed");
     params.sim.snr_db = cmd.get<double>("--snr-db");
     params.sim.pulse_rise_s = cmd.get<double>("--pulse-rise-ns") * 1e-9;
@@ -298,9 +309,11 @@ SimStreamParams SimStreamParams::from_options(const argparse::ArgumentParser& pr
     params.duration_s = cmd.get<double>("--duration");
     params.queue_s = cmd.get<double>("--queue-ms") * 1e-3;
     if (!(params.queue_s > 0)) throw std::invalid_argument("--queue-ms must be positive");
-    params.samples_per_packet = program.get<unsigned>("--samples-per-packet");
+    const StreamOptions stream = StreamOptions::from_options(program);
+    params.samples_per_packet = stream.samples_per_packet;
+    params.payload_format = stream.payload_format;
     params.stream_id = program.get<unsigned>("--stream-id");
-    params.rf_freq_hz = program.get<double>("--freq");
+    params.rf_freq_hz = cmd.get<double>("--freq");
     params.context_interval_s = program.get<double>("--context-interval");
     return params;
 }

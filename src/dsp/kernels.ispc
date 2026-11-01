@@ -18,9 +18,17 @@
 // polyphase.jl's own resample() reference: `Np÷2 : 1/rate*Np : ...`,
 // `pi, i = 1+ti%Np, 1+ti÷Np`), that is T = round(m*step + Np/2) with
 // step = ry/rx*Np, and T splits into the center sample index (T / Np) and
-// filter phase (T % Np). Equivalently, with the position measured in
-// samples, pos = m*ry/rx + 1/2 + 1/(2*Np): base = floor(pos) and
-// phase = floor(Np * frac(pos)). The kernel uses that second form, in
+// filter phase (T % Np). With the position measured in samples, the host
+// passes pos = m*ry/rx + 1/2 (see demod.cpp pos_offset): base = floor(pos)
+// and phase = floor(Np * frac(pos)). round()'s half phase isn't added:
+// phase p's taps, cut from a prototype of even length taps*Np, already sit
+// half a phase past p/Np, so flooring to the phase gives the nearest one.
+//
+// REVIEW: the offset used to be 1/2 + 1/(2*Np), adding that half phase a
+// second time, so each output landed half a phase late on average (a whole
+// phase at worst). See demod.cpp pos_offset.
+//
+// The kernel uses that form, in
 // fixed point (see resample_pos_fixed below), which needs only an integer
 // multiply-add, shift and mask per output -- no divide, for any Np. This is
 // a closed form: no dependency between output positions. The kernel itself
@@ -185,7 +193,7 @@ inline void resample_body(const uniform T x[], const uniform float h[], uniform 
 // resample_chunk_NAME runs one task's share without a launch, for a host that runs the tasks itself
 // (AdsbDemod::exec, one coro::parallel() part each); its task_count must be at most n_out.
 //
-// `step` = resample_pos_fixed(ry / rx) and `offset` = resample_pos_fixed(0.5 + 0.5 / Np); see the derivation at
+// `step` = resample_pos_fixed(ry / rx) and `offset` = resample_pos_fixed(0.5) (0 for even taps); see the derivation at
 // the top of this file. `n_out` must be a multiple of programCount. `scale` is 1 / (the format's full scale).
 // Also sums |z|^2 over the outputs the block owns, [0, n_own), one partial per task into `sumsq[]`, which must
 // have at least `ntasks` elements; the host adds them up for the block's RMS. It is taken after the filter, not
@@ -222,6 +230,96 @@ inline void resample_body(const uniform T x[], const uniform float h[], uniform 
 
 RESAMPLE_FORMAT(f32, float, F32, ADSB_KERNEL_RESAMPLE_F32)
 RESAMPLE_FORMAT(i16be, int16, I16Be, ADSB_KERNEL_RESAMPLE_I16BE)
+
+// Output formats, for resample_iq below (dsp/iq_format.h's iq::OutputFormat). store() writes component j, given
+// as a float in the output format's own scale, in wire order, and returns 1 if it had to saturate it.
+struct F32Be {};
+
+inline int store(uniform int16 * uniform p, int j, float v, const uniform I16Be &) {
+    float r = round(v);
+    unsigned int16 u = (unsigned int16)(int16)(int)clamp(r, -32768.f, 32767.f);
+    p[j] = (int16)((u << 8) | (u >> 8));
+    return (r > 32767.f || r < -32768.f) ? 1 : 0;
+}
+inline int store(uniform unsigned int32 * uniform p, int j, float v, const uniform F32Be &) {
+    unsigned int32 u = intbits(v);
+    p[j] = (u << 24) | ((u & 0xFF00) << 8) | ((u >> 8) & 0xFF00) | (u >> 24);
+    return 0;
+}
+
+// Kernel 1b: I/Q resampling, for a stream (dsp/iq_resampler.h) rather than an envelope. The same schedule,
+// filter layout and tap-parallel MAC as resample_body, but it keeps each output's I and Q, and writes them in
+// the output format G (components of type U) at y[2 * m] and y[2 * m + 1]. `scale` is G's full scale over F's,
+// so full scale in is full scale out. It takes any n_out: a short last batch computes and stores only its own
+// outputs. Returns the number of outputs store() saturated, in either component.
+//
+// No task launch: the host splits the outputs into spans and calls this once per span, from its own
+// coro::parallel() parts, so `offset` is the span's own (see iq_resampler.cpp).
+template <typename T, typename F, typename U, typename G>
+inline uniform int resample_iq_body(const uniform T x[], const uniform float h[], uniform int stride,
+                                    uniform int Np, uniform int64 step, uniform int64 offset, uniform int n_out,
+                                    uniform U y[], uniform float scale) {
+    uniform F in_fmt;
+    uniform G out_fmt;
+    const uniform int64 frac_mask = ((uniform int64)1 << kPosFracBits) - 1;
+    int clipped = 0;
+
+    for (uniform int m0 = 0; m0 < n_out; m0 += programCount) {
+        const uniform int batch = min((uniform int)programCount, n_out - m0);
+        float acc[programCount];
+        for (uniform int i = 0; i < programCount; i++) {
+            float a = 0.f;
+            if (i < batch) {
+                uniform int64 P = (uniform int64)(m0 + i) * step + offset;
+                uniform int base = (uniform int)(P >> kPosFracBits);
+                uniform int phase = (uniform int)(((P & frac_mask) * Np) >> kPosFracBits);
+                const uniform T* uniform xw = &x[2 * base];
+                const uniform float* uniform hw = &h[phase * stride];
+                foreach (j = 0 ... stride) {
+                    a += hw[j] * load(xw, j, in_fmt);
+                }
+            }
+            acc[i] = a;
+        }
+
+        // resample_body's transpose-and-sum, which leaves output m0 + i's I and Q in lane i.
+        uniform int nv = programCount;
+        for (uniform int s = programCount / 2; s >= 2; s /= 2) {
+            bool hi = (programIndex & s) != 0;
+            for (uniform int k = 0; k < nv / 2; k++) {
+                float a = acc[k];
+                float b = acc[k + nv / 2];
+                acc[k] = (hi ? b : a) + shuffle(hi ? a : b, programIndex ^ s);
+            }
+            nv /= 2;
+        }
+        float p0 = acc[0];
+        float p1 = acc[1];
+        bool odd = (programIndex & 1) != 0;
+        float re = odd ? shuffle(p1, programIndex ^ 1) : p0;
+        float im = odd ? p1 : shuffle(p0, programIndex ^ 1);
+
+        if (programIndex < batch) {
+            clipped += store(y, 2 * (m0 + programIndex), re * scale, out_fmt) |
+                       store(y, 2 * (m0 + programIndex) + 1, im * scale, out_fmt);
+        }
+    }
+    return reduce_add(clipped);
+}
+
+// resample_iq_NAME, the export for input components of type T in format F and output components of type U in
+// format G. ispc has no templated exports, so each pair the host's IqResampleKernel table names is a line here.
+#define RESAMPLE_IQ(NAME, T, F, U, G)                                                                           \
+    export uniform int resample_iq_##NAME(const uniform T x[], const uniform float h[], uniform int stride,    \
+                                          uniform int Np, uniform int64 step, uniform int64 offset,             \
+                                          uniform int n_out, uniform U y[], uniform float scale) {              \
+        return resample_iq_body<T, F, U, G>(x, h, stride, Np, step, offset, n_out, y, scale);                   \
+    }
+
+RESAMPLE_IQ(f32_i16be, float, F32, int16, I16Be)
+RESAMPLE_IQ(f32_f32be, float, F32, unsigned int32, F32Be)
+RESAMPLE_IQ(i16be_i16be, int16, I16Be, int16, I16Be)
+RESAMPLE_IQ(i16be_f32be, int16, I16Be, unsigned int32, F32Be)
 
 // Kernel 2: preamble correlation score[k] = sum_j y[k + j*half_sym] * pat[j]
 // for every candidate preamble start k in [0, n), one lane per k: `pat` is

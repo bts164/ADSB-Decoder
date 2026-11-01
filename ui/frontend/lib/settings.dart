@@ -130,6 +130,8 @@ class DisplaySettings extends ChangeNotifier {
   SpectrumColormap _spectrumColormap = SpectrumColormap.classic;
   double _spectrumLowDb = defaultSpectrumLowDb;
   double _spectrumHighDb = defaultSpectrumHighDb;
+  int _spectrumPersistRows = defaultSpectrumPersistRows;
+  bool _spectrumPsdColored = true;
 
   // The spectrum's colors span its range in dB above the noise floor, rather than absolute dB: the bins aren't
   // calibrated, so the floor moves with the radio and its gain, and a range relative to it stays right.
@@ -139,6 +141,9 @@ class DisplaySettings extends ChangeNotifier {
   static const double spectrumMaxDb = 80;
   static const double defaultSpectrumLowDb = -3;
   static const double defaultSpectrumHighDb = 27;
+  /// How many rows the PSD's older traces fade over, at most the waterfall's 400.
+  static const spectrumPersistChoices = [0, 5, 10, 20, 40, 80, 160, 400];
+  static const int defaultSpectrumPersistRows = 40;
 
   SpeedUnit get speed => _speed;
   AltitudeUnit get altitude => _altitude;
@@ -152,6 +157,10 @@ class DisplaySettings extends ChangeNotifier {
   double get spectrumLowDb => _spectrumLowDb;
   /// Top of the spectrum's color range, in dB above the noise floor.
   double get spectrumHighDb => _spectrumHighDb;
+  /// Rows behind the PSD's newest trace, fading out with age.
+  int get spectrumPersistRows => _spectrumPersistRows;
+  /// Whether the PSD's traces take the colormap's color for their level, as the waterfall's bins do.
+  bool get spectrumPsdColored => _spectrumPsdColored;
 
   set speed(SpeedUnit v) => _set(_speedKey, () => _speed = v, v);
   set altitude(AltitudeUnit v) => _set(_altitudeKey, () => _altitude = v, v);
@@ -161,6 +170,18 @@ class DisplaySettings extends ChangeNotifier {
   set clock(ClockFormat v) => _set(_clockKey, () => _clock = v, v);
   set timeZone(TimeZoneMode v) => _set(_timeZoneKey, () => _timeZone = v, v);
   set spectrumColormap(SpectrumColormap v) => _set(_spectrumColormapKey, () => _spectrumColormap = v, v);
+
+  set spectrumPersistRows(int v) {
+    _spectrumPersistRows = v;
+    notifyListeners();
+    _prefs?.setInt(_spectrumPersistKey, v).catchError((Object e) => debugPrint('display settings: not saved: $e'));
+  }
+
+  set spectrumPsdColored(bool v) {
+    _spectrumPsdColored = v;
+    notifyListeners();
+    _prefs?.setBool(_spectrumPsdColoredKey, v).catchError((Object e) => debugPrint('display settings: not saved: $e'));
+  }
 
   /// Sets the spectrum's color range, clamped to [spectrumMinDb, spectrumMaxDb].
   void setSpectrumRange(double lowDb, double highDb) {
@@ -182,6 +203,8 @@ class DisplaySettings extends ChangeNotifier {
   static const _spectrumColormapKey = 'spectrum.colormap';
   static const _spectrumLowKey = 'spectrum.lowDb';
   static const _spectrumHighKey = 'spectrum.highDb';
+  static const _spectrumPersistKey = 'spectrum.persistRows';
+  static const _spectrumPsdColoredKey = 'spectrum.psdColored';
 
   /// The saved settings, or the defaults for any not saved (or if they
   /// can't be read).
@@ -207,6 +230,9 @@ class DisplaySettings extends ChangeNotifier {
         s._spectrumLowDb = low;
         s._spectrumHighDb = high;
       }
+      final persist = await prefs.getInt(_spectrumPersistKey);
+      if (spectrumPersistChoices.contains(persist)) s._spectrumPersistRows = persist!;
+      s._spectrumPsdColored = await prefs.getBool(_spectrumPsdColoredKey) ?? s._spectrumPsdColored;
     } catch (e) {
       debugPrint('display settings: using defaults, could not read saved ones: $e');
     }

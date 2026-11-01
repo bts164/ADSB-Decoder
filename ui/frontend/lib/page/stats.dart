@@ -1,5 +1,8 @@
 part of 'frame_table_page.dart';
 
+/// A 3D fix with gpsd's error estimate above this shows amber.
+const _largeGpsErrorM = 50.0;
+
 /// Input and frame-health indicators in the top bar, and their details dialog.
 extension _Stats on _FrameTablePageState {
   /// Whether the live input keeps up: quiet when it does, a red warning with
@@ -37,6 +40,71 @@ extension _Stats on _FrameTablePageState {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  /// The GPS's state, in the input status's style: green with a 3D fix, amber with a 2D one or a large error,
+  /// red without a fix or without gpsd, grey for an input with no GPS. The tooltip has the position, the age of
+  /// the report and the backend's summary.
+  Widget _buildGpsStatus(ReceiverPosition p) {
+    final theme = Theme.of(context);
+    final sats = p.satellitesUsed == null ? '' : ' · ${p.satellitesUsed} sats';
+    final ageS = DateTime.now().millisecondsSinceEpoch / 1000 - p.timeS;
+    final position = p.position;
+    final tooltip = [
+      if (p.hasFix && position != null)
+        '${position.latitude.toStringAsFixed(5)}, ${position.longitude.toStringAsFixed(5)}',
+      if (p.altM != null) 'altitude ${_units.formatAltitude((p.altM! / 0.3048).round())}',
+      if (p.errorM != null) 'error ± ${_units.formatDistanceM(p.errorM!)}',
+      if (p.satellitesUsed != null || p.satellitesSeen != null)
+        'satellites: ${p.satellitesUsed ?? '?'} used of ${p.satellitesSeen ?? '?'} seen',
+      if (p.state != api.GpsState.NO_GPS) 'reported ${ageS.clamp(0, double.infinity).toStringAsFixed(0)} s ago',
+      if (p.summary.isNotEmpty) p.summary,
+    ].join('\n');
+
+    final IconData icon;
+    final Color color;
+    final String label;
+    if (p.state == api.GpsState.FIX_3D || p.state == api.GpsState.FIX_2D) {
+      final good = p.state == api.GpsState.FIX_3D && (p.errorM ?? 0) <= _largeGpsErrorM;
+      icon = good ? Icons.gps_fixed : Icons.gps_not_fixed;
+      color = good ? Colors.green : Colors.orange.shade800;
+      label = '${p.state == api.GpsState.FIX_3D ? 'GPS 3D' : 'GPS 2D'}$sats';
+    } else if (p.state == api.GpsState.NO_FIX || p.state == api.GpsState.GPSD_UNREACHABLE) {
+      return Tooltip(
+        message: tooltip,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          decoration: BoxDecoration(color: theme.colorScheme.error, borderRadius: BorderRadius.circular(12)),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.gps_off, size: 16, color: theme.colorScheme.onError),
+              const SizedBox(width: 4),
+              Text(
+                p.state == api.GpsState.NO_FIX ? 'GPS: no fix' : 'GPS: gpsd unreachable',
+                style:
+                    theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onError, fontWeight: FontWeight.bold),
+              ),
+            ],
+          ),
+        ),
+      );
+    } else {
+      icon = Icons.gps_off;
+      color = Colors.grey;
+      label = 'no GPS';
+    }
+    return Tooltip(
+      message: tooltip,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 16, color: color),
+          const SizedBox(width: 4),
+          Text(label, style: theme.textTheme.bodySmall),
+        ],
       ),
     );
   }

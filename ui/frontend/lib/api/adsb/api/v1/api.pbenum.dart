@@ -14,6 +14,33 @@ import 'dart:core' as $core;
 
 import 'package:protobuf/protobuf.dart' as $pb;
 
+class GpsState extends $pb.ProtobufEnum {
+  static const GpsState GPS_STATE_UNSPECIFIED =
+      GpsState._(0, _omitEnumNames ? '' : 'GPS_STATE_UNSPECIFIED');
+  static const GpsState NO_GPS = GpsState._(1, _omitEnumNames ? '' : 'NO_GPS');
+  static const GpsState GPSD_UNREACHABLE =
+      GpsState._(2, _omitEnumNames ? '' : 'GPSD_UNREACHABLE');
+  static const GpsState NO_FIX = GpsState._(3, _omitEnumNames ? '' : 'NO_FIX');
+  static const GpsState FIX_2D = GpsState._(4, _omitEnumNames ? '' : 'FIX_2D');
+  static const GpsState FIX_3D = GpsState._(5, _omitEnumNames ? '' : 'FIX_3D');
+
+  static const $core.List<GpsState> values = <GpsState>[
+    GPS_STATE_UNSPECIFIED,
+    NO_GPS,
+    GPSD_UNREACHABLE,
+    NO_FIX,
+    FIX_2D,
+    FIX_3D,
+  ];
+
+  static final $core.List<GpsState?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 5);
+  static GpsState? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const GpsState._(super.value, super.name);
+}
+
 class CapturePoint extends $pb.ProtobufEnum {
   static const CapturePoint CAPTURE_POINT_UNSPECIFIED =
       CapturePoint._(0, _omitEnumNames ? '' : 'CAPTURE_POINT_UNSPECIFIED');

@@ -15,9 +15,12 @@
 // See pipeline.h/frame_decode.h/aircraft.h for frame decoding, api_server.h
 // for the UI's WebSocket API, and spectrum.h for the waterfall FFT side channel.
 
+#include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
+#include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <iostream>
 #include <memory>
@@ -27,6 +30,8 @@
 #include <utility>
 #include <vector>
 
+#include <sys/timex.h>
+
 #include <argparse/argparse.hpp>
 
 #include <coro/coro.h>
@@ -34,6 +39,8 @@
 #include <coro/runtime/runtime.h>
 #include <coro/sync/select.h>
 #include <coro/sync/watch.h>
+#include <coro/task/join_handle.h>
+#include <coro/task/spawn_builder.h>
 
 #include "apps/adsb/pipeline.h"
 #include "apps/filter_options.h"
@@ -42,6 +49,7 @@
 #include "common/version_info.h"
 #include "dsp/filter_bank.h"
 #include "input/file_stream.h"
+#include "input/gpsd.h"
 #include "input/rtlsdr_stream.h"
 #ifdef ADSB_WITH_SIDEKIQ
 #include "input/sidekiq_stream.h"
@@ -83,6 +91,28 @@ api::InputStatus to_proto(const InputStatus& s) {
     msg.set_ok(s.ok());
     msg.set_summary(s.describe());
     return msg;
+}
+
+// Every time adsb records is the system clock's, so a clock the kernel says isn't synchronized is logged at startup,
+// where a wrong date shows, rather than found in the history days later.
+void check_clock() {
+    timex tx{};  // modes 0: only reads
+    const int state = ::adjtimex(&tx);
+    if (state == -1) {
+        LOGF(WARNING, "clock: can't tell whether the system clock is synchronized: adjtimex: %s",
+             std::strerror(errno));
+        return;
+    }
+    const std::time_t now = std::time(nullptr);
+    std::tm utc{};
+    gmtime_r(&now, &utc);
+    char when[32];
+    std::strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S UTC", &utc);
+    if (state == TIME_ERROR || (tx.status & STA_UNSYNC))
+        LOGF(WARNING, "clock: the system clock isn't synchronized, and reads %s; if that's wrong, so is every time "
+             "recorded (doc/design/gps.md, \"The system clock\")", when);
+    else
+        LOGF(INFO, "clock: synchronized, %s, estimated error %ld us", when, static_cast<long>(tx.esterror));
 }
 
 // Options every source shares are global and go before the subcommand; each source's own options belong to its
@@ -197,7 +227,7 @@ bool parse_command_line(argparse::ArgumentParser& program, const Commands& cmds,
             if (!(cmds.sidekiq.get<double>("--rate") > 0.0)) throw std::runtime_error("--rate must be greater than 0");
             if (cmds.sidekiq.is_used("--bandwidth") && !(cmds.sidekiq.get<double>("--bandwidth") > 0.0))
                 throw std::runtime_error("--bandwidth must be greater than 0");
-            (void)SidekiqStreamParams::from_options(program, cmds.sidekiq);  // --handle and --gain
+            (void)SidekiqStreamParams::from_options(program, cmds.sidekiq);  // --handle, --gain, --gpsd
         }
 #endif
 #ifdef ADSB_WITH_UHD
@@ -276,6 +306,7 @@ coro::Coro<int> async_main(int argc, char** argv) {
         co_return 0;
     }
 
+    check_clock();
     try {
         const FilterOptions filter_options = FilterOptions::from_options(program);
         DemodLoopParams loop_params = DemodLoopParams::from_options(program, command_line(argc, argv));
@@ -305,6 +336,7 @@ coro::Coro<int> async_main(int argc, char** argv) {
         FilterBank filter;
         std::optional<coro::CoroStream<IqBuffer>> stream;
         std::string source;  // the subcommand, for the UI
+        std::optional<GpsdAddress> gpsd;  // where sidekiq's GPS is read from; every other input has none
         if (program.is_subcommand_used(cmds.vita49)) {
             Vita49StreamParams params = Vita49StreamParams::from_options(program, cmds.vita49);
             source = "vita49";
@@ -329,6 +361,7 @@ coro::Coro<int> async_main(int argc, char** argv) {
         } else if (program.is_subcommand_used(cmds.sidekiq)) {
             SidekiqStreamParams params = SidekiqStreamParams::from_options(program, cmds.sidekiq);
             source = "sidekiq";
+            gpsd = params.gpsd;
             rate_hz = params.rate_hz;
             freq_hz = params.freq_hz;
             filter = make_filter(rate_hz);
@@ -355,6 +388,19 @@ coro::Coro<int> async_main(int argc, char** argv) {
                                           demod_padding(filter, rate_hz), FileStreamParams::kChunkSamples));
         }
 
+        // The receiver's position, from the GPS or NO_GPS, for the API, the captures and the history.
+        const std::string no_gps = source == "sidekiq" ? "--gpsd none" : "the " + source + " input has none";
+        if (!gpsd) LOGF(INFO, "gps: none, %s", no_gps);
+        auto [position_tx, receiver_position] =
+            coro::watch_channel(gpsd ? gpsd_connecting(*gpsd) : receiver_without_gps("no GPS: " + no_gps));
+        // Each held for the run, as dropping a handle cancels its task.
+        coro::JoinHandle<void> gpsd_task;
+        if (gpsd) gpsd_task = coro::build_task().name("gpsd").spawn(watch_gpsd(*gpsd, position_tx.clone()));
+        coro::JoinHandle<void> position_recorder;
+        if (history)
+            position_recorder = coro::build_task().name("position_recorder").spawn(
+                record_receiver_positions(receiver_position.clone(), history->clone()));
+
         std::optional<AircraftHistory> ws_history;
         if (ws_port && history) ws_history = history->clone();
         DemodPipeline pipeline = demod_pipeline(std::move(filter), rate_hz, freq_hz, std::move(*stream),
@@ -365,6 +411,7 @@ coro::Coro<int> async_main(int argc, char** argv) {
             api_server_spawn(*ws_port, ws_interval,
                              ReceiverFeeds{.outputs = std::move(pipeline.outputs),
                                            .input_status = std::move(input_status),
+                                           .receiver_position = std::move(receiver_position),
                                            .settings = std::move(settings)},
                              std::move(source), std::move(ws_history));
         }

@@ -32,7 +32,10 @@ extension _DetailPanel on _FrameTablePageState {
   /// are known.
   List<Widget> _buildDetailFacts(AircraftRecord a) {
     final theme = Theme.of(context);
+    final rb = _rangeBearing(a);
     final facts = <(String, String)>[
+      if (rb != null) ('range', _units.formatDistanceM(rb.rangeM)),
+      if (rb != null) ('bearing', '${rb.bearingDeg.toStringAsFixed(0)}°'),
       if (a.headingDeg != null) ('heading', '${a.headingDeg!.toStringAsFixed(0)}° mag'),
       if (a.trackDeg != null) ('track', '${a.trackDeg!.toStringAsFixed(0)}°'),
       if (a.iasKt != null) ('IAS', _units.formatSpeed(a.iasKt!)),

@@ -220,6 +220,17 @@ class GaugePainter extends CustomPainter {
       old.fraction != fraction || old.color != color || old.trackColor != trackColor;
 }
 
+/// 1, 2 or 5 times a power of ten: the smallest such step that splits `span` into at most `maxSteps`.
+double niceStep(double span, int maxSteps) {
+  final raw = span / maxSteps;
+  if (raw <= 0) return 1;
+  final magnitude = math.pow(10, (math.log(raw) / math.ln10).floor()).toDouble();
+  for (final m in const [1, 2, 5]) {
+    if (m * magnitude >= raw) return m * magnitude;
+  }
+  return 10 * magnitude;
+}
+
 const compassPoints = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
 
 /// A horizontal bar of altitudeColor from 0 to 40,000 ft, for the map legend.

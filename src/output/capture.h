@@ -47,15 +47,18 @@ struct CapturePoint {
  * @param in a receiver activated for this capture
  * @param request checked by the server, all but the file not existing yet
  * @param dir the capture directory when the call was made (resolve_capture_dir())
+ * @param receiver the receiver's position when the call was made: with a fix, the metadata's `core:geolocation`
  * @throws wsrpc::CallError for a file that exists or can't be created, or a write that fails
  */
 coro::CoroStream<api::RecordCaptureProgress> run_capture(CapturePoint point, coro::BroadcastReceiver<IqBlock> in,
-                                                         api::RecordCaptureRequest request, std::string dir);
+                                                         api::RecordCaptureRequest request, std::string dir,
+                                                         api::ReceiverPosition receiver);
 
 /** As the input's run_capture(), writing the envelope runs from `in` as rf32_le. */
 coro::CoroStream<api::RecordCaptureProgress> run_capture(CapturePoint point,
                                                          coro::BroadcastReceiver<EnvelopeShare> in,
-                                                         api::RecordCaptureRequest request, std::string dir);
+                                                         api::RecordCaptureRequest request, std::string dir,
+                                                         api::ReceiverPosition receiver);
 
 /**
  * Checks that `dir` is a directory the process can write into, and makes it absolute, so the logs and the UI

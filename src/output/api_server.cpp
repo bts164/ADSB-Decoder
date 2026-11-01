@@ -46,9 +46,12 @@ struct SettingsWatch {
 struct Live {
     PipelineOutputs outputs;
     coro::WatchReceiver<std::optional<api::InputStatus>> input_status;
+    coro::WatchReceiver<api::ReceiverPosition> receiver_position;
     SettingsWatch settings;
 
-    Live clone() const { return {outputs.clone(), input_status.clone(), settings.clone()}; }
+    Live clone() const {
+        return {outputs.clone(), input_status.clone(), receiver_position.clone(), settings.clone()};
+    }
 };
 
 // Every call runs in a task of its own, so a handler takes its own clone of anything that is for one task
@@ -118,6 +121,15 @@ public:
             std::optional<api::InputStatus> now = *status.borrow_and_update();
             if (now) co_yield std::move(*now);
             if (!co_await status.changed()) co_return;
+        }
+    }
+
+    coro::CoroStream<api::ReceiverPosition> watch_receiver_position(const api::WatchReceiverPositionRequest&) override {
+        auto position = m_live.receiver_position.clone();
+        for (;;) {
+            api::ReceiverPosition now = *position.borrow_and_update();
+            co_yield std::move(now);
+            if (!co_await position.changed()) co_return;
         }
     }
 
@@ -192,10 +204,12 @@ public:
         if (name.empty() || name.front() == '.' || name.find_first_of(std::string_view("/\0", 2)) != name.npos)
             throw CallError(Error::INVALID_ARGUMENT, "name must be a file name, not starting with '.'");
         const PipelineOutputs& out = m_live.outputs;
+        api::ReceiverPosition receiver = m_live.receiver_position.clone().get();
         coro::CoroStream<api::RecordCaptureProgress> capture =
             request.point() == api::INPUT
-                ? run_capture(out.input_point, out.input.activate(), request, std::move(dir))
-                : run_capture(out.envelope_point, out.envelope.activate(), request, std::move(dir));
+                ? run_capture(out.input_point, out.input.activate(), request, std::move(dir), std::move(receiver))
+                : run_capture(out.envelope_point, out.envelope.activate(), request, std::move(dir),
+                              std::move(receiver));
         while (auto report = co_await coro::next(capture)) co_yield std::move(*report);
     }
 
@@ -269,6 +283,14 @@ public:
         }
         AircraftHistory db = m_db.clone();
         auto reply = co_await db.heatmap(request);
+        if (!reply) throw CallError(Error::INTERNAL, "the history query failed");
+        co_return std::move(*reply);
+    }
+
+    coro::Coro<api::ReceiverPositions> get_receiver_positions(
+        const api::GetReceiverPositionsRequest& request) override {
+        AircraftHistory db = m_db.clone();
+        auto reply = co_await db.positions(request);
         if (!reply) throw CallError(Error::INTERNAL, "the history query failed");
         co_return std::move(*reply);
     }
@@ -353,6 +375,7 @@ void api_server_spawn(uint16_t port, std::chrono::nanoseconds default_interval, 
         auto [settings_tx, settings_rx] = coro::watch_channel(std::move(live->settings));
         served = Live{.outputs = std::move(live->outputs),
                       .input_status = std::move(live->input_status),
+                      .receiver_position = std::move(live->receiver_position),
                       .settings = {std::move(settings_tx), std::move(settings_rx)}};
     }
     // Detached: run() accepts clients until the runtime's destructor cancels and drains it.

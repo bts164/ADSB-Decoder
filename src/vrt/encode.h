@@ -63,6 +63,8 @@ struct StreamConfig {
     double sample_rate_hz;
     double rf_freq_hz;
     double bandwidth_hz;
+    // The Data Payload Format field; nullopt leaves it out, for a receiver told the format some other way.
+    std::optional<PayloadFormat> payload_format;
 };
 
 // Decides when a context packet goes out: before the first data packet, then
@@ -90,21 +92,15 @@ private:
     bool m_first = true;
 };
 
-// Size on the wire of a VRT IF Data packet of `count` I/Q sample pairs.
-constexpr size_t data_packet_bytes(size_t count) { return kHeaderBytes + 4 * count; }
+// Size on the wire of a VRT IF Data packet of `count` I/Q sample pairs in `format`.
+constexpr size_t data_packet_bytes(size_t count, PayloadFormat format) {
+    return kHeaderBytes + 4 * payload_words_per_sample(format) * count;
+}
 
-// The IF Data packets below: Packet Type 0x1 (with Stream ID), one 32-bit word per I/Q pair.
-
-// Writes a whole VRT IF Data packet to `out` (data_packet_bytes(count) bytes) from
-// `count` interleaved 8-bit offset-binary I/Q pairs (128 == zero, as an RTL-SDR delivers them). Each
-// becomes int16 (b - 128) * 256 on the wire -- the payload's declared 16-bit
-// width, not added precision.
-void write_data_packet_u8(uint8_t* out, uint32_t stream_id, uint32_t packet_count_mod16, Timestamp ts,
-                          const uint8_t* src, size_t count);
-
-// Writes only the header of a VRT IF Data packet of `count` I/Q pairs to `out`
-// (kHeaderBytes bytes), for a caller that fills the payload at out + kHeaderBytes
-// itself with big-endian int16 I/Q pairs (e.g. a simulator rendering straight into it).
-void write_data_header(uint8_t* out, uint32_t stream_id, uint32_t packet_count_mod16, Timestamp ts, size_t count);
+// Writes the header of a VRT IF Data packet (Packet Type 0x1, with Stream ID) of `count` I/Q pairs in `format`
+// to `out` (kHeaderBytes bytes), for a caller that fills the payload at out + kHeaderBytes itself (a simulator
+// or a resampler writing straight into it).
+void write_data_header(uint8_t* out, uint32_t stream_id, uint32_t packet_count_mod16, Timestamp ts, size_t count,
+                       PayloadFormat format);
 
 }  // namespace vrt

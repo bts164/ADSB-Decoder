@@ -27,11 +27,11 @@ coro::Coro<void> pace_monitor_loop(coro::WatchReceiver<PaceStats> pace_rx) {
             const uint64_t total = lost + next.sent - last.sent;
             LOGF(WARNING,
                  "fell behind real time; dropped %u samples (%.2f%%) over the last %.1f s, as a capture device "
-                 "would on overrun: %u render too slow, %u send queue full, %u sent too late; %.0f ms spent in "
-                 "socket sends",
+                 "would on overrun: %u render too slow, %u send queue full, %u sent too late, %u missing from the "
+                 "source; %.0f ms spent in socket sends",
                  lost, 100.0 * lost / std::max<uint64_t>(total, 1), duration<double>(now - last_t).count(),
                  next.overrun_render - last.overrun_render, next.overrun_queue_full - last.overrun_queue_full,
-                 next.overrun_late_send - last.overrun_late_send,
+                 next.overrun_late_send - last.overrun_late_send, next.overrun_gap - last.overrun_gap,
                  duration<double, std::milli>(next.send_wait - last.send_wait).count());
         }
         last = next;
