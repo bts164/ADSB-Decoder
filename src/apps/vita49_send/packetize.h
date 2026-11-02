@@ -39,13 +39,12 @@ struct StreamOptions {
     size_t samples_per_packet;
 
     static void add_options(argparse::ArgumentParser& program);
-    // Throws std::invalid_argument for a bad option, a filter option without --stream-rate, or f32be with
-    // --no-payload-format, whose receiver couldn't tell the format.
+    // Throws std::invalid_argument for a bad option, a filter option without --stream-rate, or a format but ci16_be
+    // with --no-payload-format, whose receiver couldn't tell the format.
     static StreamOptions from_options(const argparse::ArgumentParser& program);
-    // Whether any option the sim can't take is given: the rate, the filter, or a format other than i16be.
+    // Whether any option the sim can't take is given: the rate, the filter, or a format other than ci16_be.
     static bool resampling_options_used(const argparse::ArgumentParser& program);
 
-    vrt::PayloadFormat payload() const;
     // The resampler from a source at `input_rate_hz` to the stream, logged. Throws std::invalid_argument for a
     // rate that isn't a positive whole number of Hz (vrt::PacketClock counts in whole Hz), or a filter that
     // can't be designed.

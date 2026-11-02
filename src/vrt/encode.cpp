@@ -50,7 +50,7 @@ Packet make_context_packet(uint32_t stream_id, uint32_t packet_count_mod16, Time
 
 // See doc/design/vita49-format.md's header word and IF Data packet sections.
 void write_data_header(uint8_t* out, uint32_t stream_id, uint32_t packet_count_mod16, Timestamp ts, size_t count,
-                       PayloadFormat format) {
+                       const iq::OutputFormat& format) {
     // header+streamid+tsint+tsfrac(2)+payload
     const auto packet_size_words = static_cast<uint32_t>(5 + payload_words_per_sample(format) * count);
     write_header(out, header_word(kPacketTypeIfData, packet_count_mod16, packet_size_words), stream_id, ts);

@@ -442,7 +442,13 @@ coro::Coro<std::vector<AdsbFrame>> AdsbDemod::exec(const IqBlock& block) {
 
 // One block's DemodBlock, with a snapshot of it when `snapshot` is set and it has frames.
 coro::Coro<DemodBlock> demod_block(AdsbDemod& demod, IqBlock block, bool snapshot) {
-    DemodBlock out{.n = block.n(), .frames = co_await demod.exec(block), .candidates = {}, .snapshot = std::nullopt};
+    DemodBlock out{.start = block.start(),
+                   .n = block.n(),
+                   .frames = co_await demod.exec(block),
+                   .envelope_start = demod.last_envelope_index(),
+                   .envelope_end = demod.last_envelope_index() + demod.last_owned_envelope().size(),
+                   .candidates = {},
+                   .snapshot = std::nullopt};
     out.candidates.assign(demod.last_candidates().begin(), demod.last_candidates().end());
     if (snapshot && !out.frames.empty()) {
         const std::span<const float> envelope = demod.last_envelope();

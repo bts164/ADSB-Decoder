@@ -1,19 +1,20 @@
 #include "output/capture.h"
 
 #include <algorithm>
-#include <bit>
 #include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
 #include <exception>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <span>
 #include <string_view>
-#include <type_traits>
+#include <system_error>
 #include <utility>
+#include <variant>
 
 #include <unistd.h>
 
@@ -39,8 +40,6 @@ constexpr size_t kMaxListedFiles = 1000;
 // Time between a capture's progress reports.
 constexpr auto kReportInterval = std::chrono::milliseconds(500);
 
-static_assert(std::endian::native == std::endian::little, "cf32_le and rf32_le are written as the host's floats");
-
 // A capture's last report, or why it failed.
 using Result = std::expected<api::RecordCaptureProgress, wsrpc::CallError>;
 
@@ -50,10 +49,7 @@ using Result = std::expected<api::RecordCaptureProgress, wsrpc::CallError>;
 uint64_t first_index(const IqBlock& b) { return b.start(); }
 size_t count(const IqBlock& b) { return b.n(); }
 std::string datatype(const IqBlock& b) {
-    return b.visit([]<class F>(IqView<F>) {
-        if constexpr (std::is_same_v<F, iq::F32>) return "cf32_le";
-        else return "ci16_be";
-    });
+    return b.visit([]<class F>(IqView<F>) { return std::string(F::sigmf); });
 }
 std::vector<std::byte> bytes(const IqBlock& b, size_t from, size_t n) {
     return b.visit([&]<class F>(IqView<F> v) {
@@ -64,7 +60,7 @@ std::vector<std::byte> bytes(const IqBlock& b, size_t from, size_t n) {
 
 uint64_t first_index(const EnvelopeRun& r) { return r.index; }
 size_t count(const EnvelopeRun& r) { return r.samples.size(); }
-std::string datatype(const EnvelopeRun&) { return "rf32_le"; }
+std::string datatype(const EnvelopeRun&) { return std::string(iq::RF32::sigmf); }
 std::vector<std::byte> bytes(const EnvelopeRun& r, size_t from, size_t n) {
     const auto run = std::as_bytes(std::span(r.samples).subspan(from, n));
     return std::vector<std::byte>(run.begin(), run.end());
@@ -87,6 +83,11 @@ struct Capture {
     std::string datatype;
     nlohmann::json segments = nlohmann::json::array();  // SigMF captures, one per run without a gap
     nlohmann::json geolocation;                         // SigMF core:geolocation; null without a fix
+    // The frames received, each with its preamble in the point's stream index, from blocks before the capture's
+    // too: those outside its segments aren't annotated.
+    std::vector<std::pair<uint64_t, api::Frame>> frames;
+    uint64_t frames_through = 0;    // the point's stream index the frames have reached
+    uint64_t frame_blocks_lost = 0;
 };
 
 // Bytes per sample of a SigMF core:datatype, such as cf32_le (8) or ru8 (1); 0 for one it can't parse.
@@ -100,6 +101,13 @@ size_t sample_bytes(const std::string& datatype) {
     return bits / 8 * (datatype[0] == 'c' ? 2 : 1);
 }
 
+// Whether a recording of `datatype` records the source's full scale, as adsb:full_scale: a float IQ one does, as
+// only the source knows it, while an integer one's is its own limit and a real one's samples aren't I/Q.
+bool takes_full_scale(const std::string& datatype) {
+    const std::optional<iq::RecordingFormat> format = iq::RecordingFormats::from_sigmf(datatype);
+    return format && std::visit([]<class F>(F) { return F::complex && !F::integer; }, *format);
+}
+
 // The duration of a recording's samples, from its size, datatype and rate; 0 for a datatype it can't parse.
 double duration_s(uint64_t data_bytes, const api::CaptureMeta& meta) {
     const size_t bytes = sample_bytes(meta.datatype());
@@ -107,28 +115,6 @@ double duration_s(uint64_t data_bytes, const api::CaptureMeta& meta) {
     return static_cast<double>(data_bytes / bytes) / meta.rate_hz();
 }
 
-// Fills in what `meta` says of `f`'s recording. A missing or invalid .sigmf-meta leaves f.meta unset.
-void read_meta(api::Capture& f, const std::filesystem::path& meta) {
-    std::ifstream in(meta);
-    if (!in) return;
-    const nlohmann::json j = nlohmann::json::parse(in, nullptr, false);
-    if (j.is_discarded() || !j.is_object()) return;
-    api::CaptureMeta m;
-    try {
-        const nlohmann::json& global = j.at("global");
-        m.set_datatype(global.at("core:datatype").get<std::string>());
-        m.set_rate_hz(global.at("core:sample_rate").get<double>());
-        m.set_description(global.value("core:description", ""));
-        if (const auto captures = j.find("captures");
-            captures != j.end() && captures->is_array() && !captures->empty() &&
-            captures->front().contains("core:frequency"))
-            m.set_freq_hz(captures->front().at("core:frequency").get<double>());
-    } catch (const nlohmann::json::exception&) {
-        return;
-    }
-    m.set_duration_s(duration_s(f.data_bytes(), m));
-    *f.mutable_meta() = std::move(m);
-}
 
 std::string description(const CapturePoint& point) { return std::string("adsb capture of the ") + point.name; }
 
@@ -144,7 +130,121 @@ nlohmann::json geolocation(const api::ReceiverPosition& receiver) {
     return {{"type", "Point"}, {"coordinates", std::move(coordinates)}};
 }
 
-coro::Coro<void> write_meta(const Capture& c, const CapturePoint& point) {
+// Mode S's 8 us preamble and its 1 us bits.
+uint64_t frame_samples(const CapturePoint& point, const api::Frame& f) {
+    return std::max<uint64_t>(1, static_cast<uint64_t>(std::llround((8 + f.bits()) * 1e-6 * point.rate_hz)));
+}
+
+std::string hex(std::string_view bytes) {
+    std::string out;
+    out.reserve(2 * bytes.size());
+    for (const char b : bytes) {
+        char two[3];
+        std::snprintf(two, sizeof two, "%02x", static_cast<unsigned char>(b));
+        out += two;
+    }
+    return out;
+}
+
+// hex()'s bytes back, or nullopt for a string that isn't pairs of hex digits.
+std::optional<std::string> unhex(std::string_view digits) {
+    if (digits.size() % 2 != 0) return std::nullopt;
+    const auto nibble = [](char d) -> int {
+        if (d >= '0' && d <= '9') return d - '0';
+        if (d >= 'a' && d <= 'f') return d - 'a' + 10;
+        if (d >= 'A' && d <= 'F') return d - 'A' + 10;
+        return -1;
+    };
+    std::string out;
+    out.reserve(digits.size() / 2);
+    for (size_t i = 0; i < digits.size(); i += 2) {
+        const int hi = nibble(digits[i]), lo = nibble(digits[i + 1]);
+        if (hi < 0 || lo < 0) return std::nullopt;
+        out += static_cast<char>(hi << 4 | lo);
+    }
+    return out;
+}
+
+// The frame annotation() wrote, or nullopt for hex that isn't; throws nlohmann::json::exception for a field of
+// the wrong type.
+std::optional<api::Frame> frame_of(const nlohmann::json& a) {
+    api::Frame f;
+    f.set_idx(a.at("adsb:stream_index").get<uint64_t>());
+    f.set_df(a.at("adsb:df").get<uint32_t>());
+    f.set_crc_ok(a.value("adsb:crc_ok", false));
+    f.set_crc_checked(a.value("adsb:crc_checked", false));
+    f.set_confidence(a.value("adsb:confidence", 0.0f));
+    const auto payload = unhex(a.value("adsb:payload", ""));
+    if (!payload) return std::nullopt;
+    f.set_bits(static_cast<uint32_t>(8 * payload->size()));
+    f.set_payload(*payload);
+    if (a.contains("adsb:icao")) {
+        const auto icao = unhex(a.at("adsb:icao").get<std::string>());
+        if (!icao || icao->size() != 3) return std::nullopt;
+        f.set_icao(static_cast<uint32_t>(static_cast<unsigned char>((*icao)[0])) << 16 |
+                   static_cast<uint32_t>(static_cast<unsigned char>((*icao)[1])) << 8 |
+                   static_cast<unsigned char>((*icao)[2]));
+    }
+    if (a.contains("adsb:crc_fixed_bit")) f.set_crc_fixed_bit(a.at("adsb:crc_fixed_bit").get<uint32_t>());
+    f.set_summary(a.value("adsb:summary", ""));
+    return f;
+}
+
+// "DF17 · Position · 7200 ft", "DF11", or "DF4 · CRC failed".
+std::string label(const api::Frame& f) {
+    std::string out = "DF" + std::to_string(f.df());
+    if (!f.summary().empty()) out += " · " + f.summary();
+    else if (f.crc_checked() && !f.crc_ok()) out += " · CRC failed";
+    return out;
+}
+
+nlohmann::json annotation(const CapturePoint& point, uint64_t at, const api::Frame& f, uint64_t sample_start,
+                          uint64_t sample_count) {
+    nlohmann::json a = {
+        {"core:sample_start", sample_start},
+        {"core:sample_count", sample_count},
+        {"core:label", label(f)},
+        {"adsb:stream_index", f.idx()},
+        {"adsb:df", f.df()},
+        {"adsb:crc_ok", f.crc_ok()},
+        {"adsb:crc_checked", f.crc_checked()},
+        {"adsb:confidence", f.confidence()},
+        {"adsb:payload", hex(f.payload())},
+    };
+    if (f.has_icao()) {
+        char icao[7];
+        std::snprintf(icao, sizeof icao, "%06x", f.icao());
+        a["adsb:icao"] = icao;
+    }
+    if (f.has_crc_fixed_bit()) a["adsb:crc_fixed_bit"] = f.crc_fixed_bit();
+    if (!f.summary().empty()) a["adsb:summary"] = f.summary();
+    if (point.envelope_indexed) a["adsb:envelope_index"] = at;
+    return a;
+}
+
+// The frames that start in the capture's segments, as SigMF annotations in sample order.
+nlohmann::json annotations(const Capture& c, const CapturePoint& point) {
+    nlohmann::json out = nlohmann::json::array();
+    const nlohmann::json& segments = c.segments;
+    size_t s = 0;
+    // Both in stream order, so one pass.
+    for (const auto& [at, f] : c.frames) {
+        while (s + 1 < segments.size() && at >= segments[s + 1]["core:global_index"].get<uint64_t>()) s++;
+        if (s >= segments.size()) break;
+        const uint64_t index = segments[s]["core:global_index"].get<uint64_t>();
+        const uint64_t file_start = segments[s]["core:sample_start"].get<uint64_t>();
+        const uint64_t file_end =
+            s + 1 < segments.size() ? segments[s + 1]["core:sample_start"].get<uint64_t>() : c.written;
+        if (at < index || at - index >= file_end - file_start) continue;
+        out.push_back(annotation(point, at, f, file_start + (at - index), frame_samples(point, f)));
+    }
+    return out;
+}
+
+// Returns the number of annotations written.
+coro::Coro<size_t> write_meta(const Capture& c, const CapturePoint& point) {
+    nlohmann::json annotated = annotations(c, point);
+    const size_t n = annotated.size();
     nlohmann::json global = {
         {"core:datatype", c.datatype},
         {"core:sample_rate", point.rate_hz},
@@ -153,11 +253,18 @@ coro::Coro<void> write_meta(const Capture& c, const CapturePoint& point) {
         {"core:description", description(point)},
     };
     if (!c.geolocation.is_null()) global["core:geolocation"] = c.geolocation;
+    const bool full_scale = takes_full_scale(c.datatype) && point.full_scale;
+    if (full_scale) global["adsb:full_scale"] = *point.full_scale;
+    if (c.frame_blocks_lost > 0) global["adsb:frame_blocks_lost"] = c.frame_blocks_lost;
+    if (full_scale || n > 0 || c.frame_blocks_lost > 0)
+        global["core:extensions"] = nlohmann::json::array(
+            {{{"name", "adsb"}, {"version", "1.0.0"}, {"optional", true}}});
     const nlohmann::json meta = {{"global", std::move(global)}, {"captures", c.segments},
-                                 {"annotations", nlohmann::json::array()}};
+                                 {"annotations", std::move(annotated)}};
     coro::File file = co_await coro::File::open(c.meta_path, coro::FileMode::Write | coro::FileMode::Create |
                                                                  coro::FileMode::Truncate);
     (void)co_await file.write_exact(meta.dump(2) + "\n");
+    co_return n;
 }
 
 // Opens the capture a call asks for.
@@ -166,20 +273,26 @@ coro::Coro<Capture> start(const CapturePoint& point, const api::RecordCaptureReq
     const std::string base = (std::filesystem::path(dir) / request.name()).string();
     const std::string data_path = base + ".sigmf-data";
     const std::string meta_path = base + ".sigmf-meta";
-    // Checked rather than opened exclusively, which coro::File can't do: only a second capture of the same
-    // name racing this one gets past it.
-    if (std::filesystem::exists(data_path) || std::filesystem::exists(meta_path)) {
+    const auto exists = [&] {
         LOGF(WARNING, "capture %s: refused, %s exists", point.name, data_path);
-        throw wsrpc::CallError(wsrpc::v1::Error::INVALID_ARGUMENT,
-                               data_path + " exists, and a capture never overwrites one");
-    }
+        return wsrpc::CallError(wsrpc::v1::Error::INVALID_ARGUMENT,
+                                data_path + " exists, and a capture never overwrites one");
+    };
+    // A lone .sigmf-meta is another recording's too. The data file is created exclusively, so of two captures
+    // of one name racing, only one gets it.
+    if (std::filesystem::exists(meta_path)) throw exists();
     std::optional<coro::File> data;
     std::string failed;
+    bool existed = false;
     try {
-        data.emplace(co_await coro::File::open(data_path, coro::FileMode::Write | coro::FileMode::Create));
+        data.emplace(co_await coro::File::open(data_path, coro::FileMode::Write | coro::FileMode::CreateNew));
+    } catch (const std::system_error& e) {
+        existed = e.code() == std::errc::file_exists;
+        failed = e.what();
     } catch (const std::exception& e) {
         failed = e.what();
     }
+    if (existed) throw exists();
     if (!data) {
         LOGF(ERROR, "capture %s: can't create %s: %s", point.name, data_path, failed);
         throw wsrpc::CallError(wsrpc::v1::Error::INTERNAL, data_path + ": " + failed);
@@ -252,7 +365,7 @@ api::RecordCaptureProgress report_of(const Capture& c) {
 
 // Writes the final metadata, and returns the last report; `why` is for the log.
 coro::Coro<api::RecordCaptureProgress> finish(const Capture& c, const CapturePoint& point, const char* why) {
-    if (c.start) co_await write_meta(c, point);
+    const size_t annotated = c.start ? co_await write_meta(c, point) : 0;
     api::RecordCaptureProgress last = report_of(c);
     api::Capture& capture = *last.mutable_capture();
     capture.set_name(c.name);
@@ -265,19 +378,48 @@ coro::Coro<api::RecordCaptureProgress> finish(const Capture& c, const CapturePoi
         meta.set_datatype(c.datatype);
         meta.set_rate_hz(point.rate_hz);
         if (point.freq_hz) meta.set_freq_hz(*point.freq_hz);
+        if (takes_full_scale(c.datatype) && point.full_scale) meta.set_full_scale(*point.full_scale);
         meta.set_description(description(point));
         meta.set_duration_s(duration_s(capture.data_bytes(), meta));
     }
-    LOGF(INFO, "capture %s: %s, %u samples (%.3f s) in %s, %u missing", point.name, why, c.written,
-         static_cast<double>(c.written) / point.rate_hz, c.data_path, last.missing());
+    LOGF(INFO, "capture %s: %s, %u samples (%.3f s) in %s, %u missing, %u frame(s) annotated", point.name, why,
+         c.written, static_cast<double>(c.written) / point.rate_hz, c.data_path, last.missing(), annotated);
     co_return last;
 }
 
+// Takes a block of frames, or notes those lost. False once the frames have ended, or for try_recv(), have none
+// buffered.
+bool take_frames(Capture& c, const CapturePoint& point,
+                 const std::expected<LiveFrames, coro::BroadcastRecvError>& received) {
+    if (!received) {
+        if (received.error().kind != coro::BroadcastRecvError::Kind::Lagged) return false;
+        const uint64_t lost = received.error().skipped;
+        c.frame_blocks_lost += lost;
+        TRACE_PLOT("capture frames lost", static_cast<int64_t>(lost));
+        LOGF(WARNING, "capture %s: %u block(s) of frames lost, behind a slow disk; their frames aren't annotated",
+             point.name, lost);
+        return true;
+    }
+    const FrameBlock& block = **received;
+    for (size_t i = 0; i < block.frames.size(); i++)
+        c.frames.emplace_back(point.envelope_indexed ? block.envelope_index[i] : block.frames[i].idx(),
+                              block.frames[i]);
+    c.frames_through = point.envelope_indexed ? block.envelope_end : block.end;
+    return true;
+}
+
+// Whether the frames have passed the samples written so far.
+bool frames_reached(const Capture& c) {
+    return !c.start || c.frames_through >= c.next;
+}
+
 // A capture's writer task: writes the items from `in` until the capture is done or the input ends, updating
-// `progress` after each. Writing holds it back from `in`, whose ring overtakes it rather than wait, so a slow disk
-// loses samples rather than slowing the pipeline.
+// `progress` after each, then takes the frames from `frames` until they reach its end. Writing holds it back from
+// `in` and `frames`, whose rings overtake it rather than wait, so a slow disk loses samples and frames rather than
+// slowing the pipeline.
 template <class Item>
 coro::Coro<Result> write_capture(Capture c, CapturePoint point, coro::BroadcastReceiver<Item> in,
+                                 coro::BroadcastReceiver<LiveFrames> frames,
                                  coro::WatchSender<api::RecordCaptureProgress> progress) {
     // The call's cancel drops this frame at a co_await, before the capture finishes. What's written stays, with
     // the metadata written at its last segment, which covers it.
@@ -304,7 +446,13 @@ coro::Coro<Result> write_capture(Capture c, CapturePoint point, coro::BroadcastR
                 why = "ended early with the input";
             }
             // A lag is a gap, which the next item's index shows, and write() logs and plots with its size.
+            // Taken as they come, so they don't overtake the writer while it waits on the input.
+            while (take_frames(c, point, frames.try_recv())) {}
         }
+        // Dropped, so the input's blocks aren't held for it while the frames catch up.
+        { auto done = std::move(in); }
+        bool open = true;
+        while (open && !frames_reached(c)) open = take_frames(c, point, co_await frames.recv());
         last = co_await finish(c, point, why);
     } catch (const std::exception& e) {
         failed = e.what();
@@ -318,13 +466,14 @@ coro::Coro<Result> write_capture(Capture c, CapturePoint point, coro::BroadcastR
 // Both points' run_capture().
 template <class Item>
 coro::CoroStream<api::RecordCaptureProgress> capture_stream(CapturePoint point, coro::BroadcastReceiver<Item> in,
+                                                            coro::BroadcastReceiver<LiveFrames> frames,
                                                             api::RecordCaptureRequest request, std::string dir,
                                                             api::ReceiverPosition receiver) {
     Capture c = co_await start(point, request, dir, receiver);
     auto [progress_tx, progress] = coro::watch_channel(api::RecordCaptureProgress{});
     // Held in this frame, so dropping the stream cancels it.
     coro::JoinHandle<Result> writer = coro::build_task().name("capture_writer").spawn(
-        write_capture(std::move(c), point, std::move(in), std::move(progress_tx)));
+        write_capture(std::move(c), point, std::move(in), std::move(frames), std::move(progress_tx)));
     for (;;) {
         auto woke = co_await coro::select(coro::ref(writer), coro::sleep_for(kReportInterval));
         if (woke.index() == 0) {
@@ -341,16 +490,85 @@ coro::CoroStream<api::RecordCaptureProgress> capture_stream(CapturePoint point, 
 }  // namespace
 
 coro::CoroStream<api::RecordCaptureProgress> run_capture(CapturePoint point, coro::BroadcastReceiver<IqBlock> in,
+                                                         coro::BroadcastReceiver<LiveFrames> frames,
                                                          api::RecordCaptureRequest request, std::string dir,
                                                          api::ReceiverPosition receiver) {
-    return capture_stream(point, std::move(in), std::move(request), std::move(dir), std::move(receiver));
+    return capture_stream(point, std::move(in), std::move(frames), std::move(request), std::move(dir),
+                          std::move(receiver));
 }
 
 coro::CoroStream<api::RecordCaptureProgress> run_capture(CapturePoint point,
                                                          coro::BroadcastReceiver<EnvelopeShare> in,
+                                                         coro::BroadcastReceiver<LiveFrames> frames,
                                                          api::RecordCaptureRequest request, std::string dir,
                                                          api::ReceiverPosition receiver) {
-    return capture_stream(point, std::move(in), std::move(request), std::move(dir), std::move(receiver));
+    return capture_stream(point, std::move(in), std::move(frames), std::move(request), std::move(dir),
+                          std::move(receiver));
+}
+
+bool is_capture_name(std::string_view name) {
+    return !name.empty() && name.front() != '.' && name.find_first_of(std::string_view("/\0", 2)) == name.npos;
+}
+
+std::optional<api::CaptureMeta> read_capture_meta(const std::string& meta_path, uint64_t data_bytes) {
+    std::ifstream in(meta_path);
+    if (!in) return std::nullopt;
+    const nlohmann::json j = nlohmann::json::parse(in, nullptr, false);
+    if (j.is_discarded() || !j.is_object()) return std::nullopt;
+    api::CaptureMeta m;
+    try {
+        const nlohmann::json& global = j.at("global");
+        m.set_datatype(global.at("core:datatype").get<std::string>());
+        m.set_rate_hz(global.at("core:sample_rate").get<double>());
+        m.set_description(global.value("core:description", ""));
+        if (global.contains("adsb:full_scale")) m.set_full_scale(global.at("adsb:full_scale").get<double>());
+        if (const auto captures = j.find("captures");
+            captures != j.end() && captures->is_array() && !captures->empty() &&
+            captures->front().contains("core:frequency"))
+            m.set_freq_hz(captures->front().at("core:frequency").get<double>());
+    } catch (const nlohmann::json::exception&) {
+        return std::nullopt;
+    }
+    m.set_duration_s(duration_s(data_bytes, m));
+    return m;
+}
+
+std::optional<CaptureAnnotations> read_capture_annotations(const std::string& meta_path, uint64_t samples) {
+    std::ifstream in(meta_path);
+    if (!in) return std::nullopt;
+    const nlohmann::json j = nlohmann::json::parse(in, nullptr, false);
+    if (j.is_discarded() || !j.is_object()) return std::nullopt;
+    CaptureAnnotations out;
+    const auto annotations = j.find("annotations");
+    if (annotations == j.end() || !annotations->is_array()) return out;
+    for (const nlohmann::json& a : *annotations) {
+        try {
+            const uint64_t start = a.at("core:sample_start").get<uint64_t>();
+            if (start >= samples) {
+                out.unreadable++;
+                continue;
+            }
+            api::CaptureAnnotation got;
+            got.set_start(start);
+            got.set_count(std::min(a.value("core:sample_count", samples - start), samples - start));
+            got.set_label(a.contains("core:label") ? a.at("core:label").get<std::string>()
+                                                   : a.value("core:comment", std::string()));
+            if (a.contains("adsb:df")) {
+                std::optional<api::Frame> frame = frame_of(a);
+                if (!frame) {
+                    out.unreadable++;
+                    continue;
+                }
+                *got.mutable_frame() = std::move(*frame);
+            }
+            out.annotations.push_back(std::move(got));
+        } catch (const nlohmann::json::exception&) {
+            out.unreadable++;
+        }
+    }
+    // SigMF requires sample order, which another tool's file may not keep.
+    std::ranges::stable_sort(out.annotations, {}, &api::CaptureAnnotation::start);
+    return out;
 }
 
 std::expected<std::string, std::string> resolve_capture_dir(const std::string& dir) {
@@ -399,7 +617,9 @@ std::expected<api::ListCapturesResponse, std::string> list_capture_files(const s
         f.set_data_bytes(found[i].bytes);
         const auto modified = std::chrono::file_clock::to_sys(found[i].modified);
         f.set_modified_unix_s(std::chrono::duration<double>(modified.time_since_epoch()).count());
-        read_meta(f, fs::path(found[i].data).replace_extension(".sigmf-meta"));
+        if (auto meta = read_capture_meta(fs::path(found[i].data).replace_extension(".sigmf-meta").string(),
+                                          found[i].bytes))
+            *f.mutable_meta() = std::move(*meta);
     }
     return out;
 }

@@ -23,12 +23,7 @@
  * publishes on its outputs (PipelineOutputs). doc/design/ui_api.md describes the protocol and the design.
  */
 
-/**
- * One block's frames, and one spectrum row, as the broadcasts carry them. Shared, since a broadcast keeps each
- * value in its queue for the other receivers, so every receive copies it out: the shared pointer makes that copy
- * a reference count rather than a deep copy.
- */
-using LiveFrames = std::shared_ptr<const std::vector<api::Frame>>;
+/** One spectrum row, as the broadcast carries it: shared, as LiveFrames is (capture.h). */
 using LiveSpectrumRow = std::shared_ptr<const api::SpectrumRow>;
 
 /** The aircraft published recently, by ICAO address, each as last published. */
@@ -40,7 +35,7 @@ using LiveAircraft = std::unordered_map<uint32_t, api::Aircraft>;
  * Each is for one task at a time: clone for another.
  */
 struct PipelineOutputs {
-    coro::InactiveBroadcastReceiver<LiveFrames> frames;         /**< the sink: each block's frames */
+    coro::InactiveBroadcastReceiver<LiveFrames> frames;         /**< the sink: every block's frames */
     coro::WatchReceiver<LiveAircraft> aircraft;                 /**< the sink: the aircraft heard in 10 minutes */
     coro::InactiveBroadcastReceiver<LiveSpectrumRow> spectrum;  /**< the spectrum task: peak-held rows */
     coro::InactiveBroadcastReceiver<IqBlock> input;  /**< the tee: every block, in the source's format */

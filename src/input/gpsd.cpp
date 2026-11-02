@@ -1,5 +1,6 @@
 #include "input/gpsd.h"
 
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -280,6 +281,15 @@ api::ReceiverPosition receiver_without_gps(std::string summary) {
     p.set_state(api::NO_GPS);
     p.set_summary(std::move(summary));
     return p;
+}
+
+std::optional<GpsdAddress> GpsdAddress::parse(std::string_view s) {
+    const size_t colon = s.rfind(':');
+    if (colon == 0 || colon == std::string_view::npos) return std::nullopt;
+    uint16_t port = 0;
+    const auto [end, ec] = std::from_chars(s.data() + colon + 1, s.data() + s.size(), port);
+    if (ec != std::errc{} || end != s.data() + s.size() || port == 0) return std::nullopt;
+    return GpsdAddress{.host = std::string(s.substr(0, colon)), .port = port};
 }
 
 api::ReceiverPosition gpsd_connecting(const GpsdAddress& address) {

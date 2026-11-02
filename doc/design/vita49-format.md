@@ -9,7 +9,7 @@ Background for writing two new pieces:
    playing the role a real VITA-49-capable SDR front-end would.
 2. A `vita49_stream.h`/`.cpp` source for `adsb`, alongside
    `rtlsdr_stream.h`/`file_stream.h`, that reads that UDP stream and hands
-   `IqBlock`s to `run_demod_loop` the same way the other two sources do.
+   `IqBlock`s to `demod_pipeline()` the same way the other two sources do.
 
 This is **not** a full transcription of ANSI/VITA-49.0-2015 (that document is
 paywalled and wasn't available to check directly). Everything below was
@@ -94,14 +94,18 @@ there's only one stream.
 
 Word layout: `Header | Stream ID | Timestamp (0-3 words) | IQ payload | Trailer (0 or 1 word)`.
 
-Payload is interleaved 16-bit signed I/Q pairs, two's complement, **big-endian
-on the wire** (same as everything else in VRT) -- this needs an explicit
-byte-swap on both ends, since RTL-SDR's native samples are 8-bit
-unsigned and the existing pipeline's `IqBlock` is presumably host-endian
-`float`/`int16_t` already (check `iq_block.h` for the in-memory
-representation the demod side expects before picking the wire sample type;
-16-bit signed int matches rtlsdr's usable dynamic range without wasting
-bandwidth the way a 32-bit float payload would).
+Payload is interleaved complex I/Q pairs, **big-endian on the wire** (same as
+everything else in VRT), so both ends byte-swap. `vita49_send` sends one of two
+item formats, chosen by `--stream-format`:
+
+- `ci16_be` (the default): 16-bit signed integers, two's complement. It covers an
+  rtlsdr's usable dynamic range at half the bandwidth of floats, and it is the
+  only format `adsb vita49` receives.
+- `cf32_be`: 32-bit IEEE floats, for a receiver that wants the resampler's full
+  precision.
+
+The context packet's Data Payload Format field says which one a stream carries
+(see below).
 
 ### Trailer word (present iff header bit T=1)
 
@@ -146,6 +150,21 @@ itself. Confirmed against eblossom/vita-49's `bits.h`:
 | 15  | Data Payload Format | 2 |
 | 14-8 | (GPS/INS/ephemeris/assoc-lists -- not needed here) | varies |
 
+The Data Payload Format field's first word describes one payload item; its
+second word is 0 (no repeats, a vector size of 1):
+
+| Bits | Field | `ci16_be` | `cf32_be` |
+|------|-------|---------|---------|
+| 31 | Packing method | 0 (processing-efficient) | 0 |
+| 30-29 | Real/complex type | `01` (complex Cartesian) | `01` |
+| 28-24 | Item format | `0x00` (signed fixed point) | `0x0E` (IEEE single) |
+| 11-6 | Packing field size - 1 | 15 | 31 |
+| 5-0 | Item size - 1 | 15 | 31 |
+| | Whole word | `0x200003CF` | `0x2E0007DF` |
+
+The other bits (event and channel tags, the fixed-point radix point) don't
+change how the items are read, so the receiver masks them off before comparing.
+
 Fields we actually need for the demod side: **Bandwidth**, **RF Reference
 Frequency**, **Sample Rate** (all three: Q44.20 fixed-point, signed,
 64-bit, units Hz -- confirmed independently by both Signal Hound's and
@@ -174,8 +193,8 @@ across datagrams. This also caps a single Data packet's IQ payload well
 under the typical UDP-over-Ethernet safe size (~1472 bytes before IP
 fragmentation) -- e.g. at 16-bit I + 16-bit Q per sample plus ~20 bytes of
 header/stream-ID/timestamp, that's roughly 360 IQ samples per packet if we
-want to stay under one MTU. RTL-SDR blocks will need chunking into several
-Data packets rather than one packet per block.
+want to stay under one MTU, or 180 with 32-bit float components. Source
+blocks are chunked into several Data packets rather than one packet per block.
 
 ## Recommended implementation order
 
@@ -183,7 +202,7 @@ Data packets rather than one packet per block.
    timestamp, `C=0`, `T=0`), fixed Stream ID, chunked to fit one UDP
    datagram. Get raw IQ flowing end-to-end through a `vita49_stream.h`
    source shaped like `rtlsdr_stream.h`/`file_stream.h` (same
-   `coro::Stream<IqBlock>` interface `run_demod_loop` already consumes) --
+   `coro::Stream<IqBlock>` interface `demod_pipeline()` already consumes) --
    config (sample rate, frequency, gain) passed out-of-band via CLI flags
    on both sides to start, same as `--rate`/`--freq` today.
 2. **IF Context packet**, sent once at stream start and on any config
@@ -191,14 +210,16 @@ Data packets rather than one packet per block.
    Bandwidth -- lets the receiver pick up config from the stream itself
    instead of needing matching CLI flags on both ends.
 
-   `vita49_send` implements this (both the `rtlsdr` and `sim` subcommands)
-   with these choices:
+   `vita49_send` implements this, for every source, with these choices:
    - Carries Bandwidth (CIF0 bit 29), RF Reference Frequency (27) and Sample
-     Rate (21), in that order, each Q44.20; Gain is omitted until its
-     Q-format is confirmed (see "Open items"). 12 words total: header, Stream
-     ID, 3 timestamp words, CIF0, 3 x 2-word fields. Same header conventions
-     as the data packets (C=0, TSI=UTC, TSF=picoseconds), with its own 4-bit
-     packet counter.
+     Rate (21), in that order, each Q44.20, then the two-word Data Payload
+     Format (15); Gain is omitted until its Q-format is confirmed (see "Open
+     items"). 14 words total: header, Stream ID, 3 timestamp words, CIF0,
+     4 x 2-word fields. Same header conventions as the data packets (C=0,
+     TSI=UTC, TSF=picoseconds), with its own 4-bit packet counter.
+   - `--no-payload-format` leaves the Data Payload Format field out (12
+     words), for a receiver that doesn't expect it. A receiver then has no way
+     to tell the format, so it is only allowed with `ci16_be`.
    - Sent before the first data packet and then repeated every
      `--context-interval` seconds of signal (default 1.0, 0 = never), rather
      than only once: UDP can lose it and a receiver may join mid-stream. The
@@ -207,8 +228,10 @@ Data packets rather than one packet per block.
      timestamp of the data packet that follows it.
    - Context Field Change Indicator (CIF0 bit 31) is 1 on the first packet
      only; the config never changes mid-stream.
-   - Bandwidth is advertised as equal to the sample rate; for the `sim` subcommand
-     the RF frequency is just the `--freq` label (the IQ is baseband).
+   - Bandwidth is the resampling filter's passband, twice its cutoff, when
+     `--stream-rate` resamples the source; otherwise it is the sample rate.
+     For the `sim` subcommand the RF frequency is just the `--freq` label (the
+     IQ is baseband).
 
    Receivers should treat a data packet's own timestamps as authoritative for
    placement and use the context for the metadata; `tests/vrt_to_sigmf.py`
@@ -227,7 +250,7 @@ flowchart LR
     RX --> ASM[vrt::Assembler]
     ASM -->|ordered, gap-filled samples| RX
     RX -->|guard-padded IqBlocks, mpsc channel| GEN[vita49_iq_stream]
-    GEN --> LOOP[run_demod_loop]
+    GEN --> LOOP["demod_pipeline()"]
 ```
 
 Subcommand options: `--port` (required), `--bind`, `--stream-id`,
@@ -248,12 +271,15 @@ Assembler rules:
   that disagrees by more than 0.1% is a fatal error. (Used on its own, without
   a rate, the assembler discards data packets until a context packet supplies
   one.) The stream id latches to the first one seen unless filtered.
+- Payload format: a context packet whose Data Payload Format field isn't
+  16-bit complex I/Q is a fatal error. Without the field the payload is taken
+  as 16-bit complex I/Q.
 - The receive task never blocks on the demod: if the channel is full, blocks are
   dropped with a warning (same policy as `rtlsdr_stream`).
 - The stream ends on Ctrl+C or after `--idle-timeout` s of silence.
 
 Blocks carry their stream sample index, so the `BlockStitcher` in
-`demodulate()` joins consecutive blocks and frames that straddle a block
+`stitch()` joins consecutive blocks and frames that straddle a block
 boundary still decode. Blocks dropped because the channel was full leave a gap,
 and the stitcher does not join blocks across it.
 

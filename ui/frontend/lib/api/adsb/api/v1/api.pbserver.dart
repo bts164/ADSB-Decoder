@@ -41,6 +41,10 @@ abstract class ReceiverServiceBase extends $pb.GeneratedService {
       $pb.ServerContext ctx, $0.RecordCaptureRequest request);
   $async.Future<$0.ListCapturesResponse> listCaptures(
       $pb.ServerContext ctx, $0.ListCapturesRequest request);
+  $async.Future<$0.OpenCaptureProgress> openCapture(
+      $pb.ServerContext ctx, $0.OpenCaptureRequest request);
+  $async.Future<$0.CaptureView> getCaptureView(
+      $pb.ServerContext ctx, $0.GetCaptureViewRequest request);
 
   $pb.GeneratedMessage createRequest($core.String methodName) {
     switch (methodName) {
@@ -64,6 +68,10 @@ abstract class ReceiverServiceBase extends $pb.GeneratedService {
         return $0.RecordCaptureRequest();
       case 'ListCaptures':
         return $0.ListCapturesRequest();
+      case 'OpenCapture':
+        return $0.OpenCaptureRequest();
+      case 'GetCaptureView':
+        return $0.GetCaptureViewRequest();
       default:
         throw $core.ArgumentError('Unknown method: $methodName');
     }
@@ -93,6 +101,10 @@ abstract class ReceiverServiceBase extends $pb.GeneratedService {
         return recordCapture(ctx, request as $0.RecordCaptureRequest);
       case 'ListCaptures':
         return listCaptures(ctx, request as $0.ListCapturesRequest);
+      case 'OpenCapture':
+        return openCapture(ctx, request as $0.OpenCaptureRequest);
+      case 'GetCaptureView':
+        return getCaptureView(ctx, request as $0.GetCaptureViewRequest);
       default:
         throw $core.ArgumentError('Unknown method: $methodName');
     }

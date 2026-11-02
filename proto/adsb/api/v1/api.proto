@@ -34,6 +34,12 @@ service Receiver {
   rpc RecordCapture(RecordCaptureRequest) returns (stream RecordCaptureProgress);
   // The recordings in the capture directory: every .sigmf-data there, whoever wrote it.
   rpc ListCaptures(ListCapturesRequest) returns (ListCapturesResponse);
+  // Makes sure a recording has a current summary for GetCaptureView's coarse views, building it if it has none or
+  // a stale one, reporting the build's progress; ends with what a plot of the recording needs. Two calls on one
+  // recording share a build.
+  rpc OpenCapture(OpenCaptureRequest) returns (stream OpenCaptureProgress);
+  // One view of a recording: a span of it reduced to columns, or its samples once a column is 4 or fewer.
+  rpc GetCaptureView(GetCaptureViewRequest) returns (CaptureView);
 }
 
 // The history database. Served with --history-db.
@@ -72,7 +78,7 @@ message FrameBatch {
 
 message Frame {
   uint64 idx = 1;  // stream sample index of the preamble
-  uint32 bits = 2;
+  uint32 bits = 2;  // the reply's length by its DF: 56 or 112
   float confidence = 3;
   uint32 df = 4;
   optional uint32 icao = 5;  // unset when the address isn't known
@@ -159,8 +165,8 @@ message WatchReceiverPositionRequest {}
 
 enum GpsState {
   GPS_STATE_UNSPECIFIED = 0;
-  NO_GPS = 1;            // the input has no GPS: every source but sidekiq, or sidekiq with --gpsd none
-  GPSD_UNREACHABLE = 2;  // sidekiq: gpsd isn't answering at --gpsd
+  NO_GPS = 1;            // no gpsd to read: --gpsd none, or no --gpsd for a source without a default
+  GPSD_UNREACHABLE = 2;  // gpsd isn't answering at --gpsd
   NO_FIX = 3;            // gpsd answers, but has no fix, or no GPS device; summary says which
   FIX_2D = 4;
   FIX_3D = 5;
@@ -210,6 +216,8 @@ enum CapturePoint {
   ENVELOPE = 2;  // the demodulator's resampled envelope magnitude, real float32 at its output rate
 }
 
+// Every frame the pipeline decodes in a capture's span, CRC failures too, is a SigMF annotation in its .sigmf-meta,
+// so the call ends once the decoding has passed the span's end, a block or more after its last sample.
 message RecordCaptureRequest {
   CapturePoint point = 1;
   double duration_s = 2;  // stream time; over 0, and at most ReceiverInfo.max_capture_s
@@ -246,11 +254,84 @@ message Capture {
 
 // What a recording's .sigmf-meta says.
 message CaptureMeta {
-  string datatype = 1;          // core:datatype, e.g. "cf32_le"
-  double rate_hz = 2;           // core:sample_rate
-  optional double freq_hz = 3;  // the first segment's core:frequency, if it has one
-  string description = 4;       // core:description
-  double duration_s = 5;        // of the samples in the .sigmf-data, from its size, datatype and rate
+  string datatype = 1;             // core:datatype, e.g. "cf32_le"
+  double rate_hz = 2;              // core:sample_rate
+  optional double freq_hz = 3;     // the first segment's core:frequency, if it has one
+  string description = 4;          // core:description
+  double duration_s = 5;           // of the samples in the .sigmf-data, from its size, datatype and rate
+  optional double full_scale = 6;  // adsb:full_scale: in a cf32_le recording, the I or Q value the source clips
+                                   // at, if it's known
+}
+
+// ---- Receiver: the recording viewer ----
+
+message OpenCaptureRequest {
+  string name = 1;  // as RecordCaptureRequest.name; not one being recorded
+}
+
+// About twice a second while a summary is built, and a last one with `capture` set; only that one when the
+// summary is current.
+message OpenCaptureProgress {
+  uint64 samples_done = 1;   // samples summarised so far
+  uint64 samples_total = 2;  // in the recording
+  CaptureInfo capture = 3;   // on the last reply only
+}
+
+// What a plot of a recording needs.
+message CaptureInfo {
+  string name = 1;
+  uint64 samples = 2;
+  double rate_hz = 3;              // core:sample_rate
+  string datatype = 4;             // cf32_le, ci16_be or rf32_le
+  bool complex = 5;                // IQ, rather than real samples
+  optional double full_scale = 6;  // the I or Q value counted as clipped, in the samples' units; unset when
+                                   // unknown, and no column is then clipped
+  repeated CaptureAnnotation annotations = 7;  // the .sigmf-meta's, in sample order
+}
+
+// A SigMF annotation of a recording.
+message CaptureAnnotation {
+  uint64 start = 1;   // core:sample_start
+  uint64 count = 2;   // core:sample_count; without one, to the recording's end
+  string label = 3;   // core:label, or core:comment without one; may be empty
+  Frame frame = 4;    // for a frame RecordCapture annotated, what it said of it; unset for any other annotation.
+                      // Its idx is the input's stream index, as in RecordCaptureProgress.start_index.
+}
+
+message GetCaptureViewRequest {
+  string name = 1;     // as OpenCaptureRequest.name
+  uint64 first = 2;    // the span's first sample
+  uint64 count = 3;    // its samples: over 0, and not past the recording's end
+  uint32 columns = 4;  // 1 to 8192
+  bool iq = 5;         // for a complex recording's samples: I and Q rather than the magnitude
+}
+
+message CaptureView {
+  uint64 first = 1;  // as asked
+  uint64 count = 2;
+  oneof view {
+    CaptureColumns columns = 3;  // over 4 samples a column
+    CaptureSamples samples = 4;  // 4 or fewer
+  }
+}
+
+// The span in columns, each a reduction of the samples under it, in the samples' units: a ci16_be recording's
+// are the integers'. Column c covers the samples from first + floor(c * count / columns) to the next column's
+// first; read from a summary, it covers the whole buckets that start there, so it may reach up to a bucket
+// further on either side.
+message CaptureColumns {
+  repeated float max_power = 1;   // the most of |x|^2: for a real recording, x^2
+  repeated float mean_power = 2;  // the mean of |x|^2
+  repeated uint32 clipped = 3;    // samples with I or Q at the full scale; 0 without one, and for real samples
+  double samples_per_column = 4;  // count / columns
+  uint32 level = 5;               // the summary level the columns came from; 0 for the samples
+}
+
+// The span's samples, in their own units: a ci16_be recording's are the integers'.
+message CaptureSamples {
+  repeated float values = 1;  // one per sample: the magnitude, or a real recording's sample; with `iq`, I and Q
+                              // for each, interleaved
+  bool iq = 2;
 }
 
 // ---- History ----

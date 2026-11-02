@@ -62,7 +62,7 @@ size_t queue_capacity(const SimStreamParams& params, size_t batch_packets) {
     const auto items = static_cast<size_t>(std::max(1.0, std::ceil(params.queue_s * rate / batch_samples)));
     LOGF(INFO, "render queue: %u batches of %u packets (%.1f ms, %.1f MB)", items, batch_packets,
          items * batch_samples / rate * 1e3,
-         items * batch_packets * vrt::data_packet_bytes(params.samples_per_packet, vrt::PayloadFormat::i16) / 1e6);
+         items * batch_packets * vrt::data_packet_bytes(params.samples_per_packet, iq::I16Be{}) / 1e6);
     return items;
 }
 
@@ -115,7 +115,7 @@ struct SimGenerator {
             SimItem& item = items.back();
             net::DatagramBatch& datagrams = item.batch.datagrams;
             vrt::write_data_header(datagrams.bytes.data() + datagrams.used, stream_id, packet_count, clock.next(spp),
-                                   spp, vrt::PayloadFormat::i16);
+                                   spp, iq::I16Be{});
             datagrams.used += pkt_bytes;
             item.batch.samples += spp;
             pos += spp;
@@ -158,7 +158,7 @@ SimGenerator make_sim_generator(std::unique_ptr<adsb_sim::Simulator> sim, const 
                                 size_t batch_packets, coro::MpscSender<SimItem> tx,
                                 coro::WatchSender<PaceStats> pace_tx) {
     const double rate = params.sim.sample_rate_hz;
-    const size_t pkt_bytes = vrt::data_packet_bytes(params.samples_per_packet, vrt::PayloadFormat::i16);
+    const size_t pkt_bytes = vrt::data_packet_bytes(params.samples_per_packet, iq::I16Be{});
     const size_t render_packets = batch_packets * render_batches(*sim, params, batch_packets);
     return SimGenerator{
         .sim = std::move(sim),
@@ -177,7 +177,7 @@ SimGenerator make_sim_generator(std::unique_ptr<adsb_sim::Simulator> sim, const 
         .context = vrt::ContextSender(
             params.stream_id,
             vrt::StreamConfig{rate, params.rf_freq_hz, rate,
-                              params.payload_format ? std::optional(vrt::PayloadFormat::i16) : std::nullopt},
+                              params.payload_format ? std::optional<iq::OutputFormat>(iq::I16Be{}) : std::nullopt},
             params.context_interval_s),
     };
 }

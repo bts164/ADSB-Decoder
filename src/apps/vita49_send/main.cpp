@@ -20,6 +20,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <utility>
 
 #include <absl/strings/str_format.h>
@@ -92,6 +93,9 @@ void add_options(argparse::ArgumentParser& program, Commands& cmds) {
         "one is always sent before the first data packet. 0 = never send any");
     program.add_argument("--dest-host").default_value(std::string("127.0.0.1")).help(
         "destination host to stream VRT/UDP packets to");
+    program.add_argument("--broadcast").flag().help(
+        "allow --dest-host to be a broadcast address, such as 192.168.40.255 for 192.168.40.0/24, which every "
+        "host on that subnet receives");
     program.add_argument("--dest-port").scan<'u', unsigned>().required().help(
         "destination UDP port to stream VRT packets to");
     program.add_argument("--stream-id").scan<'u', unsigned>().default_value(1u).help(
@@ -139,7 +143,7 @@ bool parse_command_line(argparse::ArgumentParser& program, const Commands& cmds,
             throw std::runtime_error("a source subcommand is required: " + source_names());
         if (program.is_subcommand_used(cmds.sim) && StreamOptions::resampling_options_used(program))
             throw std::runtime_error("the sim source takes no --stream-rate, filter options or --stream-format "
-                                     "other than i16be: it renders int16 at its own --rate");
+                                     "other than ci16_be: it renders int16 at its own --rate");
     } catch (const std::exception& err) {
         VersionOptions::exit_if_given(program, "vita49_send");
         std::cerr << err.what() << "\n";
@@ -170,6 +174,7 @@ coro::Coro<int> async_main(int argc, char** argv) {
 
     const double context_interval_s = program.get<double>("--context-interval");
     const std::string dest_host = program.get<std::string>("--dest-host");
+    const bool broadcast = program.get<bool>("--broadcast");
     const auto dest_port = static_cast<uint16_t>(program.get<unsigned>("--dest-port"));
     const uint32_t stream_id = program.get<unsigned>("--stream-id");
 
@@ -179,7 +184,20 @@ coro::Coro<int> async_main(int argc, char** argv) {
         co_return 1;
     }
     auto sock = co_await coro::UdpSocket::bind("0.0.0.0", 0);
-    co_await sock.connect(*dest);
+    if (broadcast) {
+        co_await sock.set_broadcast(true);
+        LOGF(INFO, "--broadcast: --dest-host may be a broadcast address");
+    }
+    try {
+        co_await sock.connect(*dest);
+    } catch (const std::system_error& err) {
+        // The kernel refuses a broadcast address to a socket that hasn't allowed it (SO_BROADCAST).
+        if (!broadcast && err.code() == std::errc::permission_denied) {
+            LOGF(ERROR, "--dest-host %s: %s; a broadcast address needs --broadcast", dest_host, err.what());
+            co_return 1;
+        }
+        throw;
+    }
 
     // The stages report what they drop on the pace statistics.
     auto [pace_tx, pace_rx] = coro::watch_channel(PaceStats{});
@@ -190,7 +208,7 @@ coro::Coro<int> async_main(int argc, char** argv) {
         double rate_hz = 0;  // the stream's
         double freq_hz = 0;
         size_t samples_per_packet = 0;
-        vrt::PayloadFormat payload = vrt::PayloadFormat::i16;
+        iq::OutputFormat payload = iq::I16Be{};
         bool payload_format = true;
         double duration_s = 0;  // the sim's --duration; 0 = until Ctrl+C or the source ends
         if (program.is_subcommand_used(cmds.sim)) {
@@ -243,7 +261,7 @@ coro::Coro<int> async_main(int argc, char** argv) {
             }
             rate_hz = resampler->output_rate_hz();
             samples_per_packet = stream_options.samples_per_packet;
-            payload = stream_options.payload();
+            payload = stream_options.format;
             payload_format = stream_options.payload_format;
             const size_t batch_packets = net::enable_gso(sock, vrt::data_packet_bytes(samples_per_packet, payload));
             const PacketizeParams params{

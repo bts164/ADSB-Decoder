@@ -50,7 +50,7 @@ public:
     /**
      * Writes outputs `first` onward, as many as `out` holds, in the output format: interleaved I/Q, each
      * component as the format's `Sample` in wire order. `out` must be aligned for that `Sample`.
-     * @return how many outputs saturated, in either component (only `I16Be` saturates)
+     * @return how many outputs saturated, in either component (only an integer format saturates)
      * @throws std::invalid_argument if `out` is not a whole number of outputs, or the block has less padding
      *         than padding()
      * @throws std::out_of_range if the outputs are not all inside outputs(block)

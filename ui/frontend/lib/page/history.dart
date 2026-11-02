@@ -244,7 +244,7 @@ extension _History on _FrameTablePageState {
               label: Text('Stale ($staleCount)'),
               selected: _showStale,
               onSelected: (v) {
-                _showStale = v;
+                _showStale = _units.showStale = v;
                 _onAircraftFilterChanged();
               },
             ),
@@ -256,7 +256,7 @@ extension _History on _FrameTablePageState {
               label: const Text('Has position'),
               selected: _positionOnly,
               onSelected: (v) {
-                _positionOnly = v;
+                _positionOnly = _units.positionOnly = v;
                 _onAircraftFilterChanged();
               },
             ),

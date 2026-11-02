@@ -796,9 +796,19 @@ const CaptureMeta$json = {
     },
     {'1': 'description', '3': 4, '4': 1, '5': 9, '10': 'description'},
     {'1': 'duration_s', '3': 5, '4': 1, '5': 1, '10': 'durationS'},
+    {
+      '1': 'full_scale',
+      '3': 6,
+      '4': 1,
+      '5': 1,
+      '9': 1,
+      '10': 'fullScale',
+      '17': true
+    },
   ],
   '8': [
     {'1': '_freq_hz'},
+    {'1': '_full_scale'},
   ],
 };
 
@@ -806,8 +816,202 @@ const CaptureMeta$json = {
 final $typed_data.Uint8List captureMetaDescriptor = $convert.base64Decode(
     'CgtDYXB0dXJlTWV0YRIaCghkYXRhdHlwZRgBIAEoCVIIZGF0YXR5cGUSFwoHcmF0ZV9oehgCIA'
     'EoAVIGcmF0ZUh6EhwKB2ZyZXFfaHoYAyABKAFIAFIGZnJlcUh6iAEBEiAKC2Rlc2NyaXB0aW9u'
-    'GAQgASgJUgtkZXNjcmlwdGlvbhIdCgpkdXJhdGlvbl9zGAUgASgBUglkdXJhdGlvblNCCgoIX2'
-    'ZyZXFfaHo=');
+    'GAQgASgJUgtkZXNjcmlwdGlvbhIdCgpkdXJhdGlvbl9zGAUgASgBUglkdXJhdGlvblMSIgoKZn'
+    'VsbF9zY2FsZRgGIAEoAUgBUglmdWxsU2NhbGWIAQFCCgoIX2ZyZXFfaHpCDQoLX2Z1bGxfc2Nh'
+    'bGU=');
+
+@$core.Deprecated('Use openCaptureRequestDescriptor instead')
+const OpenCaptureRequest$json = {
+  '1': 'OpenCaptureRequest',
+  '2': [
+    {'1': 'name', '3': 1, '4': 1, '5': 9, '10': 'name'},
+  ],
+};
+
+/// Descriptor for `OpenCaptureRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List openCaptureRequestDescriptor = $convert
+    .base64Decode('ChJPcGVuQ2FwdHVyZVJlcXVlc3QSEgoEbmFtZRgBIAEoCVIEbmFtZQ==');
+
+@$core.Deprecated('Use openCaptureProgressDescriptor instead')
+const OpenCaptureProgress$json = {
+  '1': 'OpenCaptureProgress',
+  '2': [
+    {'1': 'samples_done', '3': 1, '4': 1, '5': 4, '10': 'samplesDone'},
+    {'1': 'samples_total', '3': 2, '4': 1, '5': 4, '10': 'samplesTotal'},
+    {
+      '1': 'capture',
+      '3': 3,
+      '4': 1,
+      '5': 11,
+      '6': '.adsb.api.v1.CaptureInfo',
+      '10': 'capture'
+    },
+  ],
+};
+
+/// Descriptor for `OpenCaptureProgress`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List openCaptureProgressDescriptor = $convert.base64Decode(
+    'ChNPcGVuQ2FwdHVyZVByb2dyZXNzEiEKDHNhbXBsZXNfZG9uZRgBIAEoBFILc2FtcGxlc0Rvbm'
+    'USIwoNc2FtcGxlc190b3RhbBgCIAEoBFIMc2FtcGxlc1RvdGFsEjIKB2NhcHR1cmUYAyABKAsy'
+    'GC5hZHNiLmFwaS52MS5DYXB0dXJlSW5mb1IHY2FwdHVyZQ==');
+
+@$core.Deprecated('Use captureInfoDescriptor instead')
+const CaptureInfo$json = {
+  '1': 'CaptureInfo',
+  '2': [
+    {'1': 'name', '3': 1, '4': 1, '5': 9, '10': 'name'},
+    {'1': 'samples', '3': 2, '4': 1, '5': 4, '10': 'samples'},
+    {'1': 'rate_hz', '3': 3, '4': 1, '5': 1, '10': 'rateHz'},
+    {'1': 'datatype', '3': 4, '4': 1, '5': 9, '10': 'datatype'},
+    {'1': 'complex', '3': 5, '4': 1, '5': 8, '10': 'complex'},
+    {
+      '1': 'full_scale',
+      '3': 6,
+      '4': 1,
+      '5': 1,
+      '9': 0,
+      '10': 'fullScale',
+      '17': true
+    },
+    {
+      '1': 'annotations',
+      '3': 7,
+      '4': 3,
+      '5': 11,
+      '6': '.adsb.api.v1.CaptureAnnotation',
+      '10': 'annotations'
+    },
+  ],
+  '8': [
+    {'1': '_full_scale'},
+  ],
+};
+
+/// Descriptor for `CaptureInfo`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List captureInfoDescriptor = $convert.base64Decode(
+    'CgtDYXB0dXJlSW5mbxISCgRuYW1lGAEgASgJUgRuYW1lEhgKB3NhbXBsZXMYAiABKARSB3NhbX'
+    'BsZXMSFwoHcmF0ZV9oehgDIAEoAVIGcmF0ZUh6EhoKCGRhdGF0eXBlGAQgASgJUghkYXRhdHlw'
+    'ZRIYCgdjb21wbGV4GAUgASgIUgdjb21wbGV4EiIKCmZ1bGxfc2NhbGUYBiABKAFIAFIJZnVsbF'
+    'NjYWxliAEBEkAKC2Fubm90YXRpb25zGAcgAygLMh4uYWRzYi5hcGkudjEuQ2FwdHVyZUFubm90'
+    'YXRpb25SC2Fubm90YXRpb25zQg0KC19mdWxsX3NjYWxl');
+
+@$core.Deprecated('Use captureAnnotationDescriptor instead')
+const CaptureAnnotation$json = {
+  '1': 'CaptureAnnotation',
+  '2': [
+    {'1': 'start', '3': 1, '4': 1, '5': 4, '10': 'start'},
+    {'1': 'count', '3': 2, '4': 1, '5': 4, '10': 'count'},
+    {'1': 'label', '3': 3, '4': 1, '5': 9, '10': 'label'},
+    {
+      '1': 'frame',
+      '3': 4,
+      '4': 1,
+      '5': 11,
+      '6': '.adsb.api.v1.Frame',
+      '10': 'frame'
+    },
+  ],
+};
+
+/// Descriptor for `CaptureAnnotation`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List captureAnnotationDescriptor = $convert.base64Decode(
+    'ChFDYXB0dXJlQW5ub3RhdGlvbhIUCgVzdGFydBgBIAEoBFIFc3RhcnQSFAoFY291bnQYAiABKA'
+    'RSBWNvdW50EhQKBWxhYmVsGAMgASgJUgVsYWJlbBIoCgVmcmFtZRgEIAEoCzISLmFkc2IuYXBp'
+    'LnYxLkZyYW1lUgVmcmFtZQ==');
+
+@$core.Deprecated('Use getCaptureViewRequestDescriptor instead')
+const GetCaptureViewRequest$json = {
+  '1': 'GetCaptureViewRequest',
+  '2': [
+    {'1': 'name', '3': 1, '4': 1, '5': 9, '10': 'name'},
+    {'1': 'first', '3': 2, '4': 1, '5': 4, '10': 'first'},
+    {'1': 'count', '3': 3, '4': 1, '5': 4, '10': 'count'},
+    {'1': 'columns', '3': 4, '4': 1, '5': 13, '10': 'columns'},
+    {'1': 'iq', '3': 5, '4': 1, '5': 8, '10': 'iq'},
+  ],
+};
+
+/// Descriptor for `GetCaptureViewRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List getCaptureViewRequestDescriptor = $convert.base64Decode(
+    'ChVHZXRDYXB0dXJlVmlld1JlcXVlc3QSEgoEbmFtZRgBIAEoCVIEbmFtZRIUCgVmaXJzdBgCIA'
+    'EoBFIFZmlyc3QSFAoFY291bnQYAyABKARSBWNvdW50EhgKB2NvbHVtbnMYBCABKA1SB2NvbHVt'
+    'bnMSDgoCaXEYBSABKAhSAmlx');
+
+@$core.Deprecated('Use captureViewDescriptor instead')
+const CaptureView$json = {
+  '1': 'CaptureView',
+  '2': [
+    {'1': 'first', '3': 1, '4': 1, '5': 4, '10': 'first'},
+    {'1': 'count', '3': 2, '4': 1, '5': 4, '10': 'count'},
+    {
+      '1': 'columns',
+      '3': 3,
+      '4': 1,
+      '5': 11,
+      '6': '.adsb.api.v1.CaptureColumns',
+      '9': 0,
+      '10': 'columns'
+    },
+    {
+      '1': 'samples',
+      '3': 4,
+      '4': 1,
+      '5': 11,
+      '6': '.adsb.api.v1.CaptureSamples',
+      '9': 0,
+      '10': 'samples'
+    },
+  ],
+  '8': [
+    {'1': 'view'},
+  ],
+};
+
+/// Descriptor for `CaptureView`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List captureViewDescriptor = $convert.base64Decode(
+    'CgtDYXB0dXJlVmlldxIUCgVmaXJzdBgBIAEoBFIFZmlyc3QSFAoFY291bnQYAiABKARSBWNvdW'
+    '50EjcKB2NvbHVtbnMYAyABKAsyGy5hZHNiLmFwaS52MS5DYXB0dXJlQ29sdW1uc0gAUgdjb2x1'
+    'bW5zEjcKB3NhbXBsZXMYBCABKAsyGy5hZHNiLmFwaS52MS5DYXB0dXJlU2FtcGxlc0gAUgdzYW'
+    '1wbGVzQgYKBHZpZXc=');
+
+@$core.Deprecated('Use captureColumnsDescriptor instead')
+const CaptureColumns$json = {
+  '1': 'CaptureColumns',
+  '2': [
+    {'1': 'max_power', '3': 1, '4': 3, '5': 2, '10': 'maxPower'},
+    {'1': 'mean_power', '3': 2, '4': 3, '5': 2, '10': 'meanPower'},
+    {'1': 'clipped', '3': 3, '4': 3, '5': 13, '10': 'clipped'},
+    {
+      '1': 'samples_per_column',
+      '3': 4,
+      '4': 1,
+      '5': 1,
+      '10': 'samplesPerColumn'
+    },
+    {'1': 'level', '3': 5, '4': 1, '5': 13, '10': 'level'},
+  ],
+};
+
+/// Descriptor for `CaptureColumns`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List captureColumnsDescriptor = $convert.base64Decode(
+    'Cg5DYXB0dXJlQ29sdW1ucxIbCgltYXhfcG93ZXIYASADKAJSCG1heFBvd2VyEh0KCm1lYW5fcG'
+    '93ZXIYAiADKAJSCW1lYW5Qb3dlchIYCgdjbGlwcGVkGAMgAygNUgdjbGlwcGVkEiwKEnNhbXBs'
+    'ZXNfcGVyX2NvbHVtbhgEIAEoAVIQc2FtcGxlc1BlckNvbHVtbhIUCgVsZXZlbBgFIAEoDVIFbG'
+    'V2ZWw=');
+
+@$core.Deprecated('Use captureSamplesDescriptor instead')
+const CaptureSamples$json = {
+  '1': 'CaptureSamples',
+  '2': [
+    {'1': 'values', '3': 1, '4': 3, '5': 2, '10': 'values'},
+    {'1': 'iq', '3': 2, '4': 1, '5': 8, '10': 'iq'},
+  ],
+};
+
+/// Descriptor for `CaptureSamples`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List captureSamplesDescriptor = $convert.base64Decode(
+    'Cg5DYXB0dXJlU2FtcGxlcxIWCgZ2YWx1ZXMYASADKAJSBnZhbHVlcxIOCgJpcRgCIAEoCFICaX'
+    'E=');
 
 @$core.Deprecated('Use getSnapshotRequestDescriptor instead')
 const GetSnapshotRequest$json = {
@@ -1193,6 +1397,17 @@ const $core.Map<$core.String, $core.dynamic> ReceiverServiceBase$json = {
       '2': '.adsb.api.v1.ListCapturesRequest',
       '3': '.adsb.api.v1.ListCapturesResponse'
     },
+    {
+      '1': 'OpenCapture',
+      '2': '.adsb.api.v1.OpenCaptureRequest',
+      '3': '.adsb.api.v1.OpenCaptureProgress',
+      '6': true
+    },
+    {
+      '1': 'GetCaptureView',
+      '2': '.adsb.api.v1.GetCaptureViewRequest',
+      '3': '.adsb.api.v1.CaptureView'
+    },
   ],
 };
 
@@ -1224,6 +1439,14 @@ const $core.Map<$core.String, $core.Map<$core.String, $core.dynamic>>
   '.adsb.api.v1.CaptureMeta': CaptureMeta$json,
   '.adsb.api.v1.ListCapturesRequest': ListCapturesRequest$json,
   '.adsb.api.v1.ListCapturesResponse': ListCapturesResponse$json,
+  '.adsb.api.v1.OpenCaptureRequest': OpenCaptureRequest$json,
+  '.adsb.api.v1.OpenCaptureProgress': OpenCaptureProgress$json,
+  '.adsb.api.v1.CaptureInfo': CaptureInfo$json,
+  '.adsb.api.v1.CaptureAnnotation': CaptureAnnotation$json,
+  '.adsb.api.v1.GetCaptureViewRequest': GetCaptureViewRequest$json,
+  '.adsb.api.v1.CaptureView': CaptureView$json,
+  '.adsb.api.v1.CaptureColumns': CaptureColumns$json,
+  '.adsb.api.v1.CaptureSamples': CaptureSamples$json,
 };
 
 /// Descriptor for `Receiver`. Decode as a `google.protobuf.ServiceDescriptorProto`.
@@ -1243,7 +1466,10 @@ final $typed_data.Uint8List receiverServiceDescriptor = $convert.base64Decode(
     'ZXR0aW5ncxJYCg1SZWNvcmRDYXB0dXJlEiEuYWRzYi5hcGkudjEuUmVjb3JkQ2FwdHVyZVJlcX'
     'Vlc3QaIi5hZHNiLmFwaS52MS5SZWNvcmRDYXB0dXJlUHJvZ3Jlc3MwARJTCgxMaXN0Q2FwdHVy'
     'ZXMSIC5hZHNiLmFwaS52MS5MaXN0Q2FwdHVyZXNSZXF1ZXN0GiEuYWRzYi5hcGkudjEuTGlzdE'
-    'NhcHR1cmVzUmVzcG9uc2U=');
+    'NhcHR1cmVzUmVzcG9uc2USUgoLT3BlbkNhcHR1cmUSHy5hZHNiLmFwaS52MS5PcGVuQ2FwdHVy'
+    'ZVJlcXVlc3QaIC5hZHNiLmFwaS52MS5PcGVuQ2FwdHVyZVByb2dyZXNzMAESTgoOR2V0Q2FwdH'
+    'VyZVZpZXcSIi5hZHNiLmFwaS52MS5HZXRDYXB0dXJlVmlld1JlcXVlc3QaGC5hZHNiLmFwaS52'
+    'MS5DYXB0dXJlVmlldw==');
 
 const $core.Map<$core.String, $core.dynamic> HistoryServiceBase$json = {
   '1': 'History',

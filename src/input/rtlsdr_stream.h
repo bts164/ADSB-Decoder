@@ -19,6 +19,9 @@ class ArgumentParser;
 
 /** `adsb rtlsdr`'s options. */
 struct RtlSdrStreamParams {
+    /** Magnitude of I or Q at the 8-bit samples' limits, as rtlsdr_iq_stream() scales them. */
+    static constexpr double kFullScale = 1.0;
+
     RtlSdrTuning tuning;
     std::optional<uint32_t> buf_num;  /**< librtlsdr async transfer buffers; unset: librtlsdr's default */
     std::optional<uint32_t> buf_len;  /**< bytes per transfer buffer; unset: librtlsdr's default */

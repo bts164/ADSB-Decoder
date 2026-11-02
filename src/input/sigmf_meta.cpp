@@ -21,6 +21,7 @@ std::optional<SigmfMeta> read_sigmf_meta(const std::string& meta_path) {
         SigmfMeta meta;
         if (global.contains("core:datatype")) meta.datatype = global["core:datatype"].get<std::string>();
         if (global.contains("core:sample_rate")) meta.sample_rate_hz = global["core:sample_rate"].get<double>();
+        if (global.contains("adsb:full_scale")) meta.full_scale = global["adsb:full_scale"].get<double>();
         if (j.contains("captures") && j["captures"].is_array() && !j["captures"].empty() &&
             j["captures"][0].contains("core:frequency")) {
             meta.frequency_hz = j["captures"][0]["core:frequency"].get<double>();

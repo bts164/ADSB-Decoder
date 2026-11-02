@@ -1,10 +1,14 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'page/frame_table_page.dart';
 import 'settings.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // The right button is the app's: it pans the plots and the map. Text fields show Flutter's own menu instead.
+  if (kIsWeb) await BrowserContextMenu.disableContextMenu();
   final settings = await DisplaySettings.load();
   runApp(AdsbApp(settings: settings));
 }

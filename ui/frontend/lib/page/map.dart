@@ -5,7 +5,7 @@ extension _AircraftMap on _FrameTablePageState {
   /// The map over the aircraft table, the dock beside them when anything's
   /// in it (sliding in and out), and the scrubber bar under both.
   Widget _buildAircraftPane() {
-    final docked = _showFrames || _showSpectrum || _showReception;
+    final docked = _showFrames || (_showSpectrum && _spectrumAvailable) || _showReception;
     return Column(
       children: [
         Expanded(
@@ -55,6 +55,7 @@ extension _AircraftMap on _FrameTablePageState {
                   _mapFraction = (current + details.delta.dy).clamp(minPaneHeight, maxMapHeight) / height;
                   _aircraftChanged.notify();
                 },
+                onVerticalDragEnd: (_) => _units.mapFraction = _mapFraction,
                 child: const SizedBox(
                   height: 8,
                   child: Center(child: Divider(height: 1)),

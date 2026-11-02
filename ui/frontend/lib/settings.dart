@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:ui' show Color;
 
 import 'package:flutter/foundation.dart';
@@ -132,6 +133,19 @@ class DisplaySettings extends ChangeNotifier {
   double _spectrumHighDb = defaultSpectrumHighDb;
   int _spectrumPersistRows = defaultSpectrumPersistRows;
   bool _spectrumPsdColored = true;
+  String _serverUrl = defaultServerUrl;
+  bool _framesShown = false;
+  bool _spectrumShown = false;
+  bool _receptionShown = false;
+  double _mapFraction = 0.5;
+  double _dockWidth = 560;
+  Map<String, double> _dockWeights = const {};
+  int _frameSortColumn = 0;
+  bool _frameSortAscending = false;
+  int _aircraftSortColumn = 0;
+  bool _aircraftSortAscending = true;
+  bool _showStale = true;
+  bool _positionOnly = false;
 
   // The spectrum's colors span its range in dB above the noise floor, rather than absolute dB: the bins aren't
   // calibrated, so the floor moves with the radio and its gain, and a range relative to it stays right.
@@ -144,6 +158,7 @@ class DisplaySettings extends ChangeNotifier {
   /// How many rows the PSD's older traces fade over, at most the waterfall's 400.
   static const spectrumPersistChoices = [0, 5, 10, 20, 40, 80, 160, 400];
   static const int defaultSpectrumPersistRows = 40;
+  static const defaultServerUrl = 'ws://127.0.0.1:8765';
 
   SpeedUnit get speed => _speed;
   AltitudeUnit get altitude => _altitude;
@@ -161,6 +176,25 @@ class DisplaySettings extends ChangeNotifier {
   int get spectrumPersistRows => _spectrumPersistRows;
   /// Whether the PSD's traces take the colormap's color for their level, as the waterfall's bins do.
   bool get spectrumPsdColored => _spectrumPsdColored;
+  /// The WebSocket URL last connected to, to fill in the next time.
+  String get serverUrl => _serverUrl;
+
+  // The page's layout and tables, as it last left them. The page keeps its own copy and checks these against
+  // what it has (a column that's gone, a fraction off the screen), so they only save, without notifying.
+  bool get framesShown => _framesShown;
+  bool get spectrumShown => _spectrumShown;
+  bool get receptionShown => _receptionShown;
+  /// The share of the aircraft pane's height above the table that the map takes.
+  double get mapFraction => _mapFraction;
+  double get dockWidth => _dockWidth;
+  /// Each dock section's share of the dock's height, by name; those missing take the page's default.
+  Map<String, double> get dockWeights => _dockWeights;
+  int get frameSortColumn => _frameSortColumn;
+  bool get frameSortAscending => _frameSortAscending;
+  int get aircraftSortColumn => _aircraftSortColumn;
+  bool get aircraftSortAscending => _aircraftSortAscending;
+  bool get showStale => _showStale;
+  bool get positionOnly => _positionOnly;
 
   set speed(SpeedUnit v) => _set(_speedKey, () => _speed = v, v);
   set altitude(AltitudeUnit v) => _set(_altitudeKey, () => _altitude = v, v);
@@ -181,6 +215,33 @@ class DisplaySettings extends ChangeNotifier {
     _spectrumPsdColored = v;
     notifyListeners();
     _prefs?.setBool(_spectrumPsdColoredKey, v).catchError((Object e) => debugPrint('display settings: not saved: $e'));
+  }
+
+  // No notify: nothing shows it but the text field it came from.
+  set serverUrl(String v) {
+    if (v == _serverUrl) return;
+    _serverUrl = v;
+    _prefs?.setString(_serverUrlKey, v).catchError((Object e) => debugPrint('display settings: not saved: $e'));
+  }
+
+  set framesShown(bool v) => _save(_prefs?.setBool(_framesShownKey, _framesShown = v));
+  set spectrumShown(bool v) => _save(_prefs?.setBool(_spectrumShownKey, _spectrumShown = v));
+  set receptionShown(bool v) => _save(_prefs?.setBool(_receptionShownKey, _receptionShown = v));
+  set mapFraction(double v) => _save(_prefs?.setDouble(_mapFractionKey, _mapFraction = v));
+  set dockWidth(double v) => _save(_prefs?.setDouble(_dockWidthKey, _dockWidth = v));
+  set dockWeights(Map<String, double> v) =>
+      _save(_prefs?.setString(_dockWeightsKey, jsonEncode(_dockWeights = Map.unmodifiable(v))));
+  set showStale(bool v) => _save(_prefs?.setBool(_showStaleKey, _showStale = v));
+  set positionOnly(bool v) => _save(_prefs?.setBool(_positionOnlyKey, _positionOnly = v));
+
+  void setFrameSort(int column, bool ascending) {
+    _save(_prefs?.setInt(_frameSortColumnKey, _frameSortColumn = column));
+    _save(_prefs?.setBool(_frameSortAscendingKey, _frameSortAscending = ascending));
+  }
+
+  void setAircraftSort(int column, bool ascending) {
+    _save(_prefs?.setInt(_aircraftSortColumnKey, _aircraftSortColumn = column));
+    _save(_prefs?.setBool(_aircraftSortAscendingKey, _aircraftSortAscending = ascending));
   }
 
   /// Sets the spectrum's color range, clamped to [spectrumMinDb, spectrumMaxDb].
@@ -205,6 +266,19 @@ class DisplaySettings extends ChangeNotifier {
   static const _spectrumHighKey = 'spectrum.highDb';
   static const _spectrumPersistKey = 'spectrum.persistRows';
   static const _spectrumPsdColoredKey = 'spectrum.psdColored';
+  static const _serverUrlKey = 'connection.url';
+  static const _framesShownKey = 'layout.framesShown';
+  static const _spectrumShownKey = 'layout.spectrumShown';
+  static const _receptionShownKey = 'layout.receptionShown';
+  static const _mapFractionKey = 'layout.mapFraction';
+  static const _dockWidthKey = 'layout.dockWidth';
+  static const _dockWeightsKey = 'layout.dockWeights';
+  static const _frameSortColumnKey = 'frames.sortColumn';
+  static const _frameSortAscendingKey = 'frames.sortAscending';
+  static const _aircraftSortColumnKey = 'aircraft.sortColumn';
+  static const _aircraftSortAscendingKey = 'aircraft.sortAscending';
+  static const _showStaleKey = 'aircraft.showStale';
+  static const _positionOnlyKey = 'aircraft.positionOnly';
 
   /// The saved settings, or the defaults for any not saved (or if they
   /// can't be read).
@@ -233,6 +307,28 @@ class DisplaySettings extends ChangeNotifier {
       final persist = await prefs.getInt(_spectrumPersistKey);
       if (spectrumPersistChoices.contains(persist)) s._spectrumPersistRows = persist!;
       s._spectrumPsdColored = await prefs.getBool(_spectrumPsdColoredKey) ?? s._spectrumPsdColored;
+      s._serverUrl = await prefs.getString(_serverUrlKey) ?? s._serverUrl;
+      s._framesShown = await prefs.getBool(_framesShownKey) ?? s._framesShown;
+      s._spectrumShown = await prefs.getBool(_spectrumShownKey) ?? s._spectrumShown;
+      s._receptionShown = await prefs.getBool(_receptionShownKey) ?? s._receptionShown;
+      final fraction = await prefs.getDouble(_mapFractionKey);
+      if (fraction != null && 0 < fraction && fraction < 1) s._mapFraction = fraction;
+      final width = await prefs.getDouble(_dockWidthKey);
+      if (width != null && width.isFinite && width > 0) s._dockWidth = width;
+      s._frameSortColumn = await prefs.getInt(_frameSortColumnKey) ?? s._frameSortColumn;
+      s._frameSortAscending = await prefs.getBool(_frameSortAscendingKey) ?? s._frameSortAscending;
+      s._aircraftSortColumn = await prefs.getInt(_aircraftSortColumnKey) ?? s._aircraftSortColumn;
+      s._aircraftSortAscending = await prefs.getBool(_aircraftSortAscendingKey) ?? s._aircraftSortAscending;
+      s._showStale = await prefs.getBool(_showStaleKey) ?? s._showStale;
+      s._positionOnly = await prefs.getBool(_positionOnlyKey) ?? s._positionOnly;
+      // Last, as the one that can fail to parse.
+      final weights = await prefs.getString(_dockWeightsKey);
+      if (weights != null) {
+        s._dockWeights = Map.unmodifiable({
+          for (final MapEntry(:key, :value) in (jsonDecode(weights) as Map<String, dynamic>).entries)
+            if (value is num && value.isFinite && value > 0) key: value.toDouble(),
+        });
+      }
     } catch (e) {
       debugPrint('display settings: using defaults, could not read saved ones: $e');
     }
@@ -242,9 +338,12 @@ class DisplaySettings extends ChangeNotifier {
   void _set(String key, void Function() assign, Enum value) {
     assign();
     notifyListeners();
-    // Fire and forget: a failed save only loses the setting next launch.
-    _prefs?.setString(key, value.name).catchError((Object e) => debugPrint('display settings: not saved: $e'));
+    _save(_prefs?.setString(key, value.name));
   }
+
+  // Fire and forget: a failed save only loses the setting next launch.
+  static void _save(Future<void>? write) =>
+      write?.catchError((Object e) => debugPrint('display settings: not saved: $e'));
 
   /// The preset the current units match, or null if they're a mix.
   UnitPreset? get preset => UnitPreset.values

@@ -76,8 +76,14 @@ struct DemodSnapshot {
 
 /** demodulate()'s output for one input block. */
 struct DemodBlock {
+    uint64_t start = 0;                     /**< the block's first sample's stream index (IqBlock::start) */
     size_t n = 0;                           /**< the block's sample count */
     std::vector<AdsbFrame> frames;          /**< frames above both thresholds, in ascending sample order */
+    /** The envelope stream index (EnvelopeRun::index) of the block's own envelope outputs: a frame's preamble is
+     *  at envelope_start + output_index. Not the block's start converted to the output rate, which it drifts
+     *  from by up to an output a block. */
+    uint64_t envelope_start = 0;
+    uint64_t envelope_end = 0;              /**< just past the block's own envelope outputs */
     /** Stream sample index of every preamble peak accepted, before the slice-magnitude threshold (each frame's
      *  sample_index is one of these). For scoring the preamble scan on its own (apps/adsb_sim_eval). */
     std::vector<uint64_t> candidates;

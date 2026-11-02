@@ -4,9 +4,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <filesystem>
 #include <optional>
 #include <string>
-#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -26,6 +26,7 @@
 #include "adsb/api/v1/api.wsrpc.h"
 #include "common/log.h"
 #include "common/trace.h"
+#include "output/capture_viewer.h"
 #include "wsrpc/serve.h"
 
 namespace {
@@ -42,16 +43,47 @@ struct SettingsWatch {
     SettingsWatch clone() const { return {tx.clone(), rx.clone()}; }
 };
 
+// Both ends of the watch of the recordings RecordCapture is writing, which OpenCapture refuses.
+struct WritingWatch {
+    coro::WatchSender<WritingCaptures> tx;
+    coro::WatchReceiver<WritingCaptures> rx;
+
+    WritingWatch clone() const { return {tx.clone(), rx.clone()}; }
+};
+
 // What the Receiver handlers answer from, as the server holds it. Each is for one task at a time: clone.
 struct Live {
     PipelineOutputs outputs;
     coro::WatchReceiver<std::optional<api::InputStatus>> input_status;
     coro::WatchReceiver<api::ReceiverPosition> receiver_position;
     SettingsWatch settings;
+    CaptureViewer viewer;
+    WritingWatch writing;
 
     Live clone() const {
-        return {outputs.clone(), input_status.clone(), receiver_position.clone(), settings.clone()};
+        return {outputs.clone(),  input_status.clone(), receiver_position.clone(),
+                settings.clone(), viewer.clone(),       writing.clone()};
     }
+};
+
+// Marks a recording as being written for as long as it lives. A second capture of the same name, which start()
+// then refuses, doesn't mark it, so its end doesn't unmark the first's.
+class Writing {
+public:
+    Writing(coro::WatchSender<WritingCaptures> tx, std::string data_path)
+        : m_tx(std::move(tx)), m_data_path(std::move(data_path)) {
+        m_marked = m_tx.send_if_modified([&](WritingCaptures& w) { return w.insert(m_data_path).second; });
+    }
+    ~Writing() {
+        if (m_marked) m_tx.send_if_modified([&](WritingCaptures& w) { return w.erase(m_data_path) > 0; });
+    }
+    Writing(const Writing&) = delete;
+    Writing& operator=(const Writing&) = delete;
+
+private:
+    coro::WatchSender<WritingCaptures> m_tx;
+    std::string m_data_path;
+    bool m_marked;
 };
 
 // Every call runs in a task of its own, so a handler takes its own clone of anything that is for one task
@@ -84,7 +116,7 @@ public:
                     batch.set_frames_dropped(true);
                     continue;
                 }
-                for (const api::Frame& f : **item) *batch.add_frames() = f;
+                for (const api::Frame& f : (*item)->frames) *batch.add_frames() = f;
                 continue;
             }
             if (batch.frames_size() > 0 || batch.frames_dropped()) co_yield std::exchange(batch, {});
@@ -200,16 +232,18 @@ public:
                                                          " isn't over 0 and at most " +
                                                          std::to_string(CapturePoint::kMaxDurationS));
         }
-        const std::string& name = request.name();
-        if (name.empty() || name.front() == '.' || name.find_first_of(std::string_view("/\0", 2)) != name.npos)
+        if (!is_capture_name(request.name()))
             throw CallError(Error::INVALID_ARGUMENT, "name must be a file name, not starting with '.'");
+        const Writing writing(m_live.writing.tx.clone(),
+                              (std::filesystem::path(dir) / request.name()).string() + ".sigmf-data");
         const PipelineOutputs& out = m_live.outputs;
         api::ReceiverPosition receiver = m_live.receiver_position.clone().get();
         coro::CoroStream<api::RecordCaptureProgress> capture =
             request.point() == api::INPUT
-                ? run_capture(out.input_point, out.input.activate(), request, std::move(dir), std::move(receiver))
-                : run_capture(out.envelope_point, out.envelope.activate(), request, std::move(dir),
-                              std::move(receiver));
+                ? run_capture(out.input_point, out.input.activate(), out.frames.activate(), request, std::move(dir),
+                              std::move(receiver))
+                : run_capture(out.envelope_point, out.envelope.activate(), out.frames.activate(), request,
+                              std::move(dir), std::move(receiver));
         while (auto report = co_await coro::next(capture)) co_yield std::move(*report);
     }
 
@@ -220,6 +254,17 @@ public:
             throw CallError(Error::INTERNAL, listed.error());
         }
         co_return std::move(*listed);
+    }
+
+    coro::CoroStream<api::OpenCaptureProgress> open_capture(const api::OpenCaptureRequest& request) override {
+        CaptureViewer viewer = m_live.viewer.clone();
+        coro::CoroStream<api::OpenCaptureProgress> opened =
+            viewer.open(capture_dir(), request, m_live.writing.rx.clone().get());
+        while (auto progress = co_await coro::next(opened)) co_yield std::move(*progress);
+    }
+
+    coro::Coro<api::CaptureView> get_capture_view(const api::GetCaptureViewRequest& request) override {
+        co_return co_await capture_view(capture_dir(), request);
     }
 
 private:
@@ -321,6 +366,12 @@ coro::Coro<void> run(uint16_t port, std::optional<Live> live, api::ReceiverInfo 
         LOGF(INFO, "capture: on a capture call while a capture directory is set, any number at once, up to %g s "
              "of the input (as the source delivers it, at %g Hz) or of the envelope (rf32_le at %g Hz)",
              CapturePoint::kMaxDurationS, out.input_point.rate_hz, out.envelope_point.rate_hz);
+        if (out.input_point.full_scale)
+            LOGF(INFO, "capture: cf32 input recordings record the source's full scale, %g",
+                 *out.input_point.full_scale);
+        else
+            LOGF(INFO, "capture: the source's full scale is unknown, so a viewer counts no clipping in cf32 input "
+                 "recordings");
         const std::string dir = live->settings.rx.get().capture_dir();
         serves = "Receiver from " + info.source() + ", " +
                  (dir.empty() ? "captures off until a client sets a directory" : "captures into " + dir);
@@ -373,10 +424,13 @@ void api_server_spawn(uint16_t port, std::chrono::nanoseconds default_interval, 
     std::optional<Live> served;
     if (live) {
         auto [settings_tx, settings_rx] = coro::watch_channel(std::move(live->settings));
+        auto [writing_tx, writing_rx] = coro::watch_channel(WritingCaptures{});
         served = Live{.outputs = std::move(live->outputs),
                       .input_status = std::move(live->input_status),
                       .receiver_position = std::move(live->receiver_position),
-                      .settings = {std::move(settings_tx), std::move(settings_rx)}};
+                      .settings = {std::move(settings_tx), std::move(settings_rx)},
+                      .viewer = CaptureViewer::spawn(),
+                      .writing = {std::move(writing_tx), std::move(writing_rx)}};
     }
     // Detached: run() accepts clients until the runtime's destructor cancels and drains it.
     coro::build_task()

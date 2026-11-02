@@ -3,7 +3,6 @@
 #include <cstdint>
 #include <optional>
 #include <string>
-#include <string_view>
 
 #include <coro/coro_stream.h>
 
@@ -18,36 +17,26 @@ class ArgumentParser;
  * `adsb file` source: replays a SigMF recording, or a raw cf32_le file.
  */
 
-/** The sample formats file_iq_stream() reads, named as SigMF's core:datatype names them. */
-enum class FileFormat {
-    Cf32Le,  ///< "cf32_le": little-endian float I and Q, read as the blocks' native floats
-    Ci16Be,  ///< "ci16_be": big-endian int16 I and Q, as vita49_send's packets carry them
-};
-
-/** The format a SigMF core:datatype names, or std::nullopt if file_iq_stream() can't read it. */
-std::optional<FileFormat> file_format(std::string_view datatype);
-
-/** The SigMF core:datatype name of `format`. */
-const char* datatype_name(FileFormat format);
-
 /**
  * Streams a recording as IqBuffers, in the format it is stored in.
  *
  * Reads run as a task on the coro runtime, a few chunks ahead of the consumer, so file IO overlaps demod
  * compute and memory use is bounded by the chunk size rather than the file size.
  * @param path interleaved I/Q file, such as a .sigmf-data
- * @param format how its samples are stored
+ * @param format how its samples are stored: any of iq::Formats, each read straight into the blocks
  * @param pad guard padding to allocate around each block (demod_padding())
  * @param chunk_samples samples per block; the last block may be shorter
  */
-coro::CoroStream<IqBuffer> file_iq_stream(std::string path, FileFormat format, IqPadding pad, uint32_t chunk_samples);
+coro::CoroStream<IqBuffer> file_iq_stream(std::string path, iq::Formats::Format format, IqPadding pad,
+                                          uint32_t chunk_samples);
 
 /** `adsb file`'s options, and what the recording's SigMF metadata says. */
 struct FileStreamParams {
     std::string iq_path;
-    FileFormat format;
+    iq::Formats::Format format;
     double rate_hz;
     double freq_hz;  /**< labels the published spectrum frames */
+    std::optional<double> full_scale = {};  /**< the metadata's adsb:full_scale, for a float format */
 
     static void add_options(argparse::ArgumentParser& cmd);
     /**

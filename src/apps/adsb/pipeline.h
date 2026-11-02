@@ -80,9 +80,9 @@ struct DemodPipeline {
  *    publishes a peak-held row on `spectrum` every kSpectrumInterval.
  * 3. demodulate(), in a task of its own with a buffered output, so the next blocks demodulate while this one's
  *    frames are handled. It sends each block's envelope on `envelope` while that has readers.
- * 4. The sink: handle_frame() on each frame, in order. It then sends the block's frames on `frames`, while they
- *    have readers, and updates its aircraft in `aircraft`, dropping those not heard from in 10 minutes; with a
- *    history, one AircraftHistory::insert() of its aircraft.
+ * 4. The sink: handle_frame() on each frame, in order. It then sends the block's frames on `frames`, none too,
+ *    while they have readers, and updates its aircraft in `aircraft`, dropping those not heard from in 10 minutes;
+ *    with a history, one AircraftHistory::insert() of its aircraft.
  *
  * With a debug path, the sink also sends each block that has frames, with its envelope and validated frames,
  * to a FrameRecorder task over a channel. Each of those holds its block's buffer, so the demod task's buffer is
@@ -97,10 +97,11 @@ struct DemodPipeline {
  * @param filter polyphase filter bank for demodulate()
  * @param rate_hz input sample rate
  * @param freq_hz center frequency, for labelling spectrum rows and input captures
+ * @param full_scale the source's full scale, for cf32 input captures, if it's known (CapturePoint::full_scale)
  * @param stream IQ buffers from any `adsb` source, padded to demod_padding()
  * @param params the thresholds, and the HDF5 debug recording if set
  * @param history where the aircraft updates are recorded, if anywhere
  */
 [[nodiscard]] DemodPipeline demod_pipeline(FilterBank filter, double rate_hz, double freq_hz,
-                                           coro::CoroStream<IqBuffer> stream, DemodLoopParams params,
-                                           std::optional<AircraftHistory> history);
+                                           std::optional<double> full_scale, coro::CoroStream<IqBuffer> stream,
+                                           DemodLoopParams params, std::optional<AircraftHistory> history);

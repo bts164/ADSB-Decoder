@@ -6,6 +6,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:fixnum/fixnum.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
@@ -24,11 +25,13 @@ import '../wsrpc/channel.dart';
 
 part 'aircraft_table.dart';
 part 'capture.dart';
+part 'capture_viewer.dart';
 part 'detail_panel.dart';
 part 'frames.dart';
 part 'heatmap.dart';
 part 'history.dart';
 part 'map.dart';
+part 'plot_axis.dart';
 part 'reception.dart';
 part 'spectrum.dart';
 part 'spectrum_view.dart';
@@ -64,7 +67,7 @@ class _FrameTablePageState extends State<FrameTablePage> {
   // 127.0.0.1, not "localhost": the backend's WsListener binds an IPv4
   // socket only, and "localhost" can resolve to ::1 first on Linux, which
   // fails to connect instead of falling back to the v4 address.
-  final _urlController = TextEditingController(text: 'ws://127.0.0.1:8765');
+  late final _urlController = TextEditingController(text: _units.serverUrl);
   WsRpcChannel? _channel;
   // A client for each service the server serves, while connected: Receiver with a live input, History with a
   // history db.
@@ -94,8 +97,8 @@ class _FrameTablePageState extends State<FrameTablePage> {
 
   final Queue<FrameRecord> _frames = Queue<FrameRecord>();
   final List<FrameRecord> _pendingFrames = [];
-  int _frameSortColumn = 0;
-  bool _frameSortAscending = false;
+  late int _frameSortColumn = _savedSortColumn(_frameColumns, _units.frameSortColumn);
+  late bool _frameSortAscending = _units.frameSortAscending;
   // _frames sorted for the table; null once stale (new frames or sort change).
   List<FrameRecord>? _sortedFramesCache;
   // While the frame table is paused, what it shows: _frames as of pausing.
@@ -145,13 +148,13 @@ class _FrameTablePageState extends State<FrameTablePage> {
   // _frames.
   static const int _maxTrailPoints = 1000;
   final Map<String, List<TrailPoint>> _aircraftTrails = {};
-  int _aircraftSortColumn = 0;
-  bool _aircraftSortAscending = true;
+  late int _aircraftSortColumn = _savedSortColumn(_aircraftColumns, _units.aircraftSortColumn);
+  late bool _aircraftSortAscending = _units.aircraftSortAscending;
   List<AircraftRecord>? _sortedAircraftCache;
   // Whether the aircraft table and map show stale aircraft (greyed out) or hide them.
-  bool _showStale = true;
+  late bool _showStale = _units.showStale;
   // Whether the table lists only aircraft with a position (the map only ever shows those).
-  bool _positionOnly = false;
+  late bool _positionOnly = _units.positionOnly;
   // Aircraft search, lowercased; matched against the text columns.
   final _searchController = TextEditingController();
   String _search = '';
@@ -247,23 +250,26 @@ class _FrameTablePageState extends State<FrameTablePage> {
 
   // Fraction of the aircraft pane's height given to the map, above the
   // full-width table; dragged via the divider in _buildAircraftSplit.
-  double _mapFraction = 0.5;
+  late double _mapFraction = _units.mapFraction;
   static const double _minPaneHeight = 120;
   // Dock to the right of the map and table, for the frame log, the
   // spectrum waterfall and the reception plots, each shown on demand from the
   // top bar (stacked when more than one is). Its width is dragged from its
   // left edge, and the dividers between the sections share its height out.
-  bool _showFrames = false;
-  bool _showSpectrum = false;
-  bool _showReception = false;
+  late bool _showFrames = _units.framesShown;
+  // Shown only while the server serves the spectrum.
+  late bool _showSpectrum = _units.spectrumShown;
+  late bool _showReception = _units.receptionShown;
   _ReceptionPlot _receptionPlot = _ReceptionPlot.coverage;
   // For the side view's radio horizon; not saved.
   double _antennaAglM = 10;
   // Logged while connected whether the signal plot is shown or not, so it has data when it's opened.
   final _signalLog = SignalLog();
-  double _dockWidth = 560;
+  late double _dockWidth = _units.dockWidth;
   // Each section's share of the dock's height, against those of the others shown.
-  final _dockWeights = {for (final s in _DockSection.values) s: s.defaultWeight};
+  late final _dockWeights = {
+    for (final s in _DockSection.values) s: _units.dockWeights[s.name] ?? s.defaultWeight,
+  };
   static const double _minDockWidth = 400;
   static const double _minMapWidth = 320;
 
@@ -407,6 +413,8 @@ class _FrameTablePageState extends State<FrameTablePage> {
       return;
     }
     _channel = channel;
+    // Only once it has connected, so a mistyped URL doesn't replace a good one.
+    _units.serverUrl = url;
     final receiver = channel.services.contains(ReceiverClient.service) ? ReceiverClient(channel) : null;
     final history = channel.services.contains(HistoryClient.service) ? HistoryClient(channel) : null;
     _receiver = receiver;
@@ -641,11 +649,13 @@ class _FrameTablePageState extends State<FrameTablePage> {
 
   // The server computes the spectrum only while a spectrum call is in progress, so the call follows the pane.
   void _setShowSpectrum(bool show) {
-    setState(() => _showSpectrum = show);
+    setState(() => _showSpectrum = _units.spectrumShown = show);
     show ? _startSpectrum() : _stopSpectrum();
   }
 
-  void _setShowReception(bool show) => setState(() => _showReception = show);
+  void _setShowReception(bool show) => setState(() => _showReception = _units.receptionShown = show);
+
+  void _setShowFrames(bool show) => setState(() => _showFrames = _units.framesShown = show);
 
   void _startSpectrum() {
     final receiver = _receiver;
@@ -792,6 +802,7 @@ class _FrameTablePageState extends State<FrameTablePage> {
   void _onFrameSort(int column, bool ascending) {
     _frameSortColumn = column;
     _frameSortAscending = ascending;
+    _units.setFrameSort(column, ascending);
     _sortedFramesCache = null;
     _framesChanged.notify();
   }
@@ -799,9 +810,14 @@ class _FrameTablePageState extends State<FrameTablePage> {
   void _onAircraftSort(int column, bool ascending) {
     _aircraftSortColumn = column;
     _aircraftSortAscending = ascending;
+    _units.setAircraftSort(column, ascending);
     _sortedAircraftCache = null;
     _aircraftChanged.notify();
   }
+
+  // The saved column, unless the table no longer has it sortable.
+  static int _savedSortColumn<T>(List<TableColumn<T>> columns, int saved) =>
+      saved >= 0 && saved < columns.length && columns[saved].compare != null ? saved : 0;
 
   static List<T> _sortedBy<T>(Iterable<T> rows, TableColumn<T> column, bool ascending) {
     final cmp = column.compare!;
@@ -868,7 +884,7 @@ class _FrameTablePageState extends State<FrameTablePage> {
                 icon: Icons.list_alt,
                 label: 'Frames (${_frames.length})',
                 selected: _showFrames,
-                onSelected: (v) => setState(() => _showFrames = v),
+                onSelected: _setShowFrames,
               ),
             ),
             if (_spectrumAvailable) ...[
@@ -1002,12 +1018,12 @@ class _FrameTablePageState extends State<FrameTablePage> {
             listenable: _framesChanged,
             builder: (context, _) => Text('Frames (${_frames.length})'),
           ),
-          onClose: () => setState(() => _showFrames = false),
+          onClose: () => _setShowFrames(false),
           child: ListenableBuilder(listenable: _framesChanged, builder: (context, _) => _buildFramesPane()),
         ),
-      if (_showSpectrum)
+      if (_showSpectrum && _spectrumAvailable)
         _DockSection.spectrum: _buildDockSection(
-          title: _buildSpectrumTitle(),
+          title: const Text('Spectrum'),
           onClose: () => _setShowSpectrum(false),
           child: _buildSpectrumPane(),
         ),
@@ -1029,6 +1045,7 @@ class _FrameTablePageState extends State<FrameTablePage> {
                 _dockWidth = (current - details.delta.dx).clamp(_minDockWidth, maxWidth);
                 _aircraftChanged.notify();
               },
+              onHorizontalDragEnd: (_) => _units.dockWidth = _dockWidth,
               child: const SizedBox(width: 8, child: Center(child: VerticalDivider(width: 1))),
             ),
           ),
@@ -1062,6 +1079,8 @@ class _FrameTablePageState extends State<FrameTablePage> {
                   _dockWeights[below] = pair - abovePx / perWeight;
                   _aircraftChanged.notify();
                 },
+                onVerticalDragEnd: (_) =>
+                    _units.dockWeights = {for (final MapEntry(:key, :value) in _dockWeights.entries) key.name: value},
                 child: const SizedBox(height: dividerHeight, child: Center(child: Divider(height: 1))),
               ),
             );

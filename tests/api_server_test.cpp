@@ -4,6 +4,7 @@
 // real files. tests/wsrpc_test.cpp covers the framing itself. Last, the history database's upgrade of a file
 // from the version before, and its refusal of one from any other version of adsb.
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -62,10 +63,11 @@ constexpr auto kDefaultInterval = 100ms;
 // directory of its own.
 constexpr std::string_view kCaptureDir = "/nonexistent/captures";
 
-// The capture points' rates, and the input's center frequency.
+// The capture points' rates, and the input's center frequency and full scale.
 constexpr double kInputRateHz = 1000;
 constexpr double kEnvelopeRateHz = 2000;
 constexpr double kFreqHz = 1.09e9;
+constexpr double kInputFullScale = 1;
 
 // The pipeline's end of each output, which a test publishes on as the pipeline's stages do.
 struct Feeds {
@@ -107,8 +109,8 @@ std::pair<Feeds, ReceiverFeeds> make_feeds(api::Settings settings) {
                 .spectrum = spectrum.inactive(),
                 .input = input.inactive(),
                 .envelope = envelope.inactive(),
-                .input_point = {"input", "capture input missing", kInputRateHz, kFreqHz},
-                .envelope_point = {"envelope", "capture envelope missing", kEnvelopeRateHz, {}},
+                .input_point = {"input", "capture input missing", kInputRateHz, false, kFreqHz, kInputFullScale},
+                .envelope_point = {"envelope", "capture envelope missing", kEnvelopeRateHz, true, {}},
             },
         .input_status = std::move(status_rx),
         .receiver_position = std::move(receiver_position_rx),
@@ -125,6 +127,29 @@ IqBlock block(size_t n, uint64_t start) { return IqBlock(IqBuffer::zeroed<iq::F3
 // An envelope run of `n` samples, from stream index `start`.
 EnvelopeShare envelope_run(size_t n, uint64_t start) {
     return std::make_shared<const EnvelopeRun>(EnvelopeRun{start, std::vector<float>(n, 1.0f)});
+}
+
+// The sink's frames of the input's block that ends at stream index `end`, and at `envelope_end` in the envelope's,
+// with each frame's envelope index, as the demodulator reports them.
+LiveFrames frame_block(uint64_t end, std::vector<api::Frame> frames = {}, uint64_t envelope_end = 0,
+                       std::vector<uint64_t> envelope_index = {}) {
+    envelope_index.resize(frames.size());
+    return std::make_shared<const FrameBlock>(
+        FrameBlock{end, envelope_end, std::move(frames), std::move(envelope_index)});
+}
+
+// A DF11 frame at the input's stream index `idx`, from aircraft `icao`.
+api::Frame df11(uint64_t idx, uint32_t icao) {
+    api::Frame f;
+    f.set_idx(idx);
+    f.set_bits(56);
+    f.set_df(11);
+    f.set_icao(icao);
+    f.set_crc_ok(true);
+    f.set_crc_checked(true);
+    f.set_confidence(0.5f);
+    f.set_payload(std::string("\x5d\xab\xcd\xef\x12\x34\x56", 7));
+    return f;
 }
 
 // The server starts listening in a task of its own, so the first tries may be refused.
@@ -395,8 +420,9 @@ void test_frames() {
     run(18705, [](coro::WsStream& ws, Feeds& feeds) -> coro::Coro<void> {
         co_await send(ws, receiver(1, "WatchFrames", api::WatchFramesRequest{}));
         CHECK(!co_await receive(ws, 3 * kDefaultInterval));
-        (void)feeds.frames.send(std::make_shared<const std::vector<api::Frame>>(2));
-        (void)feeds.frames.send(std::make_shared<const std::vector<api::Frame>>(1));
+        (void)feeds.frames.send(frame_block(4, std::vector<api::Frame>(2)));
+        (void)feeds.frames.send(frame_block(8));
+        (void)feeds.frames.send(frame_block(12, std::vector<api::Frame>(1)));
         int seen = 0;
         while (seen < 3) {
             auto batch = reply_of<api::FrameBatch>(co_await receive(ws), 1);
@@ -552,11 +578,14 @@ void test_capture() {
             }
             CHECK(feeds.input.all_receivers_dropped() && feeds.envelope.all_receivers_dropped());
 
-            // 10 samples of the input, in three blocks, the last running past the end, with the receiver's fix.
+            // 10 samples of the input, in three blocks, the last running past the end, with the receiver's fix,
+            // and the frames that start in them annotated once the frames have passed its end.
             (void)feeds.receiver_position.send(position(1000, api::FIX_3D, 50, 10));
             co_await send(ws, record_capture(10, api::INPUT, 10 / kInputRateHz, "a"));
             CHECK(co_await read_within(feeds.input, true));
             for (uint64_t start : {0, 4, 8}) (void)feeds.input.send(block(4, start));
+            (void)feeds.frames.send(frame_block(4, {df11(2, 0xabcdef)}));
+            (void)feeds.frames.send(frame_block(12, {df11(11, 0x123456)}));
             auto last = co_await last_report(ws, 10);
             CHECK(last && last->samples() == 10 && last->missing() == 0 && last->start_index() == 0);
             CHECK(last && last->capture().name() == "a" && last->capture().data_bytes() == 80);
@@ -565,7 +594,19 @@ void test_capture() {
                 std::ifstream meta(dir / "a.sigmf-meta");
                 const std::string text{std::istreambuf_iterator<char>(meta), {}};
                 CHECK(text.find("core:geolocation") != std::string::npos);
+                CHECK(text.find("\"adsb:full_scale\"") != std::string::npos);
             }
+            {
+                const auto read = read_capture_annotations((dir / "a.sigmf-meta").string(), 10);
+                CHECK(read && read->unreadable == 0 && read->annotations.size() == 1);
+                if (read && read->annotations.size() == 1) {
+                    const api::CaptureAnnotation& a = read->annotations[0];
+                    CHECK(a.start() == 2 && a.count() == 1 && a.label() == "DF11");
+                    CHECK(a.frame().idx() == 2 && a.frame().icao() == 0xabcdef && a.frame().bits() == 56);
+                    CHECK(a.frame().payload() == df11(2, 0xabcdef).payload() && a.frame().crc_ok());
+                }
+            }
+            CHECK(last && last->capture().meta().full_scale() == kInputFullScale);
             CHECK(last && last->capture().meta().rate_hz() == kInputRateHz);
             CHECK(last && last->capture().meta().freq_hz() == kFreqHz);
             CHECK(std::filesystem::file_size(dir / "a.sigmf-data") == 80);
@@ -576,17 +617,31 @@ void test_capture() {
             co_await send(ws, record_capture(11, api::INPUT, 1, "a"));
             CHECK(is_error(co_await receive(ws), 11, Error::INVALID_ARGUMENT));
 
-            // The envelope, as rf32_le, with no center frequency.
+            // The envelope, as rf32_le, with no center frequency. A frame is placed by its envelope index, which
+            // runs ahead of its input index converted to the envelope's rate, as the demodulator's does at most
+            // rates: converted, this one's would be 80, before the capture.
             co_await send(ws, record_capture(12, api::ENVELOPE, 10 / kEnvelopeRateHz, "b"));
             CHECK(co_await read_within(feeds.envelope, true));
             (void)feeds.envelope.send(envelope_run(6, 100));
             (void)feeds.envelope.send(envelope_run(6, 106));
+            (void)feeds.frames.send(frame_block(56, {df11(40, 0xabcdef)}, 112, {103}));
             last = co_await last_report(ws, 12);
             CHECK(last && last->samples() == 10 && last->missing() == 0 && last->start_index() == 100);
             CHECK(last && last->capture().data_bytes() == 40);
             CHECK(last && last->capture().meta().datatype() == "rf32_le");
             CHECK(last && last->capture().meta().rate_hz() == kEnvelopeRateHz);
             CHECK(last && !last->capture().meta().has_freq_hz());
+            CHECK(last && !last->capture().meta().has_full_scale());
+            {
+                const auto read = read_capture_annotations((dir / "b.sigmf-meta").string(), 10);
+                CHECK(read && read->unreadable == 0 && read->annotations.size() == 1);
+                if (read && read->annotations.size() == 1) {
+                    CHECK(read->annotations[0].start() == 3 && read->annotations[0].frame().idx() == 40);
+                }
+                std::ifstream meta(dir / "b.sigmf-meta");
+                const std::string text{std::istreambuf_iterator<char>(meta), {}};
+                CHECK(text.find("\"adsb:envelope_index\": 103") != std::string::npos);
+            }
             CHECK(co_await read_within(feeds.envelope, false));
 
             // Samples that don't arrive are missing, and the capture covers its stream time all the same.
@@ -594,6 +649,7 @@ void test_capture() {
             CHECK(co_await read_within(feeds.input, true));
             (void)feeds.input.send(block(4, 0));
             (void)feeds.input.send(block(4, 6));
+            (void)feeds.frames.send(frame_block(10));
             last = co_await last_report(ws, 13);
             CHECK(last && last->samples() == 8 && last->missing() == 2);
 
@@ -608,6 +664,7 @@ void test_capture() {
             }
             CHECK(both);
             for (uint64_t start : {4, 8}) (void)feeds.input.send(block(4, start));
+            (void)feeds.frames.send(frame_block(12));
             int done = 0;
             for (int i = 0; i < 20 && done < 4; i++) {
                 auto frame = co_await receive(ws);
@@ -630,6 +687,7 @@ void test_capture() {
             (void)feeds.input.send(block(4, 0));
             CHECK(co_await written(ws, 16, 4));
             for (uint64_t start = 4; start < 160; start += 4) (void)feeds.input.send(block(4, start));
+            (void)feeds.frames.send(frame_block(160));
             last = co_await last_report(ws, 16);
             CHECK(last && last->samples() + last->missing() == 160);
 
@@ -660,8 +718,205 @@ void test_capture_input_ends() {
                 coro::BroadcastSender<IqBlock> input = std::move(feeds.input);
                 (void)input.send(block(4, 0));
             }
+            (void)feeds.frames.send(frame_block(4));
             auto last = co_await last_report(ws, 1);
             CHECK(last && last->samples() == 4 && last->capture().data_bytes() == 32);
+        },
+        {.capture_dir = dir.string(), .history = std::nullopt});
+    std::filesystem::remove_all(dir);
+}
+
+ClientFrame open_capture(uint32_t id, const std::string& name) {
+    api::OpenCaptureRequest r;
+    r.set_name(name);
+    return receiver(id, "OpenCapture", r);
+}
+
+ClientFrame get_capture_view(uint32_t id, const std::string& name, uint64_t first, uint64_t count, uint32_t columns,
+                             bool iq = false) {
+    api::GetCaptureViewRequest r;
+    r.set_name(name);
+    r.set_first(first);
+    r.set_count(count);
+    r.set_columns(columns);
+    r.set_iq(iq);
+    return receiver(id, "GetCaptureView", r);
+}
+
+// The frame that ends call `id`, skipping the frames before it, and other calls'.
+coro::Coro<std::optional<ServerFrame>> end_of(coro::WsStream& ws, uint32_t id) {
+    for (int i = 0; i < 20; i++) {
+        auto frame = co_await receive(ws);
+        if (!frame || (frame->id() == id && frame->end())) co_return frame;
+    }
+    co_return std::nullopt;
+}
+
+// The OpenCapture call `id`'s recording, from its last reply, after any progress reports before it, and then its
+// end.
+coro::Coro<std::optional<api::CaptureInfo>> opened(coro::WsStream& ws, uint32_t id) {
+    for (int i = 0; i < 20; i++) {
+        auto progress = reply_of<api::OpenCaptureProgress>(co_await receive(ws), id);
+        if (!progress) co_return std::nullopt;
+        if (!progress->has_capture()) continue;
+        if (!is_end(co_await receive(ws), id)) co_return std::nullopt;
+        co_return progress->capture();
+    }
+    co_return std::nullopt;
+}
+
+// A recording in `dir` as RecordCapture leaves one: `<name>.sigmf-data` holding `data`, and its `.sigmf-meta`.
+void write_recording(const std::filesystem::path& dir, const std::string& name, std::string_view datatype,
+                     std::span<const std::byte> data, std::optional<double> full_scale = std::nullopt) {
+    std::ofstream(dir / (name + ".sigmf-data"), std::ios::binary)
+        .write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+    std::string meta = R"({"global": {"core:version": "1.0.0", "core:datatype": ")" + std::string(datatype) +
+                       R"(", "core:sample_rate": )" + std::to_string(kInputRateHz);
+    if (full_scale) meta += R"(, "adsb:full_scale": )" + std::to_string(*full_scale);
+    meta += R"(}, "captures": [], "annotations": []})";
+    std::ofstream(dir / (name + ".sigmf-meta")) << meta;
+}
+
+// `n` cf32 samples of I 0.5, but for each 1000th from the first, which is 1, the full scale; Q is 0.
+std::vector<float> viewer_samples(uint64_t n) {
+    std::vector<float> iq(2 * n, 0.0f);
+    for (uint64_t k = 0; k < n; k++) iq[2 * k] = k % 1000 == 0 ? 1.0f : 0.5f;
+    return iq;
+}
+
+// OpenCapture summarises a recording, and GetCaptureView shows any span of it: its samples, columns reduced from
+// them, or, once it's open, columns from its summary, which a change to the recording makes stale. A recording
+// being written can't be opened.
+void test_capture_viewer() {
+    const std::filesystem::path dir = capture_dir("api_server_test_capture_viewer");
+    constexpr uint64_t kSamples = 256 * 16 * 3 + 100;
+    constexpr uint32_t kClips = 13;  // samples 0, 1000, ... 12000
+    const std::vector<float> samples = viewer_samples(kSamples);
+    write_recording(dir, "v", "cf32_le", std::as_bytes(std::span(samples)), 1.0);
+    const uint8_t ci16[] = {0x00, 0x01, 0x00, 0x00, 0xff, 0x7f, 0x7f, 0xff};  // (1, 0) and (-129, 32767)
+    write_recording(dir, "i", "ci16_be", std::as_bytes(std::span(ci16)));
+    const float rf32[] = {-2, 3};
+    write_recording(dir, "r", "rf32_le", std::as_bytes(std::span(rf32)));
+    write_recording(dir, "u", "ci8", std::as_bytes(std::span(rf32)));
+    write_recording(dir, "z", "cf32_le", {});
+    std::ofstream(dir / "m.sigmf-data") << "12345678";
+    run(
+        18715,
+        [dir](coro::WsStream& ws, Feeds& feeds) -> coro::Coro<void> {
+            uint32_t id = 1;
+            // A bad name; no recording, an unknown datatype, none of samples, or no metadata.
+            for (const char* name : {"", ".v", "x/v"}) {
+                co_await send(ws, open_capture(id, name));
+                CHECK(is_error(co_await receive(ws), id, Error::INVALID_ARGUMENT));
+                id++;
+            }
+            for (const char* name : {"nope", "u", "z", "m"}) {
+                co_await send(ws, open_capture(id, name));
+                CHECK(is_error(co_await receive(ws), id, Error::FAILED_PRECONDITION));
+                id++;
+            }
+            // Views out of bounds.
+            for (const ClientFrame& frame :
+                 {get_capture_view(id, "v", 0, 100, 0), get_capture_view(id, "v", 0, 100000, 8193),
+                  get_capture_view(id, "v", 0, 0, 10), get_capture_view(id, "v", kSamples - 1, 2, 1),
+                  get_capture_view(id, "v", kSamples, 1, 1)}) {
+                co_await send(ws, frame);
+                CHECK(is_error(co_await receive(ws), id, Error::INVALID_ARGUMENT));
+            }
+            id++;
+
+            // A fine view reads the samples, open or not; a coarse one needs the summary.
+            auto view = co_await unary<api::CaptureView>(ws, get_capture_view(id++, "v", 0, 1000, 10));
+            CHECK(view && view->first() == 0 && view->count() == 1000 && view->has_columns());
+            CHECK(view && view->columns().level() == 0 && view->columns().samples_per_column() == 100);
+            CHECK(view && view->columns().max_power_size() == 10 && view->columns().clipped_size() == 10);
+            CHECK(view && view->columns().max_power(0) == 1 && view->columns().clipped(0) == 1);
+            CHECK(view && view->columns().max_power(1) == 0.25f && view->columns().clipped(1) == 0);
+            CHECK(view && view->columns().mean_power(1) == 0.25f);
+            co_await send(ws, get_capture_view(id, "v", 0, kSamples, 10));
+            CHECK(is_error(co_await receive(ws), id, Error::FAILED_PRECONDITION));
+            id++;
+
+            co_await send(ws, open_capture(id, "v"));
+            auto info = co_await opened(ws, id++);
+            CHECK(info && info->name() == "v" && info->samples() == kSamples && info->rate_hz() == kInputRateHz);
+            CHECK(info && info->datatype() == "cf32_le" && info->complex() && info->full_scale() == 1);
+            CHECK(std::filesystem::exists(dir / "v.adsb-summary"));
+            CHECK(!std::filesystem::exists(dir / "v.adsb-summary.tmp"));
+            // Current, it's opened at once.
+            co_await send(ws, open_capture(id, "v"));
+            auto first = reply_of<api::OpenCaptureProgress>(co_await receive(ws), id);
+            CHECK(first && first->has_capture() && is_end(co_await receive(ws), id));
+            id++;
+
+            // Each level a column's width calls for, every bucket in one column.
+            for (const auto [columns, level] : {std::pair{10u, 1u}, std::pair{3u, 2u}}) {
+                view = co_await unary<api::CaptureView>(ws, get_capture_view(id++, "v", 0, kSamples, columns));
+                CHECK(view && view->has_columns() && view->columns().level() == level);
+                CHECK(view && view->columns().max_power_size() == static_cast<int>(columns));
+                uint32_t clipped = 0;
+                float most = 0;
+                for (int c = 0; view && c < view->columns().max_power_size(); c++) {
+                    clipped += view->columns().clipped(c);
+                    most = std::max(most, view->columns().max_power(c));
+                    CHECK(view->columns().mean_power(c) >= 0.25f && view->columns().mean_power(c) < 0.26f);
+                }
+                CHECK(clipped == kClips && most == 1);
+            }
+
+            // Four or fewer samples a column are the samples: magnitudes, or I and Q.
+            view = co_await unary<api::CaptureView>(ws, get_capture_view(id++, "v", 999, 4, 2));
+            CHECK(view && view->has_samples() && !view->samples().iq());
+            CHECK(view && std::vector<float>(view->samples().values().begin(), view->samples().values().end()) ==
+                               (std::vector<float>{0.5f, 1, 0.5f, 0.5f}));
+            view = co_await unary<api::CaptureView>(ws, get_capture_view(id++, "v", 1000, 1, 1, true));
+            CHECK(view && view->samples().iq() && view->samples().values_size() == 2);
+            CHECK(view && view->samples().values(0) == 1 && view->samples().values(1) == 0);
+
+            // ci16_be clips at its integers' limit; real samples are their own values, and never clip.
+            co_await send(ws, open_capture(id, "i"));
+            info = co_await opened(ws, id++);
+            CHECK(info && info->samples() == 2 && info->complex() && info->full_scale() == 32767);
+            view = co_await unary<api::CaptureView>(ws, get_capture_view(id++, "i", 0, 2, 1, true));
+            CHECK(view && std::vector<float>(view->samples().values().begin(), view->samples().values().end()) ==
+                               (std::vector<float>{1, 0, -129, 32767}));
+            co_await send(ws, open_capture(id, "r"));
+            info = co_await opened(ws, id++);
+            CHECK(info && info->samples() == 2 && !info->complex() && !info->has_full_scale());
+            view = co_await unary<api::CaptureView>(ws, get_capture_view(id++, "r", 0, 2, 1, true));
+            CHECK(view && !view->samples().iq() && view->samples().values_size() == 2);
+            CHECK(view && view->samples().values(0) == -2 && view->samples().values(1) == 3);
+
+            // A recording that grows makes its summary stale, until it's opened again.
+            {
+                const std::vector<float> more = viewer_samples(256);
+                std::ofstream(dir / "v.sigmf-data", std::ios::binary | std::ios::app)
+                    .write(reinterpret_cast<const char*>(more.data()),
+                           static_cast<std::streamsize>(more.size() * sizeof(float)));
+            }
+            co_await send(ws, get_capture_view(id, "v", 0, kSamples, 10));
+            CHECK(is_error(co_await receive(ws), id, Error::FAILED_PRECONDITION));
+            id++;
+            co_await send(ws, open_capture(id, "v"));
+            info = co_await opened(ws, id++);
+            CHECK(info && info->samples() == kSamples + 256);
+            view = co_await unary<api::CaptureView>(ws, get_capture_view(id++, "v", 0, kSamples + 256, 10));
+            CHECK(view && view->has_columns() && view->columns().level() == 1);
+
+            // A recording being written is refused, until its capture ends.
+            co_await send(ws, record_capture(100, api::INPUT, 1, "w"));
+            CHECK(co_await read_within(feeds.input, true));
+            (void)feeds.input.send(block(4, 0));
+            CHECK(co_await written(ws, 100, 4));
+            co_await send(ws, open_capture(id, "w"));
+            CHECK(is_error(co_await end_of(ws, id), id, Error::FAILED_PRECONDITION));
+            id++;
+            co_await send(ws, cancel(100));
+            CHECK(is_error(co_await end_of(ws, 100), 100, Error::CANCELLED));
+            CHECK(co_await read_within(feeds.input, false));
+            co_await send(ws, open_capture(id, "w"));
+            info = co_await opened(ws, id++);
+            CHECK(info && info->samples() == 4);
         },
         {.capture_dir = dir.string(), .history = std::nullopt});
     std::filesystem::remove_all(dir);
@@ -676,6 +931,10 @@ void test_captures_off() {
             CHECK(is_error(co_await receive(ws), 1, Error::FAILED_PRECONDITION));
             co_await send(ws, history(2, "GetSnapshot", api::GetSnapshotRequest{}));
             CHECK(is_error(co_await receive(ws), 2, Error::UNIMPLEMENTED));
+            co_await send(ws, open_capture(3, "a"));
+            CHECK(is_error(co_await receive(ws), 3, Error::FAILED_PRECONDITION));
+            co_await send(ws, get_capture_view(4, "a", 0, 1, 1));
+            CHECK(is_error(co_await receive(ws), 4, Error::FAILED_PRECONDITION));
         },
         {.capture_dir = "", .history = std::nullopt});
 }
@@ -789,7 +1048,7 @@ void test_disconnect() {
         ws = co_await connect(18713);  // closes the first connection
         for (int i = 0; i < 3; i++) {
             (void)feeds.aircraft.send(LiveAircraft{{0xabc, aircraft(0xabc, 2000 + i)}});
-            (void)feeds.frames.send(std::make_shared<const std::vector<api::Frame>>(1));
+            (void)feeds.frames.send(frame_block(4 * (i + 1), std::vector<api::Frame>(1)));
             co_await coro::sleep_for(kDefaultInterval);
         }
         co_await send(ws, hello({api::Receiver::kName}));
@@ -870,6 +1129,7 @@ int main() {
     test_spectrum();
     test_capture();
     test_capture_input_ends();
+    test_capture_viewer();
     test_captures_off();
     test_heatmap_area();
     test_history();

@@ -6,199 +6,77 @@ enum _SpectrumPlot { psd, waterfall }
 /// The part of the band the spectrum plots show, and what's marked on it, shared by the PSD and the waterfall
 /// so they stay aligned. Positions are fractions of the full span, 0 at its low edge; a retune or a new bin
 /// count clears them all, since they'd mark other frequencies.
-class _SpectrumView {
-  static const _maxMarkers = 2;
-  // The narrowest view, in bins: past it a zoom only makes the bins wider.
-  static const _minViewBins = 8;
+class _SpectrumView extends _PlotAxis {
+  _SpectrumView() : super(minCells: 8);
 
-  /// The view moved: the plots redraw.
-  final zoomChanged = _Changed();
-  /// The hover, markers or band changed: only the overlays and readouts redraw.
-  final marksChanged = _Changed();
-
-  double lo = 0;
-  double hi = 1;
-  double? hoverAt;
   _SpectrumPlot? hoverPlot;
   /// Over the waterfall, the row under the pointer, counted back from the newest; null past the oldest.
   int? hoverRowsBack;
-  /// Bin centres.
-  final List<double> markers = [];
-  /// Low edge first.
-  (double, double)? band;
-  int bins = 0;
   double _freqHz = 0;
   double _rateHz = 0;
-  // The band's anchor while a shift-drag measures one; null while a drag pans.
-  double? _bandFrom;
 
-  bool get zoomed => lo > 0 || hi < 1;
+  int get bins => cells;
   double get rateHz => _rateHz;
 
-  double fractionAt(double x, double width) => lo + x.clamp(0, width) / width * (hi - lo);
-  double xOf(double fraction, double width) => (fraction - lo) / (hi - lo) * width;
   double freqOf(double fraction) => _freqHz - _rateHz / 2 + fraction * _rateHz;
-  int binOf(double fraction) => (fraction * bins).floor().clamp(0, math.max(0, bins - 1));
-  double _centreOf(int bin) => (bin + 0.5) / bins;
+  int binOf(double fraction) => cellOf(fraction);
 
   /// Starts over if the rows now cover other frequencies.
   void follow(double freqHz, double rateHz, int bins) {
     if (freqHz == _freqHz && rateHz == _rateHz && bins == this.bins) return;
     _freqHz = freqHz;
     _rateHz = rateHz;
-    this.bins = bins;
-    markers.clear();
-    band = null;
-    _setView(0, 1);
+    reset(1, bins);
   }
 
-  /// Zooms by `factor` (below 1 in) keeping `fraction` where it is.
-  void zoomAbout(double fraction, double factor) {
-    final span = ((hi - lo) * factor).clamp(_minSpan, 1.0);
-    _setView(fraction - (fraction - lo) / (hi - lo) * span, span);
-  }
-
-  void zoomToBand() {
-    final b = band;
-    if (b == null) return;
-    final span = math.max(b.$2 - b.$1, _minSpan);
-    _setView((b.$1 + b.$2) / 2 - span / 2, span);
-  }
-
-  void fullSpan() => _setView(0, 1);
-
-  double get _minSpan => math.min(1.0, _minViewBins / math.max(bins, 1));
-
-  void _setView(double left, double span) {
-    lo = left.clamp(0.0, 1 - span);
-    hi = lo + span;
-    zoomChanged.notify();
-    marksChanged.notify();
-  }
-
-  void dragStart(double fraction, {required bool measure}) {
-    _bandFrom = measure ? fraction : null;
-    if (measure) _setBand(fraction, fraction);
-  }
-
-  /// `dx` is the drag's step as a fraction of the plot's width.
-  void dragUpdate(double fraction, double dx) {
-    final from = _bandFrom;
-    from != null ? _setBand(from, fraction) : _setView(lo - dx * (hi - lo), hi - lo);
-  }
-
-  void dragEnd() {
-    final b = band;
-    // Narrower than a bin is a slip, not a band.
-    if (_bandFrom != null && b != null && binOf(b.$1) == binOf(b.$2)) clearBand();
-    _bandFrom = null;
-  }
-
-  void _setBand(double a, double b) {
-    band = a <= b ? (a, b) : (b, a);
-    marksChanged.notify();
-  }
-
-  void clearBand() {
-    band = null;
-    marksChanged.notify();
-  }
-
-  /// A new marker, at the bin centre under `fraction`; with both placed, the nearer one moves there.
-  void placeMarker(double fraction) {
-    if (bins == 0) return;
-    final at = _centreOf(binOf(fraction));
-    if (markers.length < _maxMarkers) {
-      markers.add(at);
-    } else {
-      final nearest = (markers[0] - at).abs() <= (markers[1] - at).abs() ? 0 : 1;
-      markers[nearest] = at;
-    }
-    marksChanged.notify();
-  }
-
-  void clearMarkers() {
-    markers.clear();
-    marksChanged.notify();
-  }
-
-  void hover(_SpectrumPlot plot, double fraction, int? rowsBack) {
+  void hoverOn(_SpectrumPlot plot, double fraction, int? rowsBack) {
     hoverPlot = plot;
-    hoverAt = fraction;
     hoverRowsBack = rowsBack;
-    marksChanged.notify();
+    hover(fraction);
   }
 
+  @override
   void unhover() {
-    hoverAt = null;
     hoverPlot = null;
     hoverRowsBack = null;
-    marksChanged.notify();
-  }
-
-  void dispose() {
-    zoomChanged.dispose();
-    marksChanged.dispose();
+    super.unhover();
   }
 }
 
 /// The spectrum plots' mouse handling, and the readouts of what's under the pointer and marked.
 extension _SpectrumInteraction on _FrameTablePageState {
-  /// `child`, one of the plots, under the hover crosshair, markers and band, and taking the mouse: the wheel
-  /// zooms, a drag pans, a shift-drag measures a band, a click places a marker and a double-click
-  /// returns to the full span.
+  /// `child`, one of the plots, under the hover crosshair, markers and band, and taking the mouse as
+  /// [_PlotGestures] does; the PSD carries the mode bar.
   Widget _spectrumInteractive(_SpectrumPlot plot, Widget child) {
     final view = _spectrumView;
     final theme = Theme.of(context);
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final size = constraints.biggest;
-        double at(Offset p) => view.fractionAt(p.dx, size.width);
-        int? rowsBack(Offset p) {
-          if (plot != _SpectrumPlot.waterfall || p.dy < 0) return null;
+    return _PlotGestures(
+      axis: view,
+      modeBar: plot == _SpectrumPlot.psd,
+      actions: [
+        _plotBarButton(
+          context,
+          Icons.tune,
+          _spectrumControlsShown ? 'Hide the display settings' : 'Display settings: colors, holds and persistence',
+          () => _showSpectrumControls(!_spectrumControlsShown),
+          selected: _spectrumControlsShown,
+        ),
+      ],
+      onHover: (p, size, fraction) {
+        int? rowsBack;
+        if (plot == _SpectrumPlot.waterfall && p.dy >= 0) {
           final back = p.dy ~/ (size.height / _FrameTablePageState._maxSpectrumRows);
-          return back < _spectrumHistory.value.length ? back : null;
+          rowsBack = back < _spectrumHistory.value.length ? back : null;
         }
-
-        return Listener(
-          onPointerSignal: (event) {
-            if (event is! PointerScrollEvent) return;
-            GestureBinding.instance.pointerSignalResolver.register(event, (event) {
-              final scroll = event as PointerScrollEvent;
-              view.zoomAbout(at(scroll.localPosition), math.exp(scroll.scrollDelta.dy / 400));
-            });
-          },
-          child: MouseRegion(
-            cursor: SystemMouseCursors.precise,
-            onHover: (e) => view.hover(plot, at(e.localPosition), rowsBack(e.localPosition)),
-            onExit: (_) => view.unhover(),
-            child: GestureDetector(
-              onTapUp: (d) => view.placeMarker(at(d.localPosition)),
-              onDoubleTap: view.fullSpan,
-              onHorizontalDragStart: (d) =>
-                  view.dragStart(at(d.localPosition), measure: HardwareKeyboard.instance.isShiftPressed),
-              onHorizontalDragUpdate: (d) => view.dragUpdate(at(d.localPosition), d.delta.dx / size.width),
-              onHorizontalDragEnd: (_) => view.dragEnd(),
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  RepaintBoundary(child: child),
-                  RepaintBoundary(
-                    child: CustomPaint(
-                      painter: _SpectrumOverlayPainter(
-                        view: view,
-                        plot: plot,
-                        color: plot == _SpectrumPlot.waterfall ? Colors.white : theme.colorScheme.onSurface,
-                        labelStyle: theme.textTheme.labelSmall!,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        );
+        view.hoverOn(plot, fraction, rowsBack);
       },
+      overlay: _SpectrumOverlayPainter(
+        view: view,
+        plot: plot,
+        color: plot == _SpectrumPlot.waterfall ? Colors.white : theme.colorScheme.onSurface,
+        labelStyle: theme.textTheme.labelSmall!,
+      ),
+      child: child,
     );
   }
 
@@ -206,7 +84,7 @@ extension _SpectrumInteraction on _FrameTablePageState {
   Widget _buildSpectrumReadout(List<_WaterfallRow> rows) {
     final view = _spectrumView;
     return ListenableBuilder(
-      listenable: Listenable.merge([view.marksChanged, _spectrumHolds]),
+      listenable: Listenable.merge([view.marksChanged, view.modeChanged, _spectrumHolds]),
       builder: (context, _) {
         final newest = rows.last;
         final bins = newest.binsDb.length;
@@ -216,7 +94,7 @@ extension _SpectrumInteraction on _FrameTablePageState {
         String freq(double fraction) => '${(view.freqOf(fraction) / 1e6).toStringAsFixed(4)} MHz';
 
         final hoverAt = view.hoverAt;
-        String hover = 'Wheel zooms, drag pans, shift-drag measures a band, click marks, double-click unzooms';
+        String hover = 'Wheel zooms, ${view.mode.hint}, click marks, double-click unzooms';
         if (hoverAt != null) {
           final bin = view.binOf(hoverAt);
           final centre = (bin + 0.5) / bins;
@@ -255,7 +133,7 @@ extension _SpectrumInteraction on _FrameTablePageState {
         }
 
         String? band;
-        final b = view.band;
+        final b = view.measured;
         if (b != null && newest.binsDb.length == bins) {
           final first = view.binOf(b.$1), last = view.binOf(b.$2);
           var peak = first;
@@ -301,12 +179,12 @@ extension _SpectrumInteraction on _FrameTablePageState {
                 Text(freq(view.hi)),
               ],
             ),
-            line(hover, [if (view.zoomed) action(Icons.zoom_out_map, 'Full span', view.fullSpan)]),
+            line(hover, []),
             if (markers != null) line(markers, [action(Icons.close, 'Clear the markers', view.clearMarkers)]),
             if (band != null)
               line(band, [
-                action(Icons.zoom_in, 'Zoom to the band', view.zoomToBand),
-                action(Icons.close, 'Clear the band', view.clearBand),
+                action(Icons.zoom_in, 'Zoom to the band', view.zoomToMeasured),
+                action(Icons.close, 'Clear the band', view.clearMeasured),
               ]),
           ],
         );
@@ -339,14 +217,7 @@ class _SpectrumOverlayPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final w = size.width;
-    final band = view.band;
-    if (band != null) {
-      final rect = Rect.fromLTRB(view.xOf(band.$1, w), 0, view.xOf(band.$2, w), size.height);
-      canvas.drawRect(rect, Paint()..color = color.withValues(alpha: 0.12));
-      final edge = Paint()..color = color.withValues(alpha: 0.6);
-      canvas.drawLine(rect.topLeft, rect.bottomLeft, edge);
-      canvas.drawLine(rect.topRight, rect.bottomRight, edge);
-    }
+    _paintAxisSpans(canvas, size, view, color);
 
     for (final (i, m) in view.markers.indexed) {
       final x = view.xOf(m, w);

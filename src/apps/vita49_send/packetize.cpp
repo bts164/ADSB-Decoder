@@ -9,7 +9,6 @@
 #include <span>
 #include <stdexcept>
 #include <string>
-#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -34,17 +33,6 @@ constexpr size_t kBufferBatches = 16;
 constexpr const char* kFilterOptions[] = {"--stream-taps", "--stream-phases", "--stream-cutoff", "--stream-window",
                                           "--stream-kaiser-beta"};
 
-const char* format_name(const IqBlock& block) {
-    return block.visit([]<class F>(IqView<F>) {
-        if constexpr (std::is_same_v<F, iq::F32>) return "f32";
-        else return "i16be";
-    });
-}
-
-const char* format_name(iq::OutputFormat format) {
-    return std::holds_alternative<iq::F32Be>(format) ? "f32be" : "i16be";
-}
-
 // `hz` as a whole number of Hz, for vrt::PacketClock and IqResampler.
 uint32_t whole_hz(double hz, const char* what) {
     if (!(hz > 0) || hz > UINT32_MAX || hz != std::round(hz))
@@ -68,8 +56,7 @@ public:
         : m_params(params),
           m_resampler(std::move(resampler)),
           m_pace_tx(std::move(pace_tx)),
-          m_format(std::holds_alternative<iq::F32Be>(m_resampler.format()) ? vrt::PayloadFormat::f32
-                                                                          : vrt::PayloadFormat::i16),
+          m_format(m_resampler.format()),
           m_batch_bytes(params.batch_packets * vrt::data_packet_bytes(params.samples_per_packet, m_format)),
           m_pool(net::BatchPool::create(m_batch_bytes)),
           m_clock{m_resampler.output_rate_hz()},
@@ -79,8 +66,8 @@ public:
         m_spans.clear();
         const IqResampler::Range range = m_resampler.outputs(block);
         if (!m_started) {
-            LOGF(INFO, "stream: the source's blocks are %s, sent as %s", format_name(block),
-                 format_name(m_resampler.format()));
+            LOGF(INFO, "stream: the source's blocks are %s, sent as %s",
+                 block.visit([]<class F>(IqView<F>) { return F::sigmf; }), iq::sigmf_name(m_format));
             m_started = true;
             m_next_output = range.first;
         }
@@ -130,7 +117,7 @@ public:
 
 private:
     static vrt::StreamConfig context_config(const PacketizeParams& params, const IqResampler& resampler,
-                                            vrt::PayloadFormat format) {
+                                            const iq::OutputFormat& format) {
         const double rate = resampler.output_rate_hz();
         return {
             .sample_rate_hz = rate,
@@ -192,13 +179,13 @@ private:
         });
         TRACE_PLOT("samples clipped", static_cast<int64_t>(m_clipped));
         LOGF_EVERY_N_SEC(WARNING, 1, "stream: %u samples saturated as %s (%u so far): the source is near full scale",
-                         clipped, format_name(m_resampler.format()), m_clipped);
+                         clipped, iq::sigmf_name(m_format), m_clipped);
     }
 
     PacketizeParams m_params;
     IqResampler m_resampler;
     coro::WatchSender<PaceStats> m_pace_tx;
-    vrt::PayloadFormat m_format;
+    iq::OutputFormat m_format;
     size_t m_batch_bytes;
     std::shared_ptr<net::BatchPool> m_pool;
     vrt::PacketClock m_clock;
@@ -242,27 +229,28 @@ void StreamOptions::add_options(argparse::ArgumentParser& program) {
         "with --stream-rate: the filter's window, hann, hamming, blackman or kaiser");
     program.add_argument("--stream-kaiser-beta").scan<'g', double>().default_value(8.0).help(
         "with --stream-rate: the Kaiser window's beta");
-    program.add_argument("--stream-format").default_value(std::string("i16be")).help(
-        "the samples' wire format: i16be (16-bit signed, full scale at the source's full scale) or f32be (32-bit "
-        "IEEE float, full scale 1.0; not for the sim source)");
+    program.add_argument("--stream-format").default_value(std::string(iq::I16Be::sigmf)).help(
+        "the samples' wire format, as SigMF names it: ci16_be (16-bit signed, full scale at the source's full "
+        "scale) or cf32_be (32-bit IEEE float, full scale 1.0; not for the sim source)");
     program.add_argument("--no-payload-format").flag().help(
         "leave the Data Payload Format field out of the IF Context packets, for a receiver that doesn't take it; "
-        "only with --stream-format i16be");
+        "only with --stream-format ci16_be");
     program.add_argument("--samples-per-packet").scan<'u', unsigned>().help(
-        "IQ sample pairs per VRT packet (default: 360 for i16be, 180 for f32be, to keep the packet under one "
+        "IQ sample pairs per VRT packet (default: 360 for ci16_be, 180 for cf32_be, to keep the packet under one "
         "Ethernet MTU -- see doc/design/vita49-format.md's \"UDP framing\" section)");
 }
 
 StreamOptions StreamOptions::from_options(const argparse::ArgumentParser& program) {
     const auto format_option = program.get<std::string>("--stream-format");
-    iq::OutputFormat format;
-    if (format_option == "i16be") format = iq::I16Be{};
-    else if (format_option == "f32be") format = iq::F32Be{};
-    else throw std::invalid_argument("unknown --stream-format '" + format_option + "' (i16be or f32be)");
+    const std::optional<iq::OutputFormat> parsed = iq::OutputFormats::from_sigmf(format_option);
+    if (!parsed)
+        throw std::invalid_argument("unknown --stream-format '" + format_option + "' (" +
+                                    iq::OutputFormats::sigmf_names() + ")");
+    const iq::OutputFormat format = *parsed;
     const bool payload_format = !program.get<bool>("--no-payload-format");
-    if (!payload_format && std::holds_alternative<iq::F32Be>(format))
-        throw std::invalid_argument("--no-payload-format goes only with --stream-format i16be: without the field a "
-                                    "receiver would read f32be samples as int16");
+    if (!payload_format && !std::holds_alternative<iq::I16Be>(format))
+        throw std::invalid_argument("--no-payload-format goes only with --stream-format ci16_be: without the field a "
+                                    "receiver would read " + format_option + " samples as int16");
     if (!program.is_used("--stream-rate")) {
         for (const char* name : kFilterOptions)
             if (program.is_used(name)) throw std::invalid_argument(std::string(name) + " needs --stream-rate");
@@ -287,17 +275,13 @@ bool StreamOptions::resampling_options_used(const argparse::ArgumentParser& prog
     return program.is_used("--stream-rate") ||
            std::any_of(std::begin(kFilterOptions), std::end(kFilterOptions),
                        [&](const char* name) { return program.is_used(name); }) ||
-           program.get<std::string>("--stream-format") != "i16be";
-}
-
-vrt::PayloadFormat StreamOptions::payload() const {
-    return std::holds_alternative<iq::F32Be>(format) ? vrt::PayloadFormat::f32 : vrt::PayloadFormat::i16;
+           program.get<std::string>("--stream-format") != iq::I16Be::sigmf;
 }
 
 IqResampler StreamOptions::make_resampler(double input_rate_hz) const {
     const uint32_t in = whole_hz(input_rate_hz, "the source's sample rate");
     if (!rate_hz) {
-        LOGF(INFO, "stream: %.3f Msps as %s, the source's rate, not filtered", in / 1e6, format_name(format));
+        LOGF(INFO, "stream: %.3f Msps as %s, the source's rate, not filtered", in / 1e6, iq::sigmf_name(format));
         return IqResampler::identity(in, format);
     }
     const uint32_t out = whole_hz(*rate_hz, "--stream-rate");
@@ -310,8 +294,8 @@ IqResampler StreamOptions::make_resampler(double input_rate_hz) const {
     };
     IqResampler resampler(design_filter_bank(design, in, out), in, out, format);
     LOGF(INFO, "stream: %.3f Msps as %s, resampled from %.3f Msps: filter %d taps%s x %d phases, %s%s", out / 1e6,
-         format_name(format), in / 1e6, resampler.filter().taps, taps ? "" : " (auto)", resampler.filter().num_phases,
-         resampler.filter().description, cutoff_hz ? "" : " (auto cutoff)");
+         iq::sigmf_name(format), in / 1e6, resampler.filter().taps, taps ? "" : " (auto)",
+         resampler.filter().num_phases, resampler.filter().description, cutoff_hz ? "" : " (auto cutoff)");
     return resampler;
 }
 

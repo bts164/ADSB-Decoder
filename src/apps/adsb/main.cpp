@@ -143,6 +143,12 @@ void add_options(argparse::ArgumentParser& program, Commands& cmds) {
         "with --ws-port and a source, start with the API's capture calls, which record the input IQ or the "
         "demodulator's envelope for a while as SigMF, writing into this directory; a client can change it or turn "
         "captures off and on (default: off until a client sets one)");
+    program.add_argument("--gpsd").help(
+        "host:port of the gpsd to read the receiver's position from, or none for no GPS (default: none"
+#ifdef ADSB_WITH_SIDEKIQ
+        ", but for sidekiq " + std::string(SidekiqStreamParams::kDefaultGpsd) + ", where every X40's gpsd listens"
+#endif
+        ")");
 
     FileStreamParams::add_options(cmds.file);
     Vita49StreamParams::add_options(cmds.vita49);
@@ -218,6 +224,11 @@ bool parse_command_line(argparse::ArgumentParser& program, const Commands& cmds,
             if (auto resolved = resolve_capture_dir(*dir); !resolved)
                 throw std::runtime_error("--capture-dir: " + resolved.error());
         }
+        if (const auto gpsd = program.present("--gpsd")) {
+            if (program.is_subcommand_used(cmds.serve)) throw std::runtime_error("--gpsd needs a source");
+            if (*gpsd != "none" && !GpsdAddress::parse(*gpsd))
+                throw std::runtime_error("--gpsd must be host:port or none, not " + *gpsd);
+        }
         for (const argparse::ArgumentParser* cmd : {&cmds.file, &cmds.vita49, &cmds.rtlsdr}) {
             if (cmd->is_used("--rate") && !(cmd->get<double>("--rate") > 0.0))
                 throw std::runtime_error("--rate must be greater than 0");
@@ -227,7 +238,7 @@ bool parse_command_line(argparse::ArgumentParser& program, const Commands& cmds,
             if (!(cmds.sidekiq.get<double>("--rate") > 0.0)) throw std::runtime_error("--rate must be greater than 0");
             if (cmds.sidekiq.is_used("--bandwidth") && !(cmds.sidekiq.get<double>("--bandwidth") > 0.0))
                 throw std::runtime_error("--bandwidth must be greater than 0");
-            (void)SidekiqStreamParams::from_options(program, cmds.sidekiq);  // --handle, --gain, --gpsd
+            (void)SidekiqStreamParams::from_options(program, cmds.sidekiq);  // --handle, --gain
         }
 #endif
 #ifdef ADSB_WITH_UHD
@@ -290,6 +301,7 @@ coro::Coro<int> async_main(int argc, char** argv) {
     // parse_command_line() has checked that it resolves.
     std::optional<std::string> capture_dir;
     if (const auto dir = program.present("--capture-dir")) capture_dir = *resolve_capture_dir(*dir);
+    const std::optional<std::string> gpsd_option = program.present("--gpsd");
 
     if (program.is_subcommand_used(cmds.serve)) {
         // AircraftHistory::open() would create a missing file; serving an empty one is never what was meant.
@@ -333,10 +345,11 @@ coro::Coro<int> async_main(int argc, char** argv) {
         };
         double rate_hz;
         double freq_hz;
+        std::optional<double> full_scale;  // for cf32 input captures; ci16 has its own
         FilterBank filter;
         std::optional<coro::CoroStream<IqBuffer>> stream;
         std::string source;  // the subcommand, for the UI
-        std::optional<GpsdAddress> gpsd;  // where sidekiq's GPS is read from; every other input has none
+        std::optional<std::string> gpsd_default;  // the source's own gpsd, without --gpsd
         if (program.is_subcommand_used(cmds.vita49)) {
             Vita49StreamParams params = Vita49StreamParams::from_options(program, cmds.vita49);
             source = "vita49";
@@ -355,15 +368,17 @@ coro::Coro<int> async_main(int argc, char** argv) {
             source = "rtlsdr";
             rate_hz = params.tuning.rate_hz;
             freq_hz = params.tuning.freq_hz;
+            full_scale = RtlSdrStreamParams::kFullScale;
             filter = make_filter(rate_hz);
             stream.emplace(rtlsdr_iq_stream(std::move(params), demod_padding(filter, rate_hz)));
 #ifdef ADSB_WITH_SIDEKIQ
         } else if (program.is_subcommand_used(cmds.sidekiq)) {
             SidekiqStreamParams params = SidekiqStreamParams::from_options(program, cmds.sidekiq);
             source = "sidekiq";
-            gpsd = params.gpsd;
+            gpsd_default = SidekiqStreamParams::kDefaultGpsd;
             rate_hz = params.rate_hz;
             freq_hz = params.freq_hz;
+            full_scale = SidekiqStreamParams::kFullScale;
             filter = make_filter(rate_hz);
             stream.emplace(sidekiq_iq_stream(std::move(params), demod_padding(filter, rate_hz),
                                              SidekiqStreamParams::kChunkSamples));
@@ -372,6 +387,7 @@ coro::Coro<int> async_main(int argc, char** argv) {
         } else if (program.is_subcommand_used(cmds.uhd)) {
             UhdStreamParams params = UhdStreamParams::from_options(program, cmds.uhd);
             source = "uhd";
+            // Left unset: where UHD's fc32 saturates depends on the radio's converter, which isn't known here.
             rate_hz = params.rate_hz;
             freq_hz = params.freq_hz;
             filter = make_filter(rate_hz);
@@ -383,14 +399,23 @@ coro::Coro<int> async_main(int argc, char** argv) {
             source = "file";
             rate_hz = params.rate_hz;
             freq_hz = params.freq_hz;
+            full_scale = params.full_scale;
             filter = make_filter(rate_hz);
             stream.emplace(file_iq_stream(std::move(params.iq_path), params.format,
                                           demod_padding(filter, rate_hz), FileStreamParams::kChunkSamples));
         }
 
         // The receiver's position, from the GPS or NO_GPS, for the API, the captures and the history.
-        const std::string no_gps = source == "sidekiq" ? "--gpsd none" : "the " + source + " input has none";
-        if (!gpsd) LOGF(INFO, "gps: none, %s", no_gps);
+        const std::string gpsd_setting = gpsd_option.value_or(gpsd_default.value_or("none"));
+        // parse_command_line() has checked that anything but none parses.
+        const std::optional<GpsdAddress> gpsd =
+            gpsd_setting == "none" ? std::nullopt : GpsdAddress::parse(gpsd_setting);
+        const std::string gpsd_from = gpsd_option    ? "--gpsd"
+                                      : gpsd_default ? "the " + source + " default"
+                                                     : "the default";
+        const std::string no_gps = gpsd_option ? "--gpsd none" : "no --gpsd";
+        if (gpsd) LOGF(INFO, "gps: gpsd at %s (%s)", gpsd_setting, gpsd_from);
+        else LOGF(INFO, "gps: none (%s)", gpsd_from);
         auto [position_tx, receiver_position] =
             coro::watch_channel(gpsd ? gpsd_connecting(*gpsd) : receiver_without_gps("no GPS: " + no_gps));
         // Each held for the run, as dropping a handle cancels its task.
@@ -403,7 +428,7 @@ coro::Coro<int> async_main(int argc, char** argv) {
 
         std::optional<AircraftHistory> ws_history;
         if (ws_port && history) ws_history = history->clone();
-        DemodPipeline pipeline = demod_pipeline(std::move(filter), rate_hz, freq_hz, std::move(*stream),
+        DemodPipeline pipeline = demod_pipeline(std::move(filter), rate_hz, freq_hz, full_scale, std::move(*stream),
                                                 std::move(loop_params), std::move(history));
         if (ws_port) {
             api::Settings settings;

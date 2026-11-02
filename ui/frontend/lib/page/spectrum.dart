@@ -70,7 +70,8 @@ extension _Spectrum on _FrameTablePageState {
         ),
         if (_spectrumControlsShown)
           Positioned(
-            top: 4,
+            // Under the PSD's mode bar, so its button can close the panel again.
+            top: 52,
             right: 4,
             left: 4,
             child: Align(
@@ -109,31 +110,6 @@ extension _Spectrum on _FrameTablePageState {
               ),
             ),
           ),
-      ],
-    );
-  }
-
-  /// The section's title, with the button that shows the display settings over the plots, out of their way
-  /// otherwise.
-  Widget _buildSpectrumTitle() {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        const Text('Spectrum'),
-        const SizedBox(width: 12),
-        // Labelled and filled, so it reads as a control rather than part of the title.
-        Tooltip(
-          message: _spectrumControlsShown ? 'Hide the display settings' : 'Colors, holds and persistence',
-          child: FilledButton.tonalIcon(
-            icon: Icon(_spectrumControlsShown ? Icons.expand_less : Icons.tune, size: 18),
-            label: const Text('Display'),
-            style: FilledButton.styleFrom(
-              visualDensity: VisualDensity.compact,
-              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-            ),
-            onPressed: () => _showSpectrumControls(!_spectrumControlsShown),
-          ),
-        ),
       ],
     );
   }

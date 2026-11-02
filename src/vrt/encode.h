@@ -64,7 +64,7 @@ struct StreamConfig {
     double rf_freq_hz;
     double bandwidth_hz;
     // The Data Payload Format field; nullopt leaves it out, for a receiver told the format some other way.
-    std::optional<PayloadFormat> payload_format;
+    std::optional<iq::OutputFormat> payload_format;
 };
 
 // Decides when a context packet goes out: before the first data packet, then
@@ -93,7 +93,7 @@ private:
 };
 
 // Size on the wire of a VRT IF Data packet of `count` I/Q sample pairs in `format`.
-constexpr size_t data_packet_bytes(size_t count, PayloadFormat format) {
+constexpr size_t data_packet_bytes(size_t count, const iq::OutputFormat& format) {
     return kHeaderBytes + 4 * payload_words_per_sample(format) * count;
 }
 
@@ -101,6 +101,6 @@ constexpr size_t data_packet_bytes(size_t count, PayloadFormat format) {
 // to `out` (kHeaderBytes bytes), for a caller that fills the payload at out + kHeaderBytes itself (a simulator
 // or a resampler writing straight into it).
 void write_data_header(uint8_t* out, uint32_t stream_id, uint32_t packet_count_mod16, Timestamp ts, size_t count,
-                       PayloadFormat format);
+                       const iq::OutputFormat& format);
 
 }  // namespace vrt

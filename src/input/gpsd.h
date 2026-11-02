@@ -1,7 +1,9 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <string_view>
 
 #include <coro/coro.h>
 #include <coro/sync/watch.h>
@@ -10,7 +12,7 @@
 
 /**
  * @file
- * The receiver's position, from `gpsd`: what `adsb sidekiq` publishes on the position watch. See
+ * The receiver's position, from `gpsd`: what adsb publishes on the position watch with --gpsd. See
  * doc/design/gps.md, "The receiver's position".
  */
 
@@ -18,6 +20,9 @@
 struct GpsdAddress {
     std::string host;
     uint16_t port;
+
+    /** `host:port`, such as "192.168.55.100:2947"; nullopt for anything else. */
+    static std::optional<GpsdAddress> parse(std::string_view s);
 };
 
 /**

@@ -1648,6 +1648,8 @@ class UpdateSettingsRequest extends $pb.GeneratedMessage {
   void clearCaptureDir() => $_clearField(1);
 }
 
+/// Every frame the pipeline decodes in a capture's span, CRC failures too, is a SigMF annotation in its .sigmf-meta,
+/// so the call ends once the decoding has passed the span's end, a block or more after its last sample.
 class RecordCaptureRequest extends $pb.GeneratedMessage {
   factory RecordCaptureRequest({
     CapturePoint? point,
@@ -2063,6 +2065,7 @@ class CaptureMeta extends $pb.GeneratedMessage {
     $core.double? freqHz,
     $core.String? description,
     $core.double? durationS,
+    $core.double? fullScale,
   }) {
     final result = create();
     if (datatype != null) result.datatype = datatype;
@@ -2070,6 +2073,7 @@ class CaptureMeta extends $pb.GeneratedMessage {
     if (freqHz != null) result.freqHz = freqHz;
     if (description != null) result.description = description;
     if (durationS != null) result.durationS = durationS;
+    if (fullScale != null) result.fullScale = fullScale;
     return result;
   }
 
@@ -2091,6 +2095,7 @@ class CaptureMeta extends $pb.GeneratedMessage {
     ..aD(3, _omitFieldNames ? '' : 'freqHz')
     ..aOS(4, _omitFieldNames ? '' : 'description')
     ..aD(5, _omitFieldNames ? '' : 'durationS')
+    ..aD(6, _omitFieldNames ? '' : 'fullScale')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -2157,6 +2162,757 @@ class CaptureMeta extends $pb.GeneratedMessage {
   $core.bool hasDurationS() => $_has(4);
   @$pb.TagNumber(5)
   void clearDurationS() => $_clearField(5);
+
+  @$pb.TagNumber(6)
+  $core.double get fullScale => $_getN(5);
+  @$pb.TagNumber(6)
+  set fullScale($core.double value) => $_setDouble(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasFullScale() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearFullScale() => $_clearField(6);
+}
+
+class OpenCaptureRequest extends $pb.GeneratedMessage {
+  factory OpenCaptureRequest({
+    $core.String? name,
+  }) {
+    final result = create();
+    if (name != null) result.name = name;
+    return result;
+  }
+
+  OpenCaptureRequest._();
+
+  factory OpenCaptureRequest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory OpenCaptureRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'OpenCaptureRequest',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'name')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  OpenCaptureRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  OpenCaptureRequest copyWith(void Function(OpenCaptureRequest) updates) =>
+      super.copyWith((message) => updates(message as OpenCaptureRequest))
+          as OpenCaptureRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static OpenCaptureRequest create() => OpenCaptureRequest._();
+  @$core.override
+  OpenCaptureRequest createEmptyInstance() => create();
+  static $pb.PbList<OpenCaptureRequest> createRepeated() =>
+      $pb.PbList<OpenCaptureRequest>();
+  @$core.pragma('dart2js:noInline')
+  static OpenCaptureRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<OpenCaptureRequest>(create);
+  static OpenCaptureRequest? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get name => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set name($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasName() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearName() => $_clearField(1);
+}
+
+/// About twice a second while a summary is built, and a last one with `capture` set; only that one when the
+/// summary is current.
+class OpenCaptureProgress extends $pb.GeneratedMessage {
+  factory OpenCaptureProgress({
+    $fixnum.Int64? samplesDone,
+    $fixnum.Int64? samplesTotal,
+    CaptureInfo? capture,
+  }) {
+    final result = create();
+    if (samplesDone != null) result.samplesDone = samplesDone;
+    if (samplesTotal != null) result.samplesTotal = samplesTotal;
+    if (capture != null) result.capture = capture;
+    return result;
+  }
+
+  OpenCaptureProgress._();
+
+  factory OpenCaptureProgress.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory OpenCaptureProgress.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'OpenCaptureProgress',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
+      createEmptyInstance: create)
+    ..a<$fixnum.Int64>(
+        1, _omitFieldNames ? '' : 'samplesDone', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$fixnum.Int64>(
+        2, _omitFieldNames ? '' : 'samplesTotal', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..aOM<CaptureInfo>(3, _omitFieldNames ? '' : 'capture',
+        subBuilder: CaptureInfo.create)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  OpenCaptureProgress clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  OpenCaptureProgress copyWith(void Function(OpenCaptureProgress) updates) =>
+      super.copyWith((message) => updates(message as OpenCaptureProgress))
+          as OpenCaptureProgress;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static OpenCaptureProgress create() => OpenCaptureProgress._();
+  @$core.override
+  OpenCaptureProgress createEmptyInstance() => create();
+  static $pb.PbList<OpenCaptureProgress> createRepeated() =>
+      $pb.PbList<OpenCaptureProgress>();
+  @$core.pragma('dart2js:noInline')
+  static OpenCaptureProgress getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<OpenCaptureProgress>(create);
+  static OpenCaptureProgress? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $fixnum.Int64 get samplesDone => $_getI64(0);
+  @$pb.TagNumber(1)
+  set samplesDone($fixnum.Int64 value) => $_setInt64(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasSamplesDone() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearSamplesDone() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $fixnum.Int64 get samplesTotal => $_getI64(1);
+  @$pb.TagNumber(2)
+  set samplesTotal($fixnum.Int64 value) => $_setInt64(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasSamplesTotal() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearSamplesTotal() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  CaptureInfo get capture => $_getN(2);
+  @$pb.TagNumber(3)
+  set capture(CaptureInfo value) => $_setField(3, value);
+  @$pb.TagNumber(3)
+  $core.bool hasCapture() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearCapture() => $_clearField(3);
+  @$pb.TagNumber(3)
+  CaptureInfo ensureCapture() => $_ensure(2);
+}
+
+/// What a plot of a recording needs.
+class CaptureInfo extends $pb.GeneratedMessage {
+  factory CaptureInfo({
+    $core.String? name,
+    $fixnum.Int64? samples,
+    $core.double? rateHz,
+    $core.String? datatype,
+    $core.bool? complex,
+    $core.double? fullScale,
+    $core.Iterable<CaptureAnnotation>? annotations,
+  }) {
+    final result = create();
+    if (name != null) result.name = name;
+    if (samples != null) result.samples = samples;
+    if (rateHz != null) result.rateHz = rateHz;
+    if (datatype != null) result.datatype = datatype;
+    if (complex != null) result.complex = complex;
+    if (fullScale != null) result.fullScale = fullScale;
+    if (annotations != null) result.annotations.addAll(annotations);
+    return result;
+  }
+
+  CaptureInfo._();
+
+  factory CaptureInfo.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory CaptureInfo.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'CaptureInfo',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'name')
+    ..a<$fixnum.Int64>(2, _omitFieldNames ? '' : 'samples', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..aD(3, _omitFieldNames ? '' : 'rateHz')
+    ..aOS(4, _omitFieldNames ? '' : 'datatype')
+    ..aOB(5, _omitFieldNames ? '' : 'complex')
+    ..aD(6, _omitFieldNames ? '' : 'fullScale')
+    ..pPM<CaptureAnnotation>(7, _omitFieldNames ? '' : 'annotations',
+        subBuilder: CaptureAnnotation.create)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CaptureInfo clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CaptureInfo copyWith(void Function(CaptureInfo) updates) =>
+      super.copyWith((message) => updates(message as CaptureInfo))
+          as CaptureInfo;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static CaptureInfo create() => CaptureInfo._();
+  @$core.override
+  CaptureInfo createEmptyInstance() => create();
+  static $pb.PbList<CaptureInfo> createRepeated() => $pb.PbList<CaptureInfo>();
+  @$core.pragma('dart2js:noInline')
+  static CaptureInfo getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<CaptureInfo>(create);
+  static CaptureInfo? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get name => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set name($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasName() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearName() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $fixnum.Int64 get samples => $_getI64(1);
+  @$pb.TagNumber(2)
+  set samples($fixnum.Int64 value) => $_setInt64(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasSamples() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearSamples() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.double get rateHz => $_getN(2);
+  @$pb.TagNumber(3)
+  set rateHz($core.double value) => $_setDouble(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasRateHz() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearRateHz() => $_clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.String get datatype => $_getSZ(3);
+  @$pb.TagNumber(4)
+  set datatype($core.String value) => $_setString(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasDatatype() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearDatatype() => $_clearField(4);
+
+  @$pb.TagNumber(5)
+  $core.bool get complex => $_getBF(4);
+  @$pb.TagNumber(5)
+  set complex($core.bool value) => $_setBool(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasComplex() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearComplex() => $_clearField(5);
+
+  @$pb.TagNumber(6)
+  $core.double get fullScale => $_getN(5);
+  @$pb.TagNumber(6)
+  set fullScale($core.double value) => $_setDouble(5, value);
+  @$pb.TagNumber(6)
+  $core.bool hasFullScale() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearFullScale() => $_clearField(6);
+
+  /// unknown, and no column is then clipped
+  @$pb.TagNumber(7)
+  $pb.PbList<CaptureAnnotation> get annotations => $_getList(6);
+}
+
+/// A SigMF annotation of a recording.
+class CaptureAnnotation extends $pb.GeneratedMessage {
+  factory CaptureAnnotation({
+    $fixnum.Int64? start,
+    $fixnum.Int64? count,
+    $core.String? label,
+    Frame? frame,
+  }) {
+    final result = create();
+    if (start != null) result.start = start;
+    if (count != null) result.count = count;
+    if (label != null) result.label = label;
+    if (frame != null) result.frame = frame;
+    return result;
+  }
+
+  CaptureAnnotation._();
+
+  factory CaptureAnnotation.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory CaptureAnnotation.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'CaptureAnnotation',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
+      createEmptyInstance: create)
+    ..a<$fixnum.Int64>(1, _omitFieldNames ? '' : 'start', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$fixnum.Int64>(2, _omitFieldNames ? '' : 'count', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..aOS(3, _omitFieldNames ? '' : 'label')
+    ..aOM<Frame>(4, _omitFieldNames ? '' : 'frame', subBuilder: Frame.create)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CaptureAnnotation clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CaptureAnnotation copyWith(void Function(CaptureAnnotation) updates) =>
+      super.copyWith((message) => updates(message as CaptureAnnotation))
+          as CaptureAnnotation;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static CaptureAnnotation create() => CaptureAnnotation._();
+  @$core.override
+  CaptureAnnotation createEmptyInstance() => create();
+  static $pb.PbList<CaptureAnnotation> createRepeated() =>
+      $pb.PbList<CaptureAnnotation>();
+  @$core.pragma('dart2js:noInline')
+  static CaptureAnnotation getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<CaptureAnnotation>(create);
+  static CaptureAnnotation? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $fixnum.Int64 get start => $_getI64(0);
+  @$pb.TagNumber(1)
+  set start($fixnum.Int64 value) => $_setInt64(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasStart() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearStart() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $fixnum.Int64 get count => $_getI64(1);
+  @$pb.TagNumber(2)
+  set count($fixnum.Int64 value) => $_setInt64(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasCount() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearCount() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.String get label => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set label($core.String value) => $_setString(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasLabel() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearLabel() => $_clearField(3);
+
+  @$pb.TagNumber(4)
+  Frame get frame => $_getN(3);
+  @$pb.TagNumber(4)
+  set frame(Frame value) => $_setField(4, value);
+  @$pb.TagNumber(4)
+  $core.bool hasFrame() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearFrame() => $_clearField(4);
+  @$pb.TagNumber(4)
+  Frame ensureFrame() => $_ensure(3);
+}
+
+class GetCaptureViewRequest extends $pb.GeneratedMessage {
+  factory GetCaptureViewRequest({
+    $core.String? name,
+    $fixnum.Int64? first,
+    $fixnum.Int64? count,
+    $core.int? columns,
+    $core.bool? iq,
+  }) {
+    final result = create();
+    if (name != null) result.name = name;
+    if (first != null) result.first = first;
+    if (count != null) result.count = count;
+    if (columns != null) result.columns = columns;
+    if (iq != null) result.iq = iq;
+    return result;
+  }
+
+  GetCaptureViewRequest._();
+
+  factory GetCaptureViewRequest.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory GetCaptureViewRequest.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'GetCaptureViewRequest',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
+      createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'name')
+    ..a<$fixnum.Int64>(2, _omitFieldNames ? '' : 'first', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$fixnum.Int64>(3, _omitFieldNames ? '' : 'count', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..aI(4, _omitFieldNames ? '' : 'columns', fieldType: $pb.PbFieldType.OU3)
+    ..aOB(5, _omitFieldNames ? '' : 'iq')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  GetCaptureViewRequest clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  GetCaptureViewRequest copyWith(
+          void Function(GetCaptureViewRequest) updates) =>
+      super.copyWith((message) => updates(message as GetCaptureViewRequest))
+          as GetCaptureViewRequest;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static GetCaptureViewRequest create() => GetCaptureViewRequest._();
+  @$core.override
+  GetCaptureViewRequest createEmptyInstance() => create();
+  static $pb.PbList<GetCaptureViewRequest> createRepeated() =>
+      $pb.PbList<GetCaptureViewRequest>();
+  @$core.pragma('dart2js:noInline')
+  static GetCaptureViewRequest getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<GetCaptureViewRequest>(create);
+  static GetCaptureViewRequest? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get name => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set name($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasName() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearName() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $fixnum.Int64 get first => $_getI64(1);
+  @$pb.TagNumber(2)
+  set first($fixnum.Int64 value) => $_setInt64(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasFirst() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearFirst() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  $fixnum.Int64 get count => $_getI64(2);
+  @$pb.TagNumber(3)
+  set count($fixnum.Int64 value) => $_setInt64(2, value);
+  @$pb.TagNumber(3)
+  $core.bool hasCount() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearCount() => $_clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.int get columns => $_getIZ(3);
+  @$pb.TagNumber(4)
+  set columns($core.int value) => $_setUnsignedInt32(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasColumns() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearColumns() => $_clearField(4);
+
+  @$pb.TagNumber(5)
+  $core.bool get iq => $_getBF(4);
+  @$pb.TagNumber(5)
+  set iq($core.bool value) => $_setBool(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasIq() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearIq() => $_clearField(5);
+}
+
+enum CaptureView_View { columns, samples, notSet }
+
+class CaptureView extends $pb.GeneratedMessage {
+  factory CaptureView({
+    $fixnum.Int64? first,
+    $fixnum.Int64? count,
+    CaptureColumns? columns,
+    CaptureSamples? samples,
+  }) {
+    final result = create();
+    if (first != null) result.first = first;
+    if (count != null) result.count = count;
+    if (columns != null) result.columns = columns;
+    if (samples != null) result.samples = samples;
+    return result;
+  }
+
+  CaptureView._();
+
+  factory CaptureView.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory CaptureView.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static const $core.Map<$core.int, CaptureView_View> _CaptureView_ViewByTag = {
+    3: CaptureView_View.columns,
+    4: CaptureView_View.samples,
+    0: CaptureView_View.notSet
+  };
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'CaptureView',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
+      createEmptyInstance: create)
+    ..oo(0, [3, 4])
+    ..a<$fixnum.Int64>(1, _omitFieldNames ? '' : 'first', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$fixnum.Int64>(2, _omitFieldNames ? '' : 'count', $pb.PbFieldType.OU6,
+        defaultOrMaker: $fixnum.Int64.ZERO)
+    ..aOM<CaptureColumns>(3, _omitFieldNames ? '' : 'columns',
+        subBuilder: CaptureColumns.create)
+    ..aOM<CaptureSamples>(4, _omitFieldNames ? '' : 'samples',
+        subBuilder: CaptureSamples.create)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CaptureView clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CaptureView copyWith(void Function(CaptureView) updates) =>
+      super.copyWith((message) => updates(message as CaptureView))
+          as CaptureView;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static CaptureView create() => CaptureView._();
+  @$core.override
+  CaptureView createEmptyInstance() => create();
+  static $pb.PbList<CaptureView> createRepeated() => $pb.PbList<CaptureView>();
+  @$core.pragma('dart2js:noInline')
+  static CaptureView getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<CaptureView>(create);
+  static CaptureView? _defaultInstance;
+
+  @$pb.TagNumber(3)
+  @$pb.TagNumber(4)
+  CaptureView_View whichView() => _CaptureView_ViewByTag[$_whichOneof(0)]!;
+  @$pb.TagNumber(3)
+  @$pb.TagNumber(4)
+  void clearView() => $_clearField($_whichOneof(0));
+
+  @$pb.TagNumber(1)
+  $fixnum.Int64 get first => $_getI64(0);
+  @$pb.TagNumber(1)
+  set first($fixnum.Int64 value) => $_setInt64(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasFirst() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearFirst() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $fixnum.Int64 get count => $_getI64(1);
+  @$pb.TagNumber(2)
+  set count($fixnum.Int64 value) => $_setInt64(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasCount() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearCount() => $_clearField(2);
+
+  @$pb.TagNumber(3)
+  CaptureColumns get columns => $_getN(2);
+  @$pb.TagNumber(3)
+  set columns(CaptureColumns value) => $_setField(3, value);
+  @$pb.TagNumber(3)
+  $core.bool hasColumns() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearColumns() => $_clearField(3);
+  @$pb.TagNumber(3)
+  CaptureColumns ensureColumns() => $_ensure(2);
+
+  @$pb.TagNumber(4)
+  CaptureSamples get samples => $_getN(3);
+  @$pb.TagNumber(4)
+  set samples(CaptureSamples value) => $_setField(4, value);
+  @$pb.TagNumber(4)
+  $core.bool hasSamples() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearSamples() => $_clearField(4);
+  @$pb.TagNumber(4)
+  CaptureSamples ensureSamples() => $_ensure(3);
+}
+
+/// The span in columns, each a reduction of the samples under it, in the samples' units: a ci16_be recording's
+/// are the integers'. Column c covers the samples from first + floor(c * count / columns) to the next column's
+/// first; read from a summary, it covers the whole buckets that start there, so it may reach up to a bucket
+/// further on either side.
+class CaptureColumns extends $pb.GeneratedMessage {
+  factory CaptureColumns({
+    $core.Iterable<$core.double>? maxPower,
+    $core.Iterable<$core.double>? meanPower,
+    $core.Iterable<$core.int>? clipped,
+    $core.double? samplesPerColumn,
+    $core.int? level,
+  }) {
+    final result = create();
+    if (maxPower != null) result.maxPower.addAll(maxPower);
+    if (meanPower != null) result.meanPower.addAll(meanPower);
+    if (clipped != null) result.clipped.addAll(clipped);
+    if (samplesPerColumn != null) result.samplesPerColumn = samplesPerColumn;
+    if (level != null) result.level = level;
+    return result;
+  }
+
+  CaptureColumns._();
+
+  factory CaptureColumns.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory CaptureColumns.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'CaptureColumns',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
+      createEmptyInstance: create)
+    ..p<$core.double>(1, _omitFieldNames ? '' : 'maxPower', $pb.PbFieldType.KF)
+    ..p<$core.double>(2, _omitFieldNames ? '' : 'meanPower', $pb.PbFieldType.KF)
+    ..p<$core.int>(3, _omitFieldNames ? '' : 'clipped', $pb.PbFieldType.KU3)
+    ..aD(4, _omitFieldNames ? '' : 'samplesPerColumn')
+    ..aI(5, _omitFieldNames ? '' : 'level', fieldType: $pb.PbFieldType.OU3)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CaptureColumns clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CaptureColumns copyWith(void Function(CaptureColumns) updates) =>
+      super.copyWith((message) => updates(message as CaptureColumns))
+          as CaptureColumns;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static CaptureColumns create() => CaptureColumns._();
+  @$core.override
+  CaptureColumns createEmptyInstance() => create();
+  static $pb.PbList<CaptureColumns> createRepeated() =>
+      $pb.PbList<CaptureColumns>();
+  @$core.pragma('dart2js:noInline')
+  static CaptureColumns getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<CaptureColumns>(create);
+  static CaptureColumns? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $pb.PbList<$core.double> get maxPower => $_getList(0);
+
+  @$pb.TagNumber(2)
+  $pb.PbList<$core.double> get meanPower => $_getList(1);
+
+  @$pb.TagNumber(3)
+  $pb.PbList<$core.int> get clipped => $_getList(2);
+
+  @$pb.TagNumber(4)
+  $core.double get samplesPerColumn => $_getN(3);
+  @$pb.TagNumber(4)
+  set samplesPerColumn($core.double value) => $_setDouble(3, value);
+  @$pb.TagNumber(4)
+  $core.bool hasSamplesPerColumn() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearSamplesPerColumn() => $_clearField(4);
+
+  @$pb.TagNumber(5)
+  $core.int get level => $_getIZ(4);
+  @$pb.TagNumber(5)
+  set level($core.int value) => $_setUnsignedInt32(4, value);
+  @$pb.TagNumber(5)
+  $core.bool hasLevel() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearLevel() => $_clearField(5);
+}
+
+/// The span's samples, in their own units: a ci16_be recording's are the integers'.
+class CaptureSamples extends $pb.GeneratedMessage {
+  factory CaptureSamples({
+    $core.Iterable<$core.double>? values,
+    $core.bool? iq,
+  }) {
+    final result = create();
+    if (values != null) result.values.addAll(values);
+    if (iq != null) result.iq = iq;
+    return result;
+  }
+
+  CaptureSamples._();
+
+  factory CaptureSamples.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromBuffer(data, registry);
+  factory CaptureSamples.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      create()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'CaptureSamples',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'adsb.api.v1'),
+      createEmptyInstance: create)
+    ..p<$core.double>(1, _omitFieldNames ? '' : 'values', $pb.PbFieldType.KF)
+    ..aOB(2, _omitFieldNames ? '' : 'iq')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CaptureSamples clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  CaptureSamples copyWith(void Function(CaptureSamples) updates) =>
+      super.copyWith((message) => updates(message as CaptureSamples))
+          as CaptureSamples;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static CaptureSamples create() => CaptureSamples._();
+  @$core.override
+  CaptureSamples createEmptyInstance() => create();
+  static $pb.PbList<CaptureSamples> createRepeated() =>
+      $pb.PbList<CaptureSamples>();
+  @$core.pragma('dart2js:noInline')
+  static CaptureSamples getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<CaptureSamples>(create);
+  static CaptureSamples? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $pb.PbList<$core.double> get values => $_getList(0);
+
+  /// for each, interleaved
+  @$pb.TagNumber(2)
+  $core.bool get iq => $_getBF(1);
+  @$pb.TagNumber(2)
+  set iq($core.bool value) => $_setBool(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasIq() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearIq() => $_clearField(2);
 }
 
 class GetSnapshotRequest extends $pb.GeneratedMessage {
@@ -3232,6 +3988,20 @@ class ReceiverApi {
           $pb.ClientContext? ctx, ListCapturesRequest request) =>
       _client.invoke<ListCapturesResponse>(
           ctx, 'Receiver', 'ListCaptures', request, ListCapturesResponse());
+
+  /// Makes sure a recording has a current summary for GetCaptureView's coarse views, building it if it has none or
+  /// a stale one, reporting the build's progress; ends with what a plot of the recording needs. Two calls on one
+  /// recording share a build.
+  $async.Future<OpenCaptureProgress> openCapture(
+          $pb.ClientContext? ctx, OpenCaptureRequest request) =>
+      _client.invoke<OpenCaptureProgress>(
+          ctx, 'Receiver', 'OpenCapture', request, OpenCaptureProgress());
+
+  /// One view of a recording: a span of it reduced to columns, or its samples once a column is 4 or fewer.
+  $async.Future<CaptureView> getCaptureView(
+          $pb.ClientContext? ctx, GetCaptureViewRequest request) =>
+      _client.invoke<CaptureView>(
+          ctx, 'Receiver', 'GetCaptureView', request, CaptureView());
 }
 
 /// The history database. Served with --history-db.

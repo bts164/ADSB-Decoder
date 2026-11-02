@@ -8,6 +8,7 @@ struct SigmfMeta {
     std::optional<std::string> datatype;   ///< global core:datatype, e.g. "cf32_le"
     std::optional<double> sample_rate_hz;  ///< global core:sample_rate
     std::optional<double> frequency_hz;    ///< the first capture's core:frequency
+    std::optional<double> full_scale;      ///< global adsb:full_scale, which adsb's own cf32 captures carry
 };
 
 /**

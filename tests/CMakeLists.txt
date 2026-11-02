@@ -44,6 +44,11 @@ target_include_directories(wsrpc_test PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 target_link_libraries(wsrpc_test PRIVATE adsb_wsrpc)
 add_test(NAME wsrpc_test COMMAND wsrpc_test)
 
+# The recording viewer's summary and view reduction (capture_summary.h), against a brute-force reduction.
+add_executable(capture_summary_test capture_summary_test.cpp)
+target_link_libraries(capture_summary_test PRIVATE adsb_output)
+add_test(NAME capture_summary_test COMMAND capture_summary_test)
+
 # The UI API server's tests, as a WebSocket client sees it.
 add_executable(api_server_test api_server_test.cpp)
 target_link_libraries(api_server_test PRIVATE adsb_output SQLite::SQLite3)

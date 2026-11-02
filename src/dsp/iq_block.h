@@ -24,6 +24,23 @@
  * it.
  */
 
+namespace iq {
+
+/**
+ * A block's sample buffer in format F: a (samples, 2) array, one row per sample with I in column 0 and Q in
+ * column 1. Tagged by the format and not just by `F::Sample`, so two formats that store the same type (a
+ * native and a big-endian int16, say) stay distinct.
+ */
+template<class F>
+struct Samples {
+    xt::xtensor<typename F::Sample, 2> data;
+};
+
+/** A sample buffer in any one of iq::Formats. */
+using SamplesVariant = Formats::Each<Samples>;
+
+}  // namespace iq
+
 /** Guard padding, in samples, around a block's real samples. demod_padding() gives the sizes it needs. */
 struct IqPadding {
     int lead = 0;   /**< samples before the first real sample */

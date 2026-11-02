@@ -659,8 +659,6 @@ void SidekiqStreamParams::add_options(argparse::ArgumentParser& cmd) {
         "RF preselect filter, by its passband in MHz such as 810-1170 (default: libsidekiq's choice for --freq; "
         "the log names it and the others)");
     cmd.add_argument("--freq").scan<'g', double>().default_value(1090e6).help("center frequency in Hz to tune to");
-    cmd.add_argument("--gpsd").default_value(std::string(SidekiqStreamParams::kDefaultGpsd)).help(
-        "host:port of the gpsd to read the receiver's position from, or none for no GPS");
 }
 
 SidekiqStreamParams SidekiqStreamParams::from_options(const argparse::ArgumentParser& /*program*/,
@@ -679,20 +677,6 @@ SidekiqStreamParams SidekiqStreamParams::from_options(const argparse::ArgumentPa
         gain_index = index;
     }
 
-    const std::string gpsd = cmd.get<std::string>("--gpsd");
-    std::optional<GpsdAddress> gpsd_address;
-    if (gpsd != "none") {
-        const size_t colon = gpsd.rfind(':');
-        uint16_t port = 0;
-        const char* port_end = gpsd.data() + gpsd.size();
-        const auto [end, ec] =
-            colon == std::string::npos ? std::from_chars_result{nullptr, std::errc::invalid_argument}
-                                       : std::from_chars(gpsd.data() + colon + 1, port_end, port);
-        if (colon == 0 || ec != std::errc{} || end != port_end || port == 0)
-            throw std::runtime_error("--gpsd must be host:port or none, not " + gpsd);
-        gpsd_address = GpsdAddress{.host = gpsd.substr(0, colon), .port = port};
-    }
-
     return {
         .lib_path = cmd.get<std::string>("--lib"),
         .card = cmd.get<int>("--card"),
@@ -703,6 +687,5 @@ SidekiqStreamParams SidekiqStreamParams::from_options(const argparse::ArgumentPa
         .freq_hz = cmd.get<double>("--freq"),
         .gain_index = gain_index,
         .preselect_filter = cmd.present<std::string>("--preselect-filter"),
-        .gpsd = std::move(gpsd_address),
     };
 }

@@ -365,6 +365,7 @@ inactive end of each, its `PipelineOutputs`; a call activates one for itself.
 | `--ws-interval` | 1.0 | Seconds between a subscription's live updates, unless it asks for another interval |
 | `--history-db` | off | SQLite file recording every aircraft update, for the UI's time scrubber |
 | `--capture-dir` | off | With `--ws-port`, the capture directory to start with: `capture` calls record the input IQ or the demodulator's envelope as SigMF into it. A client can change it, or turn captures off and on (see [WebSocket](#websocket)) |
+| `--gpsd` | none; `sidekiq`: the X40's own `gpsd` | `host:port` of the `gpsd` to read the receiver's position from, whatever the source, or `none` for no GPS (see [doc/design/gps.md](doc/design/gps.md)) |
 | `--debug-h5` | off | Write every decoded frame, with its IQ and everything needed to rerun the demodulator, to this HDF5 file (see [Debug HDF5](#debug-hdf5)). Not in a build without `ADSB_WITH_HDF5`. |
 | `--debug-h5-failed-only` | | With `--debug-h5`, record only frames that fail CRC (not unchecked ones) |
 | `--log-level` | info | Least severe log message written to stderr: `info`, `warning`, `error`, `fatal`, or `none` |
@@ -900,6 +901,9 @@ The `Receiver` service:
     - Samples the writer falls behind on are dropped, not waited for, so the
       demodulator never slows. Each gap starts a new SigMF capture segment,
       at the `core:global_index` where the samples resume, and is logged.
+    - Every frame decoded in it, CRC failures too, is a SigMF annotation in
+      its `.sigmf-meta`, with the frame's fields as `adsb:` ones, so the
+      capture ends a block or two after its last sample.
 
 A `Frame` is sent for every frame. Besides the frame itself it has:
 
@@ -1194,8 +1198,8 @@ short:
 Usage:
 
 ```sh
-vita49_send [--dest-host H] --dest-port P [--stream-id N] [--context-interval s]
-            [--stream-rate Hz] [--stream-format i16be|f32be] [--samples-per-packet N]
+vita49_send [--dest-host H [--broadcast]] --dest-port P [--stream-id N] [--context-interval s]
+            [--stream-rate Hz] [--stream-format ci16_be|cf32_be] [--samples-per-packet N]
             {file|vita49|rtlsdr|sidekiq|uhd|sim} [source options]
 ```
 
@@ -1205,11 +1209,12 @@ vita49_send [--dest-host H] --dest-port P [--stream-id N] [--context-interval s]
 | Option | Default |
 |---|---|
 | `--dest-host` | 127.0.0.1 |
+| `--broadcast` | off: a broadcast `--dest-host` is refused |
 | `--stream-id` | 1 |
 | `--context-interval` | 1 s |
 | `--stream-rate` | the source's rate, not filtered |
-| `--stream-format` | `i16be` |
-| `--samples-per-packet` | 360 for `i16be`, 180 for `f32be` |
+| `--stream-format` | `ci16_be` |
+| `--samples-per-packet` | 360 for `ci16_be`, 180 for `cf32_be` |
 
 It also takes `adsb`'s log options (`--log-level`, `--log-file`,
 `--log-file-level`, `--verbosity`).
@@ -1221,7 +1226,12 @@ It also takes `adsb`'s log options (`--log-level`, `--log-file`,
   jitter.
 - **Payload format.** The context packets carry the Data Payload Format
   field. `--no-payload-format` leaves it out, for a receiver that doesn't
-  take it, and goes only with `i16be`.
+  take it, and goes only with `ci16_be`.
+- **Broadcast.** `--broadcast` lets `--dest-host` be a subnet's broadcast
+  address, which every host on the subnet receives, the sender's own too: an
+  `adsb vita49` beside `vita49_send` and another application across the link
+  can share one stream. Without it the kernel refuses that address, so a
+  mistyped one can't flood a network.
 
 ```mermaid
 flowchart LR
@@ -1292,7 +1302,7 @@ context packets advertise the source's frequency.
   `--stream-kaiser-beta` design it. By default it has about
   20 × r_in / r_out taps and a Kaiser window, with its cutoff at 0.4 of the
   stream rate. Both rates must be whole numbers of Hz.
-- **Scale.** Full scale maps to full scale. An `i16be` output that saturates
+- **Scale.** Full scale maps to full scale. A `ci16_be` output that saturates
   is counted and logged.
 - **Gaps.** Samples missing from the source's stream end the packet being
   filled short. The timestamps and packet counter move past them, so a

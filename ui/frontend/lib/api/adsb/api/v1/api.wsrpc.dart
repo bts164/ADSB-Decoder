@@ -56,6 +56,16 @@ class ReceiverClient {
   /// The recordings in the capture directory: every .sigmf-data there, whoever wrote it.
   $wsrpc.UnaryCall<ListCapturesResponse> listCaptures(ListCapturesRequest request) =>
       _channel.unary('/adsb.api.v1.Receiver/ListCaptures', request, ListCapturesResponse.fromBuffer);
+
+  /// Makes sure a recording has a current summary for GetCaptureView's coarse views, building it if it has none or
+  /// a stale one, reporting the build's progress; ends with what a plot of the recording needs. Two calls on one
+  /// recording share a build.
+  $async.Stream<OpenCaptureProgress> openCapture(OpenCaptureRequest request) =>
+      _channel.serverStreaming('/adsb.api.v1.Receiver/OpenCapture', request, OpenCaptureProgress.fromBuffer);
+
+  /// One view of a recording: a span of it reduced to columns, or its samples once a column is 4 or fewer.
+  $wsrpc.UnaryCall<CaptureView> getCaptureView(GetCaptureViewRequest request) =>
+      _channel.unary('/adsb.api.v1.Receiver/GetCaptureView', request, CaptureView.fromBuffer);
 }
 
 /// The history database. Served with --history-db.

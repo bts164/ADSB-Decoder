@@ -103,12 +103,12 @@ Assembler::Kind Assembler::push(std::span<const uint8_t> d) {
         // Without the field the payload is taken as int16, which is what a sender that leaves it out
         // (vita49_send --no-payload-format) sends.
         if (ctx->payload_format &&
-            (*ctx->payload_format & kPayloadFormatItemMask) != payload_format_word(PayloadFormat::i16)) {
+            (*ctx->payload_format & kPayloadFormatItemMask) != payload_format_word<iq::I16Be>()) {
             char word[16];
             std::snprintf(word, sizeof word, "0x%08x", *ctx->payload_format);
             throw std::runtime_error(std::string("the stream's payload is not 16-bit complex I/Q (Data Payload "
                                                  "Format ") + word + "); only that is received (vita49_send "
-                                     "--stream-format i16be)");
+                                     "--stream-format ci16_be)");
         }
         return Kind::Context;
     }

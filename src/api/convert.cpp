@@ -66,7 +66,8 @@ api::Aircraft to_proto(const AircraftState& s) {
 api::Frame to_proto(const DecodedFrameView& v, std::string summary) {
     api::Frame f;
     f.set_idx(v.idx);
-    f.set_bits(v.num_bits);
+    // The demodulator slices 112 bits for every frame; a short reply is the leading 56 of them.
+    f.set_bits(v.df == 0 || v.df == 4 || v.df == 5 || v.df == 11 ? 56 : 112);
     f.set_confidence(v.confidence);
     f.set_df(v.df);
     if (v.icao_known) f.set_icao(v.icao);
@@ -75,7 +76,7 @@ api::Frame to_proto(const DecodedFrameView& v, std::string summary) {
     if (v.fixed_bit >= 0) f.set_crc_fixed_bit(static_cast<uint32_t>(v.fixed_bit));
     // The frame's first bit is bit 111 of `payload`, for short frames too.
     std::string& payload = *f.mutable_payload();
-    payload.resize(v.num_bits / 8);
+    payload.resize(f.bits() / 8);
     for (size_t i = 0; i < payload.size(); i++)
         payload[i] = static_cast<char>(static_cast<uint8_t>(v.payload >> (104 - 8 * i)));
     f.set_summary(std::move(summary));

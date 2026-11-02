@@ -302,9 +302,17 @@ coro::Coro<uint64_t> run_stages(Stages stages, coro::CoroStream<IqBuffer> stream
                     handle_frame(tracker, f, rate_hz, start_unix_s, publish_frames ? &frames : nullptr, &aircraft);
                 if (b->snapshot) views.push_back(v);
             }
-            // Fails only with no client to receive it, which is fine.
-            if (!frames.empty())
-                (void)stages.frames.send(std::make_shared<const std::vector<api::Frame>>(std::move(frames)));
+            // Every block, with or without frames, so a capture knows when the decoding has passed its end. Fails
+            // only with no client to receive it, which is fine.
+            if (publish_frames) {
+                std::vector<uint64_t> envelope_index;
+                envelope_index.reserve(b->frames.size());
+                // handle_frame() publishes one Frame per AdsbFrame, so these line up with `frames`.
+                for (const AdsbFrame& f : b->frames)
+                    envelope_index.push_back(b->envelope_start + static_cast<uint64_t>(f.output_index));
+                (void)stages.frames.send(std::make_shared<const FrameBlock>(FrameBlock{
+                    b->start + b->n, b->envelope_end, std::move(frames), std::move(envelope_index)}));
+            }
             if (!aircraft.empty()) {
                 auto live = stages.aircraft.borrow_mut();
                 for (const api::Aircraft& ac : aircraft) (*live)[ac.icao()] = ac;
@@ -346,8 +354,9 @@ coro::Coro<uint64_t> run_stages(Stages stages, coro::CoroStream<IqBuffer> stream
 
 }  // namespace
 
-DemodPipeline demod_pipeline(FilterBank filter, double rate_hz, double freq_hz, coro::CoroStream<IqBuffer> stream,
-                             DemodLoopParams params, std::optional<AircraftHistory> history) {
+DemodPipeline demod_pipeline(FilterBank filter, double rate_hz, double freq_hz, std::optional<double> full_scale,
+                             coro::CoroStream<IqBuffer> stream, DemodLoopParams params,
+                             std::optional<AircraftHistory> history) {
     // Each channel's own receiver is dropped here: the outputs hold inactive ones, which don't count.
     auto [frames, frames_rx] = coro::broadcast_channel<LiveFrames>(kLiveQueueItems);
     auto [aircraft, aircraft_rx] = coro::watch_channel(LiveAircraft{});
@@ -361,8 +370,8 @@ DemodPipeline demod_pipeline(FilterBank filter, double rate_hz, double freq_hz, 
         .spectrum = spectrum.inactive(),
         .input = input.inactive(),
         .envelope = envelope.inactive(),
-        .input_point = {"input", "capture input missing", rate_hz, freq_hz},
-        .envelope_point = {"envelope", "capture envelope missing", demod_output_rate_hz(), {}},
+        .input_point = {"input", "capture input missing", rate_hz, false, freq_hz, full_scale},
+        .envelope_point = {"envelope", "capture envelope missing", demod_output_rate_hz(), true, {}},
     };
     // A coroutine starts suspended, so nothing runs until the caller spawns it.
     coro::Coro<uint64_t> run = run_stages(

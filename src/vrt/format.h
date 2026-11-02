@@ -4,9 +4,14 @@
 // use, as this project profiles it: see doc/design/vita49-format.md. Every packet has a Stream ID, no Class
 // ID, no Trailer, and UTC + picosecond timestamps; every word is big-endian, the I/Q payload included.
 
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
+#include <variant>
+
+#include "dsp/iq_format.h"
 
 namespace vrt {
 
@@ -26,19 +31,33 @@ constexpr uint32_t kCifRfReferenceFrequency = 1u << 27;
 constexpr uint32_t kCifSampleRate = 1u << 21;
 constexpr uint32_t kCifDataPayloadFormat = 1u << 15;
 
-// The data payloads this profile sends: complex Cartesian I/Q, each component a 16-bit signed integer or a
-// 32-bit IEEE float, big-endian.
-enum class PayloadFormat { i16, f32 };
+// The data payloads this profile sends are iq::OutputFormats (dsp/iq_format.h): complex Cartesian I/Q, each
+// component a 16-bit signed integer or a 32-bit IEEE float, big-endian.
 
-// 32-bit words per I/Q pair.
-constexpr size_t payload_words_per_sample(PayloadFormat format) { return format == PayloadFormat::i16 ? 1 : 2; }
+// 32-bit words per I/Q pair in format F.
+template <class F>
+constexpr size_t payload_words_per_sample() {
+    static_assert(iq::bytes_per_sample<F>() % 4 == 0, "a sample fills whole 32-bit words");
+    return iq::bytes_per_sample<F>() / 4;
+}
+constexpr size_t payload_words_per_sample(const iq::OutputFormat& format) {
+    return std::visit([]<class F>(F) { return payload_words_per_sample<F>(); }, format);
+}
 
-// The Data Payload Format field's first word for `format`; its second word is 0 (no repeats, a vector size of 1).
+// The Data Payload Format field's first word for format F; its second word is 0 (no repeats, a vector size of 1).
 // Bits 30-29 are 01 for complex Cartesian, bits 28-24 the item format (0 signed fixed point, 0x0E IEEE single),
 // bits 11-6 the packing field size - 1 and bits 5-0 the item size - 1. Bit 31 is 0, processing-efficient
 // packing, which is the same for items that fill their 32-bit words.
-constexpr uint32_t payload_format_word(PayloadFormat format) {
-    return format == PayloadFormat::i16 ? (1u << 29) | (15u << 6) | 15u : (1u << 29) | (0x0Eu << 24) | (31u << 6) | 31u;
+template <class F>
+constexpr uint32_t payload_format_word() {
+    constexpr uint32_t bits = 8 * sizeof(typename F::Sample);
+    static_assert(F::byte_order == std::endian::big, "every word is big-endian");
+    static_assert(F::integer ? std::is_signed_v<typename F::Sample> : bits == 32,
+                  "the item formats are signed fixed point and IEEE single");
+    return (F::complex ? 1u << 29 : 0) | (F::integer ? 0 : 0x0Eu << 24) | ((bits - 1) << 6) | (bits - 1);
+}
+constexpr uint32_t payload_format_word(const iq::OutputFormat& format) {
+    return std::visit([]<class F>(F) { return payload_format_word<F>(); }, format);
 }
 // The bits of that word payload_format_word() sets: the rest (packing, tags, the fixed-point radix point) don't
 // change how the items are read.

@@ -418,13 +418,29 @@ class _CapturesDialogState extends State<_CapturesDialog> {
           dense: true,
           title: Text(f.name),
           subtitle: Text(_describe(f)),
-          trailing: IconButton(
-            icon: const Icon(Icons.copy, size: 18),
-            tooltip: 'Copy $path',
-            onPressed: () {
-              Clipboard.setData(ClipboardData(text: path));
-              ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Copied $path')));
-            },
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // The server reads a recording's rate and datatype from its .sigmf-meta.
+              if (f.hasMeta())
+                IconButton(
+                  icon: const Icon(Icons.show_chart, size: 18),
+                  tooltip: 'View ${f.name}',
+                  onPressed: () => showDialog<void>(
+                    context: context,
+                    builder: (context) =>
+                        _CaptureViewerDialog(client: widget.client, settings: widget.settings, name: f.name),
+                  ),
+                ),
+              IconButton(
+                icon: const Icon(Icons.copy, size: 18),
+                tooltip: 'Copy $path',
+                onPressed: () {
+                  Clipboard.setData(ClipboardData(text: path));
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Copied $path')));
+                },
+              ),
+            ],
           ),
         );
       },

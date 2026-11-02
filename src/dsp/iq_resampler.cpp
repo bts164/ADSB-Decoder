@@ -47,7 +47,7 @@ IqResampler::IqResampler(FilterBank filter, uint32_t input_rate_hz, uint32_t out
       m_input_rate_hz(input_rate_hz),
       m_output_rate_hz(output_rate_hz),
       m_format(format),
-      m_sample_bytes(std::visit([]<class G>(G) { return 2 * sizeof(typename G::Sample); }, format)) {
+      m_sample_bytes(std::visit([]<class G>(G) { return iq::bytes_per_sample<G>(); }, format)) {
     if (input_rate_hz == 0 || output_rate_hz == 0) throw std::invalid_argument("IqResampler: rates must be positive");
     // Output m's tap window is [base - lead, base - lead + kernel_stride / 2), and base is at most n (see the
     // centring below), so the trail covers the window of an output at the block's last sample.
